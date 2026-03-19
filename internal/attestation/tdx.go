@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 
 	tdxabi "github.com/google/go-tdx-guest/abi"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
@@ -39,8 +40,8 @@ type TDXVerifyResult struct {
 	// TeeTCBSVN is the raw 16-byte TEE_TCB_SVN field for TCB currency checks.
 	TeeTCBSVN []byte
 
-	// quote is the successfully parsed QuoteV4, kept for downstream use.
-	quote *pb.QuoteV4
+	// quote is the successfully parsed quote proto (QuoteV4 or QuoteV5).
+	quote any
 }
 
 // tdxDebugBit is bit 0 of byte 0 of TD_ATTRIBUTES. When set the TD is in
@@ -70,34 +71,56 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 		}
 	}
 
-	// Parse raw bytes into a QuoteV4 proto.
+	slog.Debug("TDX quote decoded", "raw_bytes", len(raw))
+
+	// Parse raw bytes into a QuoteV4 or QuoteV5 proto.
 	quoteAny, err := tdxabi.QuoteToProto(raw)
 	if err != nil {
 		result.ParseErr = fmt.Errorf("TDX quote parse failed: %w", err)
 		return result
 	}
-	quote, ok := quoteAny.(*pb.QuoteV4)
-	if !ok {
-		result.ParseErr = fmt.Errorf("unexpected quote type %T (expected *pb.QuoteV4)", quoteAny)
-		return result
-	}
-	result.quote = quote
+	result.quote = quoteAny
 
-	// Extract TD quote body fields.
-	body := quote.GetTdQuoteBody()
-	if body == nil {
-		result.ParseErr = fmt.Errorf("TDX quote body is nil after parse")
+	// Extract common fields from whichever quote version we got.
+	var reportData, tdAttrs, teeTCBSVN []byte
+	switch q := quoteAny.(type) {
+	case *pb.QuoteV4:
+		slog.Debug("TDX quote version", "version", 4)
+		body := q.GetTdQuoteBody()
+		if body == nil {
+			result.ParseErr = fmt.Errorf("TDX QuoteV4 body is nil after parse")
+			return result
+		}
+		reportData = body.GetReportData()
+		tdAttrs = body.GetTdAttributes()
+		teeTCBSVN = body.GetTeeTcbSvn()
+	case *pb.QuoteV5:
+		slog.Debug("TDX quote version", "version", 5)
+		desc := q.GetTdQuoteBodyDescriptor()
+		if desc == nil {
+			result.ParseErr = fmt.Errorf("TDX QuoteV5 body descriptor is nil after parse")
+			return result
+		}
+		body := desc.GetTdQuoteBodyV5()
+		if body == nil {
+			result.ParseErr = fmt.Errorf("TDX QuoteV5 body is nil after parse")
+			return result
+		}
+		reportData = body.GetReportData()
+		tdAttrs = body.GetTdAttributes()
+		teeTCBSVN = body.GetTeeTcbSvn()
+	default:
+		result.ParseErr = fmt.Errorf("unexpected quote type %T", quoteAny)
 		return result
 	}
 
 	// Extract REPORTDATA (64 bytes).
-	copy(result.ReportData[:], body.GetReportData())
+	copy(result.ReportData[:], reportData)
 
 	// Extract TEE_TCB_SVN.
-	result.TeeTCBSVN = body.GetTeeTcbSvn()
+	result.TeeTCBSVN = teeTCBSVN
 
 	// Factor 6: debug flag. TD_ATTRIBUTES is 8 bytes; bit 0 of byte 0 is debug.
-	tdAttrs := body.GetTdAttributes()
 	if len(tdAttrs) > 0 && (tdAttrs[0]&tdxDebugBit) != 0 {
 		result.DebugEnabled = true
 	}
@@ -110,7 +133,7 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 		GetCollateral:    false,
 		CheckRevocations: false,
 	}
-	if verifyErr := tdxverify.TdxQuote(quote, opts); verifyErr != nil {
+	if verifyErr := tdxverify.TdxQuote(quoteAny, opts); verifyErr != nil {
 		// The verify library does cert chain + signature in one call.
 		// Record both as failed; they share the same root cause.
 		result.CertChainErr = verifyErr

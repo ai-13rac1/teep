@@ -12,7 +12,7 @@ package config
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -122,8 +122,7 @@ func Load() (*Config, error) {
 // is readable by group or world.
 func loadTOML(cfg *Config, path string) error {
 	if err := checkFilePermissions(path); err != nil {
-		// Permission check failure is a warning, not a hard error.
-		log.Printf("WARNING: config file permission check: %v", err)
+		slog.Warn("config file permission check", "err", err)
 	}
 
 	var f tomlFile
@@ -223,12 +222,12 @@ func warnNonLoopback(addr string) {
 	if err != nil {
 		// Unparseable address — warn rather than crash; server startup will
 		// catch the real error.
-		log.Printf("WARNING: cannot parse listen address %q: %v", addr, err)
+		slog.Warn("cannot parse listen address", "addr", addr, "err", err)
 		return
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		log.Printf("WARNING: listen address %q is not a loopback address; proxy is reachable from the network", addr)
+		slog.Warn("listen address is not loopback; proxy is reachable from the network", "addr", addr)
 	}
 }
 

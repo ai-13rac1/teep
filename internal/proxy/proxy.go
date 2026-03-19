@@ -26,8 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"net"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -97,11 +96,8 @@ func New(cfg *config.Config) *Server {
 
 	for name, cp := range cfg.Providers {
 		s.providers[name] = fromConfig(cp)
-		log.Printf("proxy: registered provider %q base_url=%s api_key=%s e2ee=%v models=%d",
-			name, cp.BaseURL, config.RedactKey(cp.APIKey), cp.E2EE, len(cp.ModelMap))
+		slog.Info("registered provider", "provider", name, "base_url", cp.BaseURL, "api_key", config.RedactKey(cp.APIKey), "e2ee", cp.E2EE, "models", len(cp.ModelMap))
 	}
-
-	warnNonLoopback(cfg.ListenAddr)
 
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
@@ -118,7 +114,7 @@ func (s *Server) ListenAndServe() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("teep proxy listening on %s", s.cfg.ListenAddr)
+	slog.Info("teep proxy listening", "addr", s.cfg.ListenAddr)
 	return srv.ListenAndServe()
 }
 
@@ -148,19 +144,6 @@ func fromConfig(cp *config.Provider) *provider.Provider {
 	return p
 }
 
-// warnNonLoopback logs a warning if addr is not a loopback address.
-func warnNonLoopback(addr string) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		log.Printf("WARNING: proxy: cannot parse listen address %q: %v", addr, err)
-		return
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		log.Printf("WARNING: proxy: listen address %q is not a loopback address; proxy is reachable from the network", addr)
-	}
-}
-
 // resolveModel finds the provider and upstream model name for a client model.
 // It returns (nil, "", false) when no provider has the model.
 func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, bool) {
@@ -188,7 +171,7 @@ func reportdataBindingPassed(report *attestation.VerificationReport) bool {
 // negative cache. Returns nil on fetch error.
 func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, upstreamModel string) *attestation.VerificationReport {
 	if prov.Attester == nil {
-		log.Printf("proxy: provider %q has no Attester; cannot fetch attestation for %q", prov.Name, upstreamModel)
+		slog.Error("provider has no Attester", "provider", prov.Name, "model", upstreamModel)
 		s.negCache.Record(prov.Name, upstreamModel)
 		return nil
 	}
@@ -196,7 +179,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	nonce := attestation.NewNonce()
 	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 	if err != nil {
-		log.Printf("proxy: attestation fetch failed for %s/%s: %v", prov.Name, upstreamModel, err)
+		slog.Error("attestation fetch failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		s.negCache.Record(prov.Name, upstreamModel)
 		return nil
 	}
@@ -270,7 +253,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	upstreamBody, session, err := s.buildUpstreamBody(r.Context(), body, req, upstreamModel, e2eeActive, prov)
 	if err != nil {
-		log.Printf("proxy: build upstream body for %s/%s: %v", prov.Name, upstreamModel, err)
+		slog.Error("build upstream body failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, "failed to prepare upstream request", http.StatusInternalServerError)
 		return
 	}
@@ -293,14 +276,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.Header.Set("Content-Type", "application/json")
 
 	if err := prepareUpstreamHeaders(upstreamReq, prov, session); err != nil {
-		log.Printf("proxy: PrepareRequest for %s: %v", prov.Name, err)
+		slog.Error("PrepareRequest failed", "provider", prov.Name, "err", err)
 		http.Error(w, "failed to prepare upstream request headers", http.StatusInternalServerError)
 		return
 	}
 
 	resp, err := s.upstreamClient.Do(upstreamReq)
 	if err != nil {
-		log.Printf("proxy: upstream request to %s/%s failed: %v", prov.Name, upstreamModel, err)
+		slog.Error("upstream request failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
@@ -336,7 +319,7 @@ func (s *Server) buildUpstreamBody(
 ) ([]byte, *attestation.Session, error) {
 	if !e2eeActive {
 		if prov.E2EE {
-			log.Printf("WARNING: proxy: E2EE disabled for %s/%s — tdx_reportdata_binding not verified; forwarding plaintext over HTTPS", prov.Name, upstreamModel)
+			slog.Warn("E2EE disabled — tdx_reportdata_binding not verified; forwarding plaintext over HTTPS", "provider", prov.Name, "model", upstreamModel)
 		}
 		rewritten, err := rewriteModelField(rawBody, upstreamModel)
 		if err != nil {
@@ -514,7 +497,7 @@ func (s *Server) relayStream(w http.ResponseWriter, body io.Reader, session *att
 		// E2EE path: parse the JSON and decrypt the content field.
 		decrypted, err := decryptSSEChunk(data, session)
 		if err != nil {
-			log.Printf("proxy: stream decryption failed: %v", err)
+			slog.Error("stream decryption failed", "err", err)
 			// Abort: do not emit any plaintext.
 			fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
 			flusher.Flush()
@@ -526,7 +509,7 @@ func (s *Server) relayStream(w http.ResponseWriter, body io.Reader, session *att
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("proxy: SSE scanner error: %v", err)
+		slog.Error("SSE scanner error", "err", err)
 	}
 }
 
@@ -548,7 +531,7 @@ func (s *Server) relayNonStream(w http.ResponseWriter, body io.Reader, session *
 
 	decrypted, err := decryptNonStreamResponse(responseBody, session)
 	if err != nil {
-		log.Printf("proxy: non-stream decryption failed: %v", err)
+		slog.Error("non-stream decryption failed", "err", err)
 		http.Error(w, "response decryption failed", http.StatusBadGateway)
 		return
 	}

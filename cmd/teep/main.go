@@ -11,10 +11,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -30,6 +32,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse --log-level before the subcommand. It can appear anywhere in os.Args.
+	level := parseLogLevel(os.Args[1:])
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 	switch os.Args[1] {
 	case "serve":
 		runServe(os.Args[2:])
@@ -44,13 +50,45 @@ func main() {
 	}
 }
 
+// parseLogLevel extracts --log-level from args and returns the corresponding
+// slog.Level. Defaults to slog.LevelInfo.
+func parseLogLevel(args []string) slog.Level {
+	for i, arg := range args {
+		var val string
+		if arg == "--log-level" && i+1 < len(args) {
+			val = args[i+1]
+		} else if strings.HasPrefix(arg, "--log-level=") {
+			val = strings.TrimPrefix(arg, "--log-level=")
+		} else {
+			continue
+		}
+		switch strings.ToLower(val) {
+		case "debug":
+			return slog.LevelDebug
+		case "info":
+			return slog.LevelInfo
+		case "warn":
+			return slog.LevelWarn
+		case "error":
+			return slog.LevelError
+		default:
+			fmt.Fprintf(os.Stderr, "teep: unknown log level %q (valid: debug, info, warn, error)\n", val)
+			os.Exit(1)
+		}
+	}
+	return slog.LevelInfo
+}
+
 // usage prints a brief help message to stderr.
 func usage() {
 	fmt.Fprintf(os.Stderr, `teep — TEE proxy and attestation verifier
 
 Usage:
-  teep serve                              Start the HTTP proxy server.
-  teep verify --provider NAME --model M  Fetch and print attestation report.
+  teep serve [--log-level LEVEL]                              Start the HTTP proxy server.
+  teep verify --provider NAME --model M [--log-level LEVEL]  Fetch and print attestation report.
+
+Flags:
+  --log-level LEVEL  Set log verbosity: debug, info, warn, error (default: info).
 
 Environment variables:
   TEEP_CONFIG       Path to TOML config file.
@@ -61,9 +99,9 @@ Environment variables:
 }
 
 // runServe loads config, creates the proxy, and starts listening.
-// It calls log.Fatal on any startup error.
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs.String("log-level", "info", "log verbosity: debug, info, warn, error")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: teep serve\n\nStart the proxy HTTP server.\n")
 	}
@@ -71,12 +109,14 @@ func runServe(args []string) {
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("teep serve: load config: %v", err)
+		slog.Error("load config failed", "err", err)
+		os.Exit(1)
 	}
 
 	srv := proxy.New(cfg)
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("teep serve: %v", err)
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -92,6 +132,8 @@ func runVerify(args []string) {
 
 	providerName := fs.String("provider", "", "provider name (required, e.g. venice, nearai)")
 	modelName := fs.String("model", "", "model name as known to the provider (required)")
+	saveDir := fs.String("save-dir", "", "directory to save raw attestation data (EAT, TDX quote)")
+	fs.String("log-level", "info", "log verbosity: debug, info, warn, error")
 
 	fs.Parse(args)
 
@@ -106,7 +148,7 @@ func runVerify(args []string) {
 		os.Exit(1)
 	}
 
-	report := runVerification(*providerName, *modelName)
+	report := runVerification(*providerName, *modelName, *saveDir)
 	fmt.Print(formatReport(report))
 
 	if report.Blocked() {
@@ -116,17 +158,18 @@ func runVerify(args []string) {
 
 // runVerification loads config, builds the appropriate attester, fetches
 // attestation, runs TDX and NVIDIA verification, and returns the report.
-// It calls log.Fatal on unrecoverable errors.
-func runVerification(providerName, modelName string) *attestation.VerificationReport {
+// If saveDir is non-empty, raw attestation data is saved to files there.
+func runVerification(providerName, modelName, saveDir string) *attestation.VerificationReport {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("teep verify: load config: %v", err)
+		slog.Error("load config failed", "err", err)
+		os.Exit(1)
 	}
 
 	cp, ok := cfg.Providers[providerName]
 	if !ok {
-		log.Fatalf("teep verify: provider %q not found in config (known: %s)",
-			providerName, knownProviders(cfg))
+		slog.Error("provider not found", "provider", providerName, "known", knownProviders(cfg))
+		os.Exit(1)
 	}
 
 	attester := newAttester(providerName, cp)
@@ -137,7 +180,12 @@ func runVerification(providerName, modelName string) *attestation.VerificationRe
 
 	raw, err := attester.FetchAttestation(ctx, modelName, nonce)
 	if err != nil {
-		log.Fatalf("teep verify: fetch attestation for %s/%s: %v", providerName, modelName, err)
+		slog.Error("fetch attestation failed", "provider", providerName, "model", modelName, "err", err)
+		os.Exit(1)
+	}
+
+	if saveDir != "" {
+		saveAttestationData(saveDir, providerName, raw)
 	}
 
 	var tdxResult *attestation.TDXVerifyResult
@@ -160,7 +208,6 @@ type attesterInterface interface {
 }
 
 // newAttester returns the appropriate Attester for the named provider.
-// Calls log.Fatal for unknown provider names.
 func newAttester(name string, cp *config.Provider) attesterInterface {
 	switch name {
 	case "venice":
@@ -168,7 +215,8 @@ func newAttester(name string, cp *config.Provider) attesterInterface {
 	case "nearai":
 		return nearai.NewAttester(cp.BaseURL, cp.APIKey)
 	default:
-		log.Fatalf("teep verify: provider %q has no registered attester; supported: venice, nearai", name)
+		slog.Error("unknown provider", "provider", name, "supported", "venice, nearai")
+		os.Exit(1)
 		return nil // unreachable
 	}
 }
@@ -254,5 +302,39 @@ func statusIcon(s attestation.Status) string {
 		return "\u2717" // ✗
 	default:
 		return "?"
+	}
+}
+
+// saveAttestationData writes raw attestation fields to files in dir.
+func saveAttestationData(dir, provider string, raw *attestation.RawAttestation) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		slog.Error("create save dir failed", "dir", dir, "err", err)
+		return
+	}
+
+	if raw.NvidiaPayload != "" {
+		path := filepath.Join(dir, provider+"_nvidia_payload.json")
+		// Pretty-print if it's JSON; write raw otherwise.
+		data := []byte(raw.NvidiaPayload)
+		var obj any
+		if json.Unmarshal(data, &obj) == nil {
+			if pretty, err := json.MarshalIndent(obj, "", "  "); err == nil {
+				data = pretty
+			}
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			slog.Error("save NVIDIA payload failed", "path", path, "err", err)
+		} else {
+			slog.Info("saved NVIDIA payload", "path", path, "bytes", len(data))
+		}
+	}
+
+	if raw.IntelQuote != "" {
+		path := filepath.Join(dir, provider+"_intel_quote.b64")
+		if err := os.WriteFile(path, []byte(raw.IntelQuote), 0o600); err != nil {
+			slog.Error("save Intel quote failed", "path", path, "err", err)
+		} else {
+			slog.Info("saved Intel TDX quote", "path", path)
+		}
 	}
 }

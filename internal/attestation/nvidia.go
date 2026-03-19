@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -202,14 +203,32 @@ func rsaPublicKeyFromJWK(nB64, eB64 string) (any, error) {
 func VerifyNVIDIAJWT(ctx context.Context, jwtPayload string, client *http.Client) *NvidiaVerifyResult {
 	result := &NvidiaVerifyResult{}
 
+	prefix := jwtPayload
+	if len(prefix) > 200 {
+		prefix = prefix[:200]
+	}
+	slog.Debug("NVIDIA payload received", "length", len(jwtPayload), "prefix", prefix)
+
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
+	}
+
+	// Detect payload format: raw JWT starts with "ey", JSON starts with "{".
+	jwtString := jwtPayload
+	if len(jwtPayload) > 0 && jwtPayload[0] == '{' {
+		slog.Debug("NVIDIA payload is JSON, looking for nested JWT")
+		jwtString = extractJWTFromJSON(jwtPayload)
+		if jwtString == "" {
+			result.SignatureErr = fmt.Errorf("NVIDIA payload is JSON but contains no recognizable nested JWT field")
+			return result
+		}
+		slog.Debug("extracted nested JWT from NVIDIA JSON payload", "length", len(jwtString))
 	}
 
 	keyFunc := jwksCache.keyfunc(ctx, client)
 
 	claims := &nvidiaClaims{}
-	token, err := jwt.ParseWithClaims(jwtPayload, claims, keyFunc,
+	token, err := jwt.ParseWithClaims(jwtString, claims, keyFunc,
 		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}),
 		jwt.WithExpirationRequired(),
 	)
@@ -260,4 +279,59 @@ func isSignatureError(err error) bool {
 	return errors.Is(err, jwt.ErrTokenSignatureInvalid) ||
 		errors.Is(err, jwt.ErrTokenUnverifiable) ||
 		errors.Is(err, jwt.ErrTokenMalformed)
+}
+
+// extractJWTFromJSON attempts to find a JWT string inside a JSON payload.
+// Some attestation providers wrap the JWT inside a JSON object. This function
+// tries known field names and falls back to scanning all string values for
+// JWT-shaped content (three dot-separated segments starting with "ey").
+func extractJWTFromJSON(payload string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		slog.Debug("NVIDIA JSON payload parse failed", "err", err)
+		return ""
+	}
+
+	// Log top-level keys for debugging.
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	slog.Debug("NVIDIA JSON payload keys", "keys", keys)
+
+	// Try known field names first.
+	for _, field := range []string{"jwt", "token", "eat_token", "nvidia_token", "attestation_token"} {
+		if raw, ok := obj[field]; ok {
+			var s string
+			if json.Unmarshal(raw, &s) == nil && looksLikeJWT(s) {
+				return s
+			}
+		}
+	}
+
+	// Fall back: scan all string values for JWT-shaped content.
+	for k, raw := range obj {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && looksLikeJWT(s) {
+			slog.Debug("found JWT in NVIDIA JSON field", "field", k)
+			return s
+		}
+	}
+
+	return ""
+}
+
+// looksLikeJWT returns true if s has three dot-separated segments and starts
+// with "ey" (base64url-encoded JSON starting with '{').
+func looksLikeJWT(s string) bool {
+	if len(s) < 10 || s[0] != 'e' || s[1] != 'y' {
+		return false
+	}
+	dots := 0
+	for _, c := range s {
+		if c == '.' {
+			dots++
+		}
+	}
+	return dots == 2
 }
