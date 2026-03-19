@@ -16,13 +16,13 @@ package nearai
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
 // attestationPath is the NEAR AI API path for TEE attestation reports.
@@ -109,7 +109,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 
 	var ar attestationResponse
-	if err := json.Unmarshal(body, &ar); err != nil {
+	if err := jsonstrict.UnmarshalWarn(body, &ar, "nearai attestation response"); err != nil {
 		return nil, fmt.Errorf("nearai: unmarshal attestation response: %w", err)
 	}
 

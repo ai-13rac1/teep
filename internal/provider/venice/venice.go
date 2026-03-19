@@ -16,7 +16,6 @@ package venice
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
 // attestationPath is the Venice API path for TEE attestation.
@@ -101,7 +101,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 
 	var ar attestationResponse
-	if err := json.Unmarshal(body, &ar); err != nil {
+	if err := jsonstrict.UnmarshalWarn(body, &ar, "venice attestation response"); err != nil {
 		return nil, fmt.Errorf("venice: unmarshal attestation response: %w", err)
 	}
 

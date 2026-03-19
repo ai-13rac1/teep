@@ -10,11 +10,12 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"math/big"
+
+	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
 //go:embed testdata/nvidia_device_identity_root_ca.pem
@@ -54,7 +55,7 @@ func verifyNVIDIAEAT(payload string, expectedNonce Nonce) *NvidiaVerifyResult {
 	result := &NvidiaVerifyResult{}
 
 	var eat nvidiaEAT
-	if err := json.Unmarshal([]byte(payload), &eat); err != nil {
+	if err := jsonstrict.UnmarshalWarn([]byte(payload), &eat, "nvidia EAT"); err != nil {
 		result.SignatureErr = fmt.Errorf("EAT JSON parse failed: %w", err)
 		return result
 	}
