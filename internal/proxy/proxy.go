@@ -1,0 +1,584 @@
+// Package proxy implements the teep HTTP proxy server. It sits between an
+// OpenAI-compatible client and a TEE-capable AI backend (Venice, NEAR AI),
+// performing attestation verification and optional E2EE on every request.
+//
+// Request flow for POST /v1/chat/completions:
+//
+//  1. Parse model name from request body.
+//  2. Resolve model → provider. Unknown model → 400.
+//  3. Check negative cache. Blocked → 503.
+//  4. Check attestation cache. On miss, fetch + verify + cache.
+//  5. Any enforced factor Fail → 502 with report JSON.
+//  6. If E2EE and tdx_reportdata_binding Pass: encrypt messages, set headers.
+//     Otherwise: warn and forward plaintext-over-HTTPS.
+//  7. Forward to upstream. Parse streaming SSE or buffer non-streaming body.
+//  8. Decrypt each chunk (E2EE). Abort on any decryption failure.
+//  9. Re-emit SSE to client (streaming) or return assembled JSON (non-streaming).
+//
+// 10. Zero session key material.
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+
+	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/provider/nearai"
+	"github.com/13rac1/teep/internal/provider/venice"
+)
+
+const (
+	// attestationCacheTTL is how long a VerificationReport is considered fresh.
+	attestationCacheTTL = 5 * time.Minute
+
+	// negativeCacheTTL is how long a failed attestation blocks retries.
+	negativeCacheTTL = 30 * time.Second
+
+	// sseScannerBufSize is the bufio.Scanner buffer for SSE parsing.
+	// Encrypted chunks can be large; 1 MiB is sufficient.
+	sseScannerBufSize = 1 << 20 // 1 MiB
+)
+
+// chatRequest is a minimal parse of an OpenAI chat completions request.
+// Only fields the proxy needs to inspect or rewrite are decoded here.
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+
+// chatMessage is one message in the chat history.
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// Server is the teep proxy HTTP server.
+type Server struct {
+	cfg            *config.Config
+	providers      map[string]*provider.Provider // provider name → Provider
+	cache          *attestation.Cache
+	negCache       *attestation.NegativeCache
+	mux            *http.ServeMux
+	attestClient   *http.Client // for attestation fetches
+	upstreamClient *http.Client // for chat completions forwards
+}
+
+// New builds a Server from cfg. Providers are wired with their Attester and
+// Preparer implementations based on provider name.
+func New(cfg *config.Config) *Server {
+	s := &Server{
+		cfg:          cfg,
+		providers:    make(map[string]*provider.Provider, len(cfg.Providers)),
+		cache:        attestation.NewCache(attestationCacheTTL),
+		negCache:     attestation.NewNegativeCache(negativeCacheTTL),
+		mux:          http.NewServeMux(),
+		attestClient: config.NewAttestationClient(),
+		upstreamClient: &http.Client{
+			Transport: &http.Transport{
+				IdleConnTimeout: 90 * time.Second,
+			},
+		},
+	}
+
+	for name, cp := range cfg.Providers {
+		s.providers[name] = fromConfig(cp)
+		log.Printf("proxy: registered provider %q base_url=%s api_key=%s e2ee=%v models=%d",
+			name, cp.BaseURL, config.RedactKey(cp.APIKey), cp.E2EE, len(cp.ModelMap))
+	}
+
+	warnNonLoopback(cfg.ListenAddr)
+
+	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("GET /v1/models", s.handleModels)
+	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
+
+	return s
+}
+
+// ListenAndServe starts the proxy HTTP server on the configured listen address.
+func (s *Server) ListenAndServe() error {
+	srv := &http.Server{
+		Addr:    s.cfg.ListenAddr,
+		Handler: s.mux,
+	}
+	log.Printf("teep proxy listening on %s", s.cfg.ListenAddr)
+	return srv.ListenAndServe()
+}
+
+// ServeHTTP implements http.Handler so Server can be used with httptest.NewServer.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mux.ServeHTTP(w, r)
+}
+
+// fromConfig constructs a provider.Provider from a config.Provider, attaching
+// the correct Attester and Preparer for the known provider names.
+func fromConfig(cp *config.Provider) *provider.Provider {
+	p := &provider.Provider{
+		Name:     cp.Name,
+		BaseURL:  cp.BaseURL,
+		APIKey:   cp.APIKey,
+		ModelMap: cp.ModelMap,
+		E2EE:     cp.E2EE,
+	}
+	switch cp.Name {
+	case "venice":
+		p.Attester = venice.NewAttester(cp.BaseURL, cp.APIKey)
+		p.Preparer = venice.NewPreparer(cp.APIKey)
+	case "nearai":
+		p.Attester = nearai.NewAttester(cp.BaseURL, cp.APIKey)
+		p.Preparer = nearai.NewPreparer(cp.APIKey)
+	}
+	return p
+}
+
+// warnNonLoopback logs a warning if addr is not a loopback address.
+func warnNonLoopback(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Printf("WARNING: proxy: cannot parse listen address %q: %v", addr, err)
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		log.Printf("WARNING: proxy: listen address %q is not a loopback address; proxy is reachable from the network", addr)
+	}
+}
+
+// resolveModel finds the provider and upstream model name for a client model.
+// It returns (nil, "", false) when no provider has the model.
+func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, bool) {
+	for _, p := range s.providers {
+		if _, ok := p.ModelMap[clientModel]; ok {
+			return p, p.MapModel(clientModel), true
+		}
+	}
+	return nil, "", false
+}
+
+// reportdataBindingPassed returns true if the tdx_reportdata_binding factor
+// passed in the report. If it is absent, Skipped, or Failed, E2EE is refused.
+func reportdataBindingPassed(report *attestation.VerificationReport) bool {
+	for _, f := range report.Factors {
+		if f.Name == "tdx_reportdata_binding" {
+			return f.Status == attestation.Pass
+		}
+	}
+	return false
+}
+
+// fetchAndVerify fetches attestation from the provider and runs all 20
+// verification factors. On failure it records the provider/model in the
+// negative cache. Returns nil on fetch error.
+func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, upstreamModel string) *attestation.VerificationReport {
+	if prov.Attester == nil {
+		log.Printf("proxy: provider %q has no Attester; cannot fetch attestation for %q", prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, upstreamModel)
+		return nil
+	}
+
+	nonce := attestation.NewNonce()
+	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
+	if err != nil {
+		log.Printf("proxy: attestation fetch failed for %s/%s: %v", prov.Name, upstreamModel, err)
+		s.negCache.Record(prov.Name, upstreamModel)
+		return nil
+	}
+
+	var tdxResult *attestation.TDXVerifyResult
+	if raw.IntelQuote != "" {
+		tdxResult = attestation.VerifyTDXQuote(raw.IntelQuote, raw.SigningKey, nonce)
+	}
+
+	// NVIDIA JWT verification requires a network call to NVIDIA's JWKS endpoint.
+	// Pass nil for the HTTP client to use the default 30-second timeout client.
+	var nvidiaResult *attestation.NvidiaVerifyResult
+	if raw.NvidiaPayload != "" {
+		nvidiaResult = attestation.VerifyNVIDIAJWT(ctx, raw.NvidiaPayload, nil)
+	}
+
+	return attestation.BuildReport(prov.Name, upstreamModel, raw, nonce, s.cfg.Enforced, tdxResult, nvidiaResult)
+}
+
+// handleChatCompletions is the core proxy handler for POST /v1/chat/completions.
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	var req chatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.Model == "" {
+		http.Error(w, `"model" field is required`, http.StatusBadRequest)
+		return
+	}
+
+	prov, upstreamModel, ok := s.resolveModel(req.Model)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown model %q", req.Model), http.StatusBadRequest)
+		return
+	}
+
+	if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		http.Error(w,
+			fmt.Sprintf("attestation recently failed for %s/%s; try again later", prov.Name, upstreamModel),
+			http.StatusServiceUnavailable)
+		return
+	}
+
+	report, cached := s.cache.Get(prov.Name, upstreamModel)
+	if !cached {
+		report = s.fetchAndVerify(r.Context(), prov, upstreamModel)
+		if report == nil {
+			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
+			return
+		}
+		s.cache.Put(prov.Name, upstreamModel, report)
+	}
+
+	if report.Blocked() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(report)
+		return
+	}
+
+	e2eeActive := prov.E2EE && reportdataBindingPassed(report)
+
+	upstreamBody, session, err := s.buildUpstreamBody(r.Context(), body, req, upstreamModel, e2eeActive, prov)
+	if err != nil {
+		log.Printf("proxy: build upstream body for %s/%s: %v", prov.Name, upstreamModel, err)
+		http.Error(w, "failed to prepare upstream request", http.StatusInternalServerError)
+		return
+	}
+	if session != nil {
+		defer session.Zero()
+	}
+
+	upstreamURL := prov.BaseURL + "/api/v1/chat/completions"
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		http.Error(w, "failed to build upstream request", http.StatusInternalServerError)
+		return
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+
+	if err := prepareUpstreamHeaders(upstreamReq, prov, session); err != nil {
+		log.Printf("proxy: PrepareRequest for %s: %v", prov.Name, err)
+		http.Error(w, "failed to prepare upstream request headers", http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := s.upstreamClient.Do(upstreamReq)
+	if err != nil {
+		log.Printf("proxy: upstream request to %s/%s failed: %v", prov.Name, upstreamModel, err)
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	if req.Stream {
+		s.relayStream(w, resp.Body, session)
+		return
+	}
+	s.relayNonStream(w, resp.Body, session)
+}
+
+// buildUpstreamBody constructs the body to forward upstream. If e2eeActive is
+// true it fetches a fresh signing key, creates an ephemeral session, encrypts
+// each message, and forces stream=true (required for per-chunk decryption).
+// Returns the encoded body, the session (nil for plaintext), and any error.
+func (s *Server) buildUpstreamBody(
+	ctx context.Context,
+	rawBody []byte,
+	req chatRequest,
+	upstreamModel string,
+	e2eeActive bool,
+	prov *provider.Provider,
+) ([]byte, *attestation.Session, error) {
+	if !e2eeActive {
+		if prov.E2EE {
+			log.Printf("WARNING: proxy: E2EE disabled for %s/%s — tdx_reportdata_binding not verified; forwarding plaintext over HTTPS", prov.Name, upstreamModel)
+		}
+		rewritten, err := rewriteModelField(rawBody, upstreamModel)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rewrite model field: %w", err)
+		}
+		return rewritten, nil, nil
+	}
+
+	// Fetch a fresh attestation to get the current signing key.
+	// The verification cache holds reports; it intentionally does not cache
+	// signing keys — each E2EE session must use a fresh key.
+	nonce := attestation.NewNonce()
+	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch signing key: %w", err)
+	}
+	if raw.SigningKey == "" {
+		return nil, nil, fmt.Errorf("attestation response missing signing_key")
+	}
+
+	session, err := attestation.NewSession()
+	if err != nil {
+		return nil, nil, fmt.Errorf("create E2EE session: %w", err)
+	}
+	if err := session.SetModelKey(raw.SigningKey); err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("set model key: %w", err)
+	}
+
+	// Parse the model public key for encryption. SetModelKey validated it; this
+	// parse cannot fail on the same input.
+	modelPubKeyBytes, err := hex.DecodeString(raw.SigningKey)
+	if err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("decode signing key hex: %w", err)
+	}
+	modelPubKey, err := secp256k1.ParsePubKey(modelPubKeyBytes)
+	if err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("parse model public key: %w", err)
+	}
+
+	encMessages := make([]chatMessage, len(req.Messages))
+	for i, msg := range req.Messages {
+		ciphertext, err := attestation.Encrypt([]byte(msg.Content), modelPubKey)
+		if err != nil {
+			session.Zero()
+			return nil, nil, fmt.Errorf("encrypt message %d: %w", i, err)
+		}
+		encMessages[i] = chatMessage{Role: msg.Role, Content: ciphertext}
+	}
+
+	// Reassemble the full request as a generic map so we preserve unknown fields.
+	var full map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &full); err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("re-parse body for E2EE rewrite: %w", err)
+	}
+
+	modelJSON, err := json.Marshal(upstreamModel)
+	if err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("marshal model name: %w", err)
+	}
+	full["model"] = modelJSON
+
+	messagesJSON, err := json.Marshal(encMessages)
+	if err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("marshal encrypted messages: %w", err)
+	}
+	full["messages"] = messagesJSON
+
+	// Force stream=true so we can decrypt per-chunk.
+	full["stream"] = json.RawMessage("true")
+
+	out, err := json.Marshal(full)
+	if err != nil {
+		session.Zero()
+		return nil, nil, fmt.Errorf("marshal E2EE request body: %w", err)
+	}
+	return out, session, nil
+}
+
+// prepareUpstreamHeaders injects auth and E2EE headers into the upstream request.
+// When session is non-nil (E2EE path), it delegates to the provider's Preparer.
+// When session is nil (plaintext fallback), it sets only the Authorization header
+// directly, because provider-specific Preparers may require a fully initialised
+// session (e.g. Venice requires ModelKeyHex to be set).
+func prepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session *attestation.Session) error {
+	if session != nil && prov.Preparer != nil {
+		return prov.Preparer.PrepareRequest(req, session)
+	}
+	// Plaintext path: inject the Authorization header manually so the upstream
+	// request is authenticated. This is safe because we are on HTTPS.
+	if prov.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+prov.APIKey)
+	}
+	return nil
+}
+
+// rewriteModelField replaces the "model" field in a JSON body with upstreamModel.
+// All other fields are preserved exactly.
+func rewriteModelField(body []byte, upstreamModel string) ([]byte, error) {
+	var full map[string]json.RawMessage
+	if err := json.Unmarshal(body, &full); err != nil {
+		return nil, err
+	}
+	modelJSON, err := json.Marshal(upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+	full["model"] = modelJSON
+	return json.Marshal(full)
+}
+
+// relayStream reads an SSE stream from body, decrypts chunks when session is
+// non-nil, and writes the decrypted SSE lines to w. It aborts immediately if
+// any decryption fails — no plaintext fallthrough.
+func (s *Server) relayStream(w http.ResponseWriter, body io.Reader, session *attestation.Session) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	scanner := bufio.NewScanner(body)
+	buf := make([]byte, sseScannerBufSize)
+	scanner.Buffer(buf, sseScannerBufSize)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !strings.HasPrefix(line, "data: ") {
+			// Pass through non-data lines (comments, event:, id:, empty lines).
+			fmt.Fprintf(w, "%s\n", line)
+			flusher.Flush()
+			continue
+		}
+
+		data := line[len("data: "):]
+		if data == "[DONE]" {
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
+		if session == nil {
+			// Plaintext path: re-emit as-is.
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			continue
+		}
+
+		// E2EE path: parse the JSON and decrypt the content field.
+		decrypted, err := decryptSSEChunk(data, session)
+		if err != nil {
+			log.Printf("proxy: stream decryption failed: %v", err)
+			// Abort: do not emit any plaintext.
+			fmt.Fprintf(w, "data: {\"error\":\"stream decryption failed\"}\n\n")
+			flusher.Flush()
+			return
+		}
+
+		fmt.Fprintf(w, "data: %s\n\n", decrypted)
+		flusher.Flush()
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("proxy: SSE scanner error: %v", err)
+	}
+}
+
+// relayNonStream reads a non-streaming JSON response from body, decrypts the
+// content field if session is non-nil, and writes the result to w.
+func (s *Server) relayNonStream(w http.ResponseWriter, body io.Reader, session *attestation.Session) {
+	responseBody, err := io.ReadAll(body)
+	if err != nil {
+		http.Error(w, "failed to read upstream response", http.StatusBadGateway)
+		return
+	}
+
+	if session == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(responseBody)
+		return
+	}
+
+	decrypted, err := decryptNonStreamResponse(responseBody, session)
+	if err != nil {
+		log.Printf("proxy: non-stream decryption failed: %v", err)
+		http.Error(w, "response decryption failed", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(decrypted)
+}
+
+// handleModels returns the list of client-facing model names available across
+// all configured providers.
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	type modelEntry struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
+	}
+	type response struct {
+		Object string       `json:"object"`
+		Data   []modelEntry `json:"data"`
+	}
+
+	var models []modelEntry
+	for _, prov := range s.providers {
+		for clientModel := range prov.ModelMap {
+			models = append(models, modelEntry{
+				ID:      clientModel,
+				Object:  "model",
+				OwnedBy: prov.Name,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response{Object: "list", Data: models})
+}
+
+// handleReport returns the cached VerificationReport for the given provider
+// and model as JSON. Query parameters: provider, model.
+func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	provName := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+
+	if provName == "" || model == "" {
+		http.Error(w, `query parameters "provider" and "model" are required`, http.StatusBadRequest)
+		return
+	}
+
+	report, ok := s.cache.Get(provName, model)
+	if !ok {
+		http.Error(w, fmt.Sprintf("no cached report for provider=%q model=%q", provName, model), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(report)
+}
