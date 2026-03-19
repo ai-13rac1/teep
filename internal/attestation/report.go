@@ -267,35 +267,19 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 	// missing and why it matters for users evaluating vendor security posture.
 
 	addFactor("tls_key_binding", Fail,
-		"no TLS certificate public key embedded in attestation document. "+
-			"Without this, a MITM at the vendor's load balancer can intercept traffic "+
-			"even if a genuine TEE is running. This is the single most critical gap for "+
-			"end-to-end security. The TLS termination point is outside the attested boundary.")
+		"no TLS key in attestation")
 
 	addFactor("cpu_gpu_chain", Fail,
-		"attestation does not cryptographically bind the CPU TDX quote to the NVIDIA GPU attestation. "+
-			"The two attestations are checked in isolation: the CPU attestation proves a trusted enclave "+
-			"exists, and the GPU attestation proves a trusted GPU exists, but there is no proof both "+
-			"are part of the same confidential VM. A sophisticated attacker could mix and match attestations.")
+		"CPU-GPU attestation not bound")
 
 	addFactor("measured_model_weights", Fail,
-		"attestation does not include hashes of the model weight files. "+
-			"The TDX quote proves the hardware is genuine and the firmware is trusted, "+
-			"but it does not prove which model is actually loaded into memory. "+
-			"Without weight measurement, a compromised provider could load a backdoored model "+
-			"while presenting valid hardware attestation.")
+		"no model weight hashes")
 
 	addFactor("build_transparency_log", Fail,
-		"no Sigstore bundle or equivalent build transparency log entry found in attestation. "+
-			"Without this, you can confirm that *a* TEE is running, but not that it runs a "+
-			"specific audited build of the inference server. Runtime measurements should match "+
-			"reproducibly-built artifacts committed to an immutable transparency log.")
+		"no build transparency log")
 
 	addFactor("cpu_id_registry", Fail,
-		"CPU PPID/CHIP_ID not verified against a known-good hardware registry. "+
-			"Without this, a TEE.fail-style physical attack (replacing a CPU with a modified "+
-			"chip that forges attestation) cannot be detected. Proof of Cloud or an equivalent "+
-			"registry maps hardware identifiers to verified physical deployments.")
+		"no CPU ID registry check")
 
 	// Tally results.
 	passed, failed, skipped := 0, 0, 0

@@ -176,21 +176,30 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	}
 
 	nonce := attestation.NewNonce()
+	slog.Debug("attestation fetch starting", "provider", prov.Name, "model", upstreamModel)
+	fetchStart := time.Now()
 	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 	if err != nil {
 		slog.Error("attestation fetch failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		s.negCache.Record(prov.Name, upstreamModel)
 		return nil
 	}
+	slog.Debug("attestation fetch complete", "provider", prov.Name, "elapsed", time.Since(fetchStart))
 
 	var tdxResult *attestation.TDXVerifyResult
 	if raw.IntelQuote != "" {
+		slog.Debug("TDX verification starting", "provider", prov.Name)
+		tdxStart := time.Now()
 		tdxResult = attestation.VerifyTDXQuote(raw.IntelQuote, raw.SigningKey, nonce)
+		slog.Debug("TDX verification complete", "provider", prov.Name, "elapsed", time.Since(tdxStart))
 	}
 
 	var nvidiaResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" {
+		slog.Debug("NVIDIA verification starting", "provider", prov.Name)
+		nvidiaStart := time.Now()
 		nvidiaResult = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, nonce, nil)
+		slog.Debug("NVIDIA verification complete", "provider", prov.Name, "elapsed", time.Since(nvidiaStart))
 	}
 
 	return attestation.BuildReport(prov.Name, upstreamModel, raw, nonce, s.cfg.Enforced, tdxResult, nvidiaResult)

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -29,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		printOverview()
 		os.Exit(1)
 	}
 
@@ -43,10 +44,10 @@ func main() {
 	case "verify":
 		runVerify(os.Args[2:])
 	case "-h", "--help", "help":
-		usage()
+		runHelp(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "teep: unknown subcommand %q\n\n", os.Args[1])
-		usage()
+		printOverview()
 		os.Exit(1)
 	}
 }
@@ -80,32 +81,11 @@ func parseLogLevel(args []string) slog.Level {
 	return slog.LevelInfo
 }
 
-// usage prints a brief help message to stderr.
-func usage() {
-	fmt.Fprintf(os.Stderr, `teep — TEE proxy and attestation verifier
-
-Usage:
-  teep serve [--log-level LEVEL]                              Start the HTTP proxy server.
-  teep verify --provider NAME --model M [--log-level LEVEL]  Fetch and print attestation report.
-
-Flags:
-  --log-level LEVEL  Set log verbosity: debug, info, warn, error (default: info).
-
-Environment variables:
-  TEEP_CONFIG       Path to TOML config file.
-  TEEP_LISTEN_ADDR  Override listen address (default 127.0.0.1:8080).
-  VENICE_API_KEY    Venice AI API key.
-  NEARAI_API_KEY    NEAR AI API key.
-`)
-}
-
 // runServe loads config, creates the proxy, and starts listening.
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	fs.String("log-level", "info", "log verbosity: debug, info, warn, error")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: teep serve\n\nStart the proxy HTTP server.\n")
-	}
+	fs.Usage = func() { printServeHelp() }
 	fs.Parse(args)
 
 	cfg, err := config.Load()
@@ -126,10 +106,7 @@ func runServe(args []string) {
 // enforced factor failed.
 func runVerify(args []string) {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: teep verify --provider NAME --model MODEL\n\nFetch and print an attestation verification report.\n\nFlags:\n")
-		fs.PrintDefaults()
-	}
+	fs.Usage = func() { printVerifyHelp() }
 
 	providerName := fs.String("provider", "", "provider name (required, e.g. venice, nearai)")
 	modelName := fs.String("model", "", "model name as known to the provider (required)")
@@ -177,13 +154,17 @@ func runVerification(providerName, modelName, saveDir string) *attestation.Verif
 	client := config.NewAttestationClient()
 
 	nonce := attestation.NewNonce()
+	slog.Debug("nonce generated", "provider", providerName, "model", modelName, "nonce", nonce.Hex()[:16]+"...")
 	ctx := context.Background()
 
+	slog.Debug("attestation fetch starting", "provider", providerName, "model", modelName)
+	fetchStart := time.Now()
 	raw, err := attester.FetchAttestation(ctx, modelName, nonce)
 	if err != nil {
 		slog.Error("fetch attestation failed", "provider", providerName, "model", modelName, "err", err)
 		os.Exit(1)
 	}
+	slog.Debug("attestation fetch complete", "provider", providerName, "elapsed", time.Since(fetchStart))
 
 	if saveDir != "" {
 		saveAttestationData(saveDir, providerName, raw)
@@ -191,12 +172,18 @@ func runVerification(providerName, modelName, saveDir string) *attestation.Verif
 
 	var tdxResult *attestation.TDXVerifyResult
 	if raw.IntelQuote != "" {
+		slog.Debug("TDX verification starting", "quote_len", len(raw.IntelQuote))
+		tdxStart := time.Now()
 		tdxResult = attestation.VerifyTDXQuote(raw.IntelQuote, raw.SigningKey, nonce)
+		slog.Debug("TDX verification complete", "elapsed", time.Since(tdxStart))
 	}
 
 	var nvidiaResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" {
+		slog.Debug("NVIDIA verification starting", "payload_len", len(raw.NvidiaPayload))
+		nvidiaStart := time.Now()
 		nvidiaResult = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, nonce, client)
+		slog.Debug("NVIDIA verification complete", "elapsed", time.Since(nvidiaStart))
 	}
 
 	return attestation.BuildReport(providerName, modelName, raw, nonce, cfg.Enforced, tdxResult, nvidiaResult)
@@ -223,12 +210,6 @@ func knownProviders(cfg *config.Config) string {
 		names = append(names, name)
 	}
 	return strings.Join(names, ", ")
-}
-
-// tier groups the 20 factors into human-readable sections.
-type tier struct {
-	name    string
-	factors []attestation.FactorResult
 }
 
 // tierBoundaries defines the exclusive upper index (0-based) for each tier.
@@ -270,7 +251,7 @@ func formatReport(r *attestation.VerificationReport) string {
 
 		for _, f := range r.Factors[start:end] {
 			icon := statusIcon(f.Status)
-			line := fmt.Sprintf("  %s %-30s %s", icon, f.Name, f.Detail)
+			line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
 			if f.Enforced {
 				line += "  [ENFORCED]"
 			}
@@ -284,6 +265,7 @@ func formatReport(r *attestation.VerificationReport) string {
 
 	fmt.Fprintf(&b, "Score: %d/%d passed, %d skipped, %d failed\n",
 		r.Passed, r.Passed+r.Failed+r.Skipped, r.Skipped, r.Failed)
+	b.WriteString("\nRun 'teep help tiers' for scoring or 'teep help factors' for details.\n")
 
 	return b.String()
 }
@@ -338,5 +320,5 @@ func saveFile(path string, data []byte) {
 		slog.Error("save failed", "path", path, "err", err)
 		return
 	}
-	slog.Info("saved", "path", path, "bytes", len(data))
+	slog.Debug("saved", "path", path, "bytes", len(data))
 }

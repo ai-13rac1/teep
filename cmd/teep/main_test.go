@@ -34,11 +34,11 @@ func buildTestReport(provider, model string) *attestation.VerificationReport {
 		{Name: "nvidia_nonce_match", Status: attestation.Skip, Detail: "Nonce field not found in NVIDIA payload", Enforced: false},
 		{Name: "e2ee_capable", Status: attestation.Pass, Detail: "E2EE key exchange possible", Enforced: false},
 		// Tier 3 (15-19)
-		{Name: "tls_key_binding", Status: attestation.Fail, Detail: "No TLS key in attestation document", Enforced: false},
-		{Name: "cpu_gpu_chain", Status: attestation.Fail, Detail: "No CPU->GPU binding", Enforced: false},
-		{Name: "measured_model_weights", Status: attestation.Fail, Detail: "No model weight hashes", Enforced: false},
-		{Name: "build_transparency_log", Status: attestation.Fail, Detail: "No Sigstore bundle", Enforced: false},
-		{Name: "cpu_id_registry", Status: attestation.Fail, Detail: "No CPU ID registry verification", Enforced: false},
+		{Name: "tls_key_binding", Status: attestation.Fail, Detail: "no TLS key in attestation", Enforced: false},
+		{Name: "cpu_gpu_chain", Status: attestation.Fail, Detail: "CPU-GPU attestation not bound", Enforced: false},
+		{Name: "measured_model_weights", Status: attestation.Fail, Detail: "no model weight hashes", Enforced: false},
+		{Name: "build_transparency_log", Status: attestation.Fail, Detail: "no build transparency log", Enforced: false},
+		{Name: "cpu_id_registry", Status: attestation.Fail, Detail: "no CPU ID registry check", Enforced: false},
 	}
 
 	passed, failed, skipped := 0, 0, 0
@@ -269,6 +269,24 @@ func TestTierBoundaries(t *testing.T) {
 	last := tierBoundaries[len(tierBoundaries)-1].end
 	if last != 20 {
 		t.Errorf("final tier boundary end = %d, want 20", last)
+	}
+}
+
+func TestFormatReport_FooterHint(t *testing.T) {
+	r := buildTestReport("venice", "some-model")
+	out := formatReport(r)
+	if !strings.Contains(out, "teep help") {
+		t.Errorf("footer hint not found; output:\n%s", out)
+	}
+}
+
+func TestFormatReport_LineWidth(t *testing.T) {
+	r := buildTestReport("venice", "some-model")
+	out := formatReport(r)
+	for i, line := range strings.Split(out, "\n") {
+		if len([]rune(line)) > 80 {
+			t.Errorf("line %d exceeds 80 chars (%d runes): %q", i+1, len([]rune(line)), line)
+		}
 	}
 }
 
