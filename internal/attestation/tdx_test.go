@@ -51,6 +51,60 @@ func TestVerifyTDXQuoteParseRealQuote(t *testing.T) {
 	t.Logf("TEE_TCB_SVN (hex): %s", hex.EncodeToString(result.TeeTCBSVN))
 }
 
+// TestVerifyTDXQuoteMeasurements verifies that MRTD, RTMRs, and other
+// measurement registers are extracted from the real production quote.
+func TestVerifyTDXQuoteMeasurements(t *testing.T) {
+	nonce := NewNonce()
+	result := VerifyTDXQuote(realTDXQuoteBase64(), "", nonce)
+
+	if result.ParseErr != nil {
+		t.Fatalf("parse failed: %v", result.ParseErr)
+	}
+
+	// MRTD should be 48 bytes and non-zero.
+	if len(result.MRTD) != 48 {
+		t.Errorf("MRTD length: got %d, want 48", len(result.MRTD))
+	}
+	allZero := true
+	for _, b := range result.MRTD {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Error("MRTD is all zeros; expected a non-zero VM image measurement")
+	}
+
+	// RTMR0 should be 48 bytes and non-zero (firmware measurement).
+	rtmr0 := result.RTMRs[0]
+	rtmr0Zero := true
+	for _, b := range rtmr0 {
+		if b != 0 {
+			rtmr0Zero = false
+			break
+		}
+	}
+	if rtmr0Zero {
+		t.Error("RTMR0 is all zeros; expected a non-zero firmware measurement")
+	}
+
+	// MRSeam should be 48 bytes.
+	if len(result.MRSeam) != 48 {
+		t.Errorf("MRSeam length: got %d, want 48", len(result.MRSeam))
+	}
+
+	t.Logf("MRTD:           %s", hex.EncodeToString(result.MRTD))
+	for i, r := range result.RTMRs {
+		t.Logf("RTMR%d:          %s", i, hex.EncodeToString(r[:]))
+	}
+	t.Logf("MRSeam:         %s", hex.EncodeToString(result.MRSeam))
+	t.Logf("MRSignerSeam:   %s", hex.EncodeToString(result.MRSignerSeam))
+	t.Logf("MRConfigID:     %s", hex.EncodeToString(result.MRConfigID))
+	t.Logf("MROwner:        %s", hex.EncodeToString(result.MROwner))
+	t.Logf("MROwnerConfig:  %s", hex.EncodeToString(result.MROwnerConfig))
+}
+
 // TestVerifyTDXQuoteCertChain verifies the cert chain and signature verification
 // against the real quote. Because these certs may be expired, we check that
 // CertChainErr is set or not — we do not require it to pass (production quote

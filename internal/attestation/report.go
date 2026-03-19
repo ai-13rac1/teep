@@ -134,7 +134,11 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 		if tdxResult.ParseErr != nil {
 			addFactor("tdx_quote_structure", Fail, fmt.Sprintf("TDX quote parse failed: %v", tdxResult.ParseErr))
 		} else {
-			addFactor("tdx_quote_structure", Pass, fmt.Sprintf("valid %s structure", tdxQuoteVersion(tdxResult)))
+			detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(tdxResult))
+			if len(tdxResult.MRTD) > 0 {
+				detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(tdxResult), hex.EncodeToString(tdxResult.MRTD)[:16])
+			}
+			addFactor("tdx_quote_structure", Pass, detail)
 		}
 
 		// Factor 4: tdx_cert_chain

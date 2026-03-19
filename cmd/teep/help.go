@@ -49,8 +49,12 @@ var factorRegistry = [20]factorInfo{
 		Tier:    1,
 		Summary: "TDX quote parses as valid QuoteV4/V5",
 		Description: "Parses the TDX quote binary and verifies it conforms to the " +
-			"Intel QuoteV4 or QuoteV5 structure. A malformed quote indicates " +
-			"either data corruption or a non-genuine attestation source.",
+			"Intel QuoteV4 or QuoteV5 structure. On success, displays the " +
+			"MRTD (Measurement of the initial TD image) prefix — a SHA-384 " +
+			"hash of the VM image loaded by the VMM. Comparing MRTD against " +
+			"a provider-published reference value is how you detect VM image " +
+			"tampering. A malformed quote indicates data corruption or a " +
+			"non-genuine attestation source.",
 	},
 	{
 		Name:    "tdx_cert_chain",
@@ -192,11 +196,12 @@ var factorRegistry = [20]factorInfo{
 		Tier:    3,
 		Summary: "No model weight hashes",
 		Description: "The attestation does not include hashes of the model weight " +
-			"files. The TDX quote proves the hardware is genuine and the " +
-			"firmware is trusted, but it does not prove which model is " +
-			"actually loaded into memory. Without weight measurement, a " +
+			"files. The TDX MRTD proves the VM image is genuine (OS, " +
+			"firmware, inference server), but it does not cover the model " +
+			"weights loaded at runtime. Without weight measurement, a " +
 			"compromised provider could load a backdoored model while " +
-			"presenting valid hardware attestation.",
+			"presenting valid hardware attestation. This requires runtime " +
+			"measurement of weights into an RTMR register.",
 	},
 	{
 		Name:    "build_transparency_log",

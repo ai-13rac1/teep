@@ -40,6 +40,28 @@ type TDXVerifyResult struct {
 	// TeeTCBSVN is the raw 16-byte TEE_TCB_SVN field for TCB currency checks.
 	TeeTCBSVN []byte
 
+	// MRTD is the 48-byte measurement of the initial TD image (VM image hash).
+	MRTD []byte
+
+	// RTMRs are the four 48-byte Runtime Measurement Registers.
+	// RTMR0: firmware, RTMR1: OS/kernel, RTMR2: application, RTMR3: reserved.
+	RTMRs [4][48]byte
+
+	// MRSeam is the 48-byte measurement of the TDX module.
+	MRSeam []byte
+
+	// MRSignerSeam is the 48-byte measurement of the TDX module signer.
+	MRSignerSeam []byte
+
+	// MRConfigID is the 48-byte TD configuration ID.
+	MRConfigID []byte
+
+	// MROwner is the 48-byte TD owner identity.
+	MROwner []byte
+
+	// MROwnerConfig is the 48-byte TD owner configuration.
+	MROwnerConfig []byte
+
 	// quote is the successfully parsed quote proto (QuoteV4 or QuoteV5).
 	quote any
 }
@@ -78,6 +100,8 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 
 	// Extract common fields from whichever quote version we got.
 	var reportData, tdAttrs, teeTCBSVN []byte
+	var mrTD, mrSeam, mrSignerSeam, mrConfigID, mrOwner, mrOwnerConfig []byte
+	var rtmrs [][]byte
 	switch q := quoteAny.(type) {
 	case *pb.QuoteV4:
 		slog.Debug("TDX quote version", "version", 4)
@@ -89,6 +113,13 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 		reportData = body.GetReportData()
 		tdAttrs = body.GetTdAttributes()
 		teeTCBSVN = body.GetTeeTcbSvn()
+		mrTD = body.GetMrTd()
+		rtmrs = body.GetRtmrs()
+		mrSeam = body.GetMrSeam()
+		mrSignerSeam = body.GetMrSignerSeam()
+		mrConfigID = body.GetMrConfigId()
+		mrOwner = body.GetMrOwner()
+		mrOwnerConfig = body.GetMrOwnerConfig()
 	case *pb.QuoteV5:
 		slog.Debug("TDX quote version", "version", 5)
 		desc := q.GetTdQuoteBodyDescriptor()
@@ -104,6 +135,13 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 		reportData = body.GetReportData()
 		tdAttrs = body.GetTdAttributes()
 		teeTCBSVN = body.GetTeeTcbSvn()
+		mrTD = body.GetMrTd()
+		rtmrs = body.GetRtmrs()
+		mrSeam = body.GetMrSeam()
+		mrSignerSeam = body.GetMrSignerSeam()
+		mrConfigID = body.GetMrConfigId()
+		mrOwner = body.GetMrOwner()
+		mrOwnerConfig = body.GetMrOwnerConfig()
 	default:
 		result.ParseErr = fmt.Errorf("unexpected quote type %T", quoteAny)
 		return result
@@ -114,6 +152,33 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 
 	// Extract TEE_TCB_SVN.
 	result.TeeTCBSVN = teeTCBSVN
+
+	// Extract measurement registers.
+	result.MRTD = mrTD
+	result.MRSeam = mrSeam
+	result.MRSignerSeam = mrSignerSeam
+	result.MRConfigID = mrConfigID
+	result.MROwner = mrOwner
+	result.MROwnerConfig = mrOwnerConfig
+	for i, r := range rtmrs {
+		if i >= 4 {
+			break
+		}
+		copy(result.RTMRs[i][:], r)
+	}
+
+	slog.Debug("TDX measurements extracted",
+		"mrtd", hex.EncodeToString(mrTD),
+		"rtmr0", hex.EncodeToString(safeSlice(rtmrs, 0)),
+		"rtmr1", hex.EncodeToString(safeSlice(rtmrs, 1)),
+		"rtmr2", hex.EncodeToString(safeSlice(rtmrs, 2)),
+		"rtmr3", hex.EncodeToString(safeSlice(rtmrs, 3)),
+		"mr_seam", hex.EncodeToString(mrSeam),
+		"mr_signer_seam", hex.EncodeToString(mrSignerSeam),
+		"mr_config_id", hex.EncodeToString(mrConfigID),
+		"mr_owner", hex.EncodeToString(mrOwner),
+		"mr_owner_config", hex.EncodeToString(mrOwnerConfig),
+	)
 
 	// Factor 6: debug flag. TD_ATTRIBUTES is 8 bytes; bit 0 of byte 0 is debug.
 	if len(tdAttrs) > 0 && (tdAttrs[0]&tdxDebugBit) != 0 {
@@ -144,6 +209,14 @@ func VerifyTDXQuote(base64Quote, signingKeyHex string, nonce Nonce) *TDXVerifyRe
 	}
 
 	return result
+}
+
+// safeSlice returns s[i] if i is within bounds, or nil otherwise.
+func safeSlice(s [][]byte, i int) []byte {
+	if i < len(s) {
+		return s[i]
+	}
+	return nil
 }
 
 // decodeQuoteBytes tries hex, base64, and base64url decoding.
