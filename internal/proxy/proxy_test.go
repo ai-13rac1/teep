@@ -1008,7 +1008,7 @@ func TestModelResolutionAcrossProviders(t *testing.T) {
 			}`, modelPubKeyHex())))
 			return
 		}
-		if r.URL.Path == "/api/v1/chat/completions" {
+		if r.URL.Path == "/v1/chat/completions" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(nonStreamResponse(nearaiContent)))
 			return
@@ -1253,24 +1253,6 @@ func TestModelNameRewrittenUpstream(t *testing.T) {
 // --------------------------------------------------------------------------
 // Decryption unit tests (decrypt.go)
 // --------------------------------------------------------------------------
-
-// TestDecryptSSEChunk_EmptyChoices verifies that chunks with no choices pass
-// through unchanged.
-func TestDecryptSSEChunk_PassThrough(t *testing.T) {
-	session, err := attestation.NewSession()
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-
-	// Usage-only chunk with no choices.
-	data := `{"id":"c","usage":{"total_tokens":10},"choices":[]}`
-	// Access via the proxy package's exported test path. Since decryptSSEChunk
-	// is unexported, we test it indirectly through the streaming relay.
-	// For direct unit testing we use the streaming test with a plaintext response.
-	_ = data
-	_ = session
-	// Direct unit tests are covered via TestDecryptSSEChunk_DirectRoundTrip below.
-}
 
 // TestE2EEStreamingRoundTrip verifies that when E2EE falls back to plaintext
 // (because tdx_reportdata_binding cannot be verified without real TDX hardware),

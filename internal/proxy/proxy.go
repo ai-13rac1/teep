@@ -22,7 +22,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,8 +29,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -135,9 +132,11 @@ func fromConfig(cp *config.Provider) *provider.Provider {
 	}
 	switch cp.Name {
 	case "venice":
+		p.ChatPath = "/api/v1/chat/completions"
 		p.Attester = venice.NewAttester(cp.BaseURL, cp.APIKey)
 		p.Preparer = venice.NewPreparer(cp.APIKey)
 	case "nearai":
+		p.ChatPath = "/v1/chat/completions"
 		p.Attester = nearai.NewAttester(cp.BaseURL, cp.APIKey)
 		p.Preparer = nearai.NewPreparer(cp.APIKey)
 	}
@@ -259,7 +258,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer session.Zero()
 	}
 
-	upstreamURL := prov.BaseURL + "/api/v1/chat/completions"
+	upstreamURL := prov.BaseURL + prov.ChatPath
 	ctx := r.Context()
 	if !req.Stream {
 		var cancel context.CancelFunc
@@ -362,22 +361,9 @@ func (s *Server) buildUpstreamBody(
 		return nil, nil, fmt.Errorf("set model key: %w", err)
 	}
 
-	// Parse the model public key for encryption. SetModelKey validated it; this
-	// parse cannot fail on the same input.
-	modelPubKeyBytes, err := hex.DecodeString(raw.SigningKey)
-	if err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("decode signing key hex: %w", err)
-	}
-	modelPubKey, err := secp256k1.ParsePubKey(modelPubKeyBytes)
-	if err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("parse model public key: %w", err)
-	}
-
 	encMessages := make([]chatMessage, len(req.Messages))
 	for i, msg := range req.Messages {
-		ciphertext, err := attestation.Encrypt([]byte(msg.Content), modelPubKey)
+		ciphertext, err := attestation.Encrypt([]byte(msg.Content), session.ModelPubKey())
 		if err != nil {
 			session.Zero()
 			return nil, nil, fmt.Errorf("encrypt message %d: %w", i, err)
@@ -459,56 +445,76 @@ func (s *Server) relayStream(w http.ResponseWriter, body io.Reader, session *att
 		return
 	}
 
+	scanner := bufio.NewScanner(body)
+	buf := make([]byte, sseScannerBufSize)
+	scanner.Buffer(buf, sseScannerBufSize)
+
+	// Read the first line before committing a 200 status. If the upstream
+	// body is empty or immediately errors, return a proper HTTP error.
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			http.Error(w, "upstream stream error", http.StatusBadGateway)
+		} else {
+			http.Error(w, "empty upstream stream", http.StatusBadGateway)
+		}
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	scanner := bufio.NewScanner(body)
-	buf := make([]byte, sseScannerBufSize)
-	scanner.Buffer(buf, sseScannerBufSize)
+	// Process first line, then loop for the rest.
+	done := s.relaySSELine(w, flusher, scanner.Text(), session)
+	if done {
+		return
+	}
 
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if !strings.HasPrefix(line, "data: ") {
-			// Pass through non-data lines (comments, event:, id:, empty lines).
-			fmt.Fprintf(w, "%s\n", line)
-			flusher.Flush()
-			continue
-		}
-
-		data := line[len("data: "):]
-		if data == "[DONE]" {
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
+		if s.relaySSELine(w, flusher, scanner.Text(), session) {
 			return
 		}
-
-		if session == nil {
-			// Plaintext path: re-emit as-is.
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-			continue
-		}
-
-		// E2EE path: parse the JSON and decrypt the content field.
-		decrypted, err := decryptSSEChunk(data, session)
-		if err != nil {
-			slog.Error("stream decryption failed", "err", err)
-			// Abort: do not emit any plaintext.
-			fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
-			flusher.Flush()
-			return
-		}
-
-		fmt.Fprintf(w, "data: %s\n\n", decrypted)
-		flusher.Flush()
 	}
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("SSE scanner error", "err", err)
 	}
+}
+
+// relaySSELine processes a single SSE line, writing it to w. Returns true if
+// the stream should end (DONE marker or decryption error).
+func (s *Server) relaySSELine(w http.ResponseWriter, flusher http.Flusher, line string, session *attestation.Session) bool {
+	if !strings.HasPrefix(line, "data: ") {
+		fmt.Fprintf(w, "%s\n", line)
+		flusher.Flush()
+		return false
+	}
+
+	data := line[len("data: "):]
+	if data == "[DONE]" {
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return true
+	}
+
+	if session == nil {
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		return false
+	}
+
+	decrypted, err := decryptSSEChunk(data, session)
+	if err != nil {
+		slog.Error("stream decryption failed", "err", err)
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
+		flusher.Flush()
+		return true
+	}
+
+	fmt.Fprintf(w, "data: %s\n\n", decrypted)
+	flusher.Flush()
+	return false
 }
 
 // relayNonStream reads a non-streaming JSON response from body, decrypts the

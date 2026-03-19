@@ -43,6 +43,9 @@ type Provider struct {
 	// If a model name is absent, MapModel returns it unchanged.
 	ModelMap map[string]string
 
+	// ChatPath is the API path for chat completions (e.g. "/api/v1/chat/completions").
+	ChatPath string
+
 	// E2EE indicates whether this provider supports end-to-end encryption.
 	E2EE bool
 

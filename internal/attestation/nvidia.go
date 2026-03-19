@@ -71,7 +71,7 @@ var jwksCache = &nvidiaJWKSCache{}
 
 // nvidiaJWKSCache caches the fetched JWKS keyset with a TTL.
 type nvidiaJWKSCache struct {
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	keys      []cachedJWKSKey
 	fetchedAt time.Time
 }
@@ -87,22 +87,18 @@ type cachedJWKSKey struct {
 // It re-fetches the JWKS if the cache is empty or expired.
 func (c *nvidiaJWKSCache) keyfunc(ctx context.Context, client *http.Client) jwt.Keyfunc {
 	return func(token *jwt.Token) (any, error) {
-		c.mu.RLock()
-		expired := time.Since(c.fetchedAt) > nvidiaJWKSTTL || len(c.keys) == 0
-		keys := c.keys
-		c.mu.RUnlock()
-
-		if expired {
+		c.mu.Lock()
+		if time.Since(c.fetchedAt) > nvidiaJWKSTTL || len(c.keys) == 0 {
 			fresh, err := fetchAndParseJWKS(ctx, client)
 			if err != nil {
+				c.mu.Unlock()
 				return nil, fmt.Errorf("fetch NVIDIA JWKS: %w", err)
 			}
-			c.mu.Lock()
 			c.keys = fresh
 			c.fetchedAt = time.Now()
-			c.mu.Unlock()
-			keys = fresh
 		}
+		keys := c.keys
+		c.mu.Unlock()
 
 		kid, _ := token.Header["kid"].(string)
 		if kid == "" {

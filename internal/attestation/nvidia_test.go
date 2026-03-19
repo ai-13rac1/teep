@@ -365,9 +365,9 @@ func TestJWKSCacheExpiry(t *testing.T) {
 	c.mu.Unlock()
 
 	// Cache is still fresh; manually check.
-	c.mu.RLock()
+	c.mu.Lock()
 	expired := time.Since(c.fetchedAt) > nvidiaJWKSTTL
-	c.mu.RUnlock()
+	c.mu.Unlock()
 	if expired {
 		t.Error("cache should not be expired immediately after fill")
 	}
@@ -377,9 +377,9 @@ func TestJWKSCacheExpiry(t *testing.T) {
 	c.fetchedAt = time.Now().Add(-2 * nvidiaJWKSTTL)
 	c.mu.Unlock()
 
-	c.mu.RLock()
+	c.mu.Lock()
 	expired = time.Since(c.fetchedAt) > nvidiaJWKSTTL
-	c.mu.RUnlock()
+	c.mu.Unlock()
 	if !expired {
 		t.Error("cache should be expired after forcing fetchedAt into the past")
 	}

@@ -101,11 +101,11 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		errBody := body
-		if len(errBody) > 512 {
-			errBody = append(errBody[:512], []byte("...[truncated]")...)
+		msg := string(body)
+		if len(msg) > 512 {
+			msg = msg[:512] + "...[truncated]"
 		}
-		return nil, fmt.Errorf("nearai: attestation endpoint returned HTTP %d: %s", resp.StatusCode, errBody)
+		return nil, fmt.Errorf("nearai: attestation endpoint returned HTTP %d: %s", resp.StatusCode, msg)
 	}
 
 	var ar attestationResponse

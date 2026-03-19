@@ -69,6 +69,11 @@ func (s *Session) SetModelKey(pubKeyHex string) error {
 	return nil
 }
 
+// ModelPubKey returns the parsed secp256k1 public key set by SetModelKey.
+func (s *Session) ModelPubKey() *secp256k1.PublicKey {
+	return s.modelPubKey
+}
+
 // Zero clears private key bytes from memory. This is best-effort under the
 // current Go runtime — the GC may have already copied the key material.
 // TODO: migrate to runtime/secret (Go proposal #57001) when available.

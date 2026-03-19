@@ -21,6 +21,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearai"
 	"github.com/13rac1/teep/internal/provider/venice"
 	"github.com/13rac1/teep/internal/proxy"
@@ -201,14 +202,8 @@ func runVerification(providerName, modelName, saveDir string) *attestation.Verif
 	return attestation.BuildReport(providerName, modelName, raw, nonce, cfg.Enforced, tdxResult, nvidiaResult)
 }
 
-// attesterInterface is a local alias so we can call FetchAttestation without
-// importing the provider package (which would be a circular path for nearai/venice).
-type attesterInterface interface {
-	FetchAttestation(ctx context.Context, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error)
-}
-
 // newAttester returns the appropriate Attester for the named provider.
-func newAttester(name string, cp *config.Provider) attesterInterface {
+func newAttester(name string, cp *config.Provider) provider.Attester {
 	switch name {
 	case "venice":
 		return venice.NewAttester(cp.BaseURL, cp.APIKey)
@@ -317,16 +312,10 @@ func saveAttestationData(dir, provider string, raw *attestation.RawAttestation) 
 	if err != nil {
 		slog.Error("marshal attestation JSON failed", "err", err)
 	} else {
-		path := filepath.Join(dir, provider+"_attestation.json")
-		if err := os.WriteFile(path, rawJSON, 0o600); err != nil {
-			slog.Error("save attestation JSON failed", "path", path, "err", err)
-		} else {
-			slog.Info("saved attestation JSON", "path", path, "bytes", len(rawJSON))
-		}
+		saveFile(filepath.Join(dir, provider+"_attestation.json"), rawJSON)
 	}
 
 	if raw.NvidiaPayload != "" {
-		path := filepath.Join(dir, provider+"_nvidia_payload.json")
 		// Pretty-print if it's JSON; write raw otherwise.
 		data := []byte(raw.NvidiaPayload)
 		var obj any
@@ -335,19 +324,19 @@ func saveAttestationData(dir, provider string, raw *attestation.RawAttestation) 
 				data = pretty
 			}
 		}
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			slog.Error("save NVIDIA payload failed", "path", path, "err", err)
-		} else {
-			slog.Info("saved NVIDIA payload", "path", path, "bytes", len(data))
-		}
+		saveFile(filepath.Join(dir, provider+"_nvidia_payload.json"), data)
 	}
 
 	if raw.IntelQuote != "" {
-		path := filepath.Join(dir, provider+"_intel_quote.b64")
-		if err := os.WriteFile(path, []byte(raw.IntelQuote), 0o600); err != nil {
-			slog.Error("save Intel quote failed", "path", path, "err", err)
-		} else {
-			slog.Info("saved Intel TDX quote", "path", path)
-		}
+		saveFile(filepath.Join(dir, provider+"_intel_quote.b64"), []byte(raw.IntelQuote))
 	}
+}
+
+// saveFile writes data to path with 0600 permissions, logging the result.
+func saveFile(path string, data []byte) {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		slog.Error("save failed", "path", path, "err", err)
+		return
+	}
+	slog.Info("saved", "path", path, "bytes", len(data))
 }

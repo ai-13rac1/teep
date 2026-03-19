@@ -366,10 +366,3 @@ func nvidiaNonceDetail(r *NvidiaVerifyResult) string {
 		return "nonce in NVIDIA payload matches submitted nonce"
 	}
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

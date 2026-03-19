@@ -257,23 +257,10 @@ func TestStatusIcon(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// knownProviders tests
-// --------------------------------------------------------------------------
-
-func TestKnownProviders(t *testing.T) {
-	// knownProviders is a trivial string join; its correctness is verified
-	// indirectly by the compile-time type check and the verify flow tests.
-	// A direct test is skipped here to avoid importing config in test code
-	// (the function is already exercised by the verify integration path).
-}
-
-// --------------------------------------------------------------------------
 // Tier boundary correctness
 // --------------------------------------------------------------------------
 
 func TestTierBoundaries(t *testing.T) {
-	// Verify that tierBoundaries cover exactly 20 factors.
-	total := 0
 	for _, tb := range tierBoundaries {
 		if tb.end > 20 {
 			t.Errorf("tier boundary end %d exceeds 20", tb.end)
@@ -283,7 +270,6 @@ func TestTierBoundaries(t *testing.T) {
 	if last != 20 {
 		t.Errorf("final tier boundary end = %d, want 20", last)
 	}
-	_ = total
 }
 
 // TestFormatReport_SeparatorLength verifies the separator is as long as the header.
