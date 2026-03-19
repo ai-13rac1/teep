@@ -104,14 +104,13 @@ var factorRegistry = [21]factorInfo{
 			"this binding, E2EE is security theater.",
 	},
 	{
-		Name:    "attestation_freshness",
+		Name:    "intel_pcs_collateral",
 		Tier:    2,
-		Summary: "TCB level current per Intel PCS",
-		Description: "Checks whether the TDX quote's TCB level is current by " +
-			"fetching collateral from the Intel Provisioning Certification " +
-			"Service (PCS). A current TCB level implies the firmware is " +
-			"within Intel's validity window. Skipped in --offline mode or " +
-			"when the Intel PCS is unreachable.",
+		Summary: "Intel PCS collateral fetched",
+		Description: "Verifies that collateral (TCB info, CRLs) was successfully " +
+			"fetched from the Intel Provisioning Certification Service (PCS). " +
+			"Collateral is required for TCB currency and revocation checks. " +
+			"Skipped in --offline mode or when the Intel PCS is unreachable.",
 	},
 	{
 		Name:    "tdx_tcb_current",

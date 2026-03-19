@@ -195,7 +195,7 @@ func (c *PoCClient) postJSON(ctx context.Context, baseURL, path string, payload 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB max
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

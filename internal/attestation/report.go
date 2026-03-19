@@ -199,17 +199,17 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 		addFactor("tdx_reportdata_binding", Pass, fmt.Sprintf("REPORTDATA binds signing key via Ethereum address (%s)", hex.EncodeToString(tdxResult.ReportData[:20])))
 	}
 
-	// Factor 9: attestation_freshness
+	// Factor 9: intel_pcs_collateral
 	if tdxResult == nil || tdxResult.ParseErr != nil {
-		addFactor("attestation_freshness", Skip, "no parseable TDX quote")
+		addFactor("intel_pcs_collateral", Skip, "no parseable TDX quote")
 	} else if tdxResult.TcbStatus != "" {
-		addFactor("attestation_freshness", Pass,
-			fmt.Sprintf("TCB level current per Intel PCS (status: %s)", tdxResult.TcbStatus))
+		addFactor("intel_pcs_collateral", Pass,
+			fmt.Sprintf("Intel PCS collateral fetched (TCB status: %s)", tdxResult.TcbStatus))
 	} else if tdxResult.CollateralErr != nil {
-		addFactor("attestation_freshness", Skip,
+		addFactor("intel_pcs_collateral", Skip,
 			fmt.Sprintf("Intel PCS collateral fetch failed: %v", tdxResult.CollateralErr))
 	} else {
-		addFactor("attestation_freshness", Skip,
+		addFactor("intel_pcs_collateral", Skip,
 			"offline mode; Intel PCS collateral not fetched")
 	}
 
@@ -240,7 +240,7 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 			fmt.Sprintf("TEE_TCB_SVN: %s (Intel PCS collateral fetch failed: %v)", svnHex, tdxResult.CollateralErr))
 	} else {
 		svnHex := hex.EncodeToString(tdxResult.TeeTCBSVN)
-		addFactor("tdx_tcb_current", Pass,
+		addFactor("tdx_tcb_current", Skip,
 			fmt.Sprintf("TEE_TCB_SVN: %s (offline; full check requires Intel PCS)", svnHex))
 	}
 

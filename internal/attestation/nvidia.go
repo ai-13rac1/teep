@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -22,9 +23,6 @@ const nvidiaJWKSURL = "https://nras.attestation.nvidia.com/.well-known/jwks.json
 // attestation. POST raw EAT JSON to receive a signed JWT with measurement
 // comparison results against NVIDIA's Reference Integrity Manifest (RIM).
 const nrasAttestURL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
-
-// nvidiaJWKSTTL is how long to cache the NVIDIA JWKS before re-fetching.
-const nvidiaJWKSTTL = time.Hour
 
 // NvidiaVerifyResult holds the structured outcome of NVIDIA payload verification.
 // Fields are populated even on partial failure. Supports both EAT (local SPDM
@@ -72,129 +70,46 @@ type nvidiaClaims struct {
 	Nonce         string `json:"nonce"`
 }
 
-// jwksCache is a package-level singleton for caching NVIDIA's JWKS.
-var jwksCache = &nvidiaJWKSCache{}
-
-// nvidiaJWKSCache caches the fetched JWKS keyset with a TTL.
-type nvidiaJWKSCache struct {
-	mu        sync.Mutex
-	keys      []cachedJWKSKey
-	fetchedAt time.Time
+// jwksEntry pairs a keyfunc.Keyfunc with its cancel function for cleanup.
+type jwksEntry struct {
+	kf     keyfunc.Keyfunc
+	cancel context.CancelFunc
 }
 
-// cachedJWKSKey pairs a kid with a usable RSA public key.
-// The key field holds an *rsa.PublicKey (or other crypto.PublicKey).
-type cachedJWKSKey struct {
-	kid string
-	key any
-}
+// jwksInstances caches keyfunc instances by JWKS URL. Production uses
+// nvidiaJWKSURL; tests use httptest server URLs. The keyfunc/v3 library handles
+// background refresh, rate-limited unknown-kid refresh, and alg/use validation.
+var jwksInstances sync.Map // URL string → *jwksEntry
 
-// keyfunc returns the jwt.Keyfunc that resolves signing keys from the cached JWKS.
-// It re-fetches the JWKS if the cache is empty or expired.
-func (c *nvidiaJWKSCache) keyfunc(ctx context.Context, client *http.Client) jwt.Keyfunc {
-	return func(token *jwt.Token) (any, error) {
-		c.mu.Lock()
-		if time.Since(c.fetchedAt) > nvidiaJWKSTTL || len(c.keys) == 0 {
-			fresh, err := fetchAndParseJWKS(ctx, client)
-			if err != nil {
-				c.mu.Unlock()
-				return nil, fmt.Errorf("fetch NVIDIA JWKS: %w", err)
-			}
-			c.keys = fresh
-			c.fetchedAt = time.Now()
-		}
-		keys := c.keys
-		c.mu.Unlock()
-
-		kid, _ := token.Header["kid"].(string)
-		if kid == "" {
-			// No kid in JWT: accept only if JWKS has exactly one key.
-			if len(keys) == 1 {
-				return keys[0].key, nil
-			}
-			return nil, fmt.Errorf("JWT missing kid header and JWKS has %d keys; cannot determine signing key", len(keys))
-		}
-		for _, k := range keys {
-			if k.kid == kid {
-				return k.key, nil
-			}
-		}
-		return nil, fmt.Errorf("no matching key found in NVIDIA JWKS (kid=%q)", kid)
+// getOrCreateKeyfunc returns a keyfunc.Keyfunc for the given JWKS URL.
+// Instances are created once per URL and cached for the process lifetime.
+func getOrCreateKeyfunc(ctx context.Context, jwksURL string) (keyfunc.Keyfunc, error) {
+	if v, ok := jwksInstances.Load(jwksURL); ok {
+		return v.(*jwksEntry).kf, nil
 	}
-}
-
-// jwksJSON is the minimal JSON structure of a JWKS endpoint response.
-type jwksJSON struct {
-	Keys []jwkKeyJSON `json:"keys"`
-}
-
-// jwkKeyJSON represents one key entry in a JWKS document.
-type jwkKeyJSON struct {
-	Kty string `json:"kty"`
-	Kid string `json:"kid"`
-	Crv string `json:"crv"`
-	X   string `json:"x"`
-	Y   string `json:"y"`
-	Alg string `json:"alg"`
-	Use string `json:"use"`
-}
-
-// fetchAndParseJWKS fetches the NVIDIA JWKS and returns usable key entries.
-func fetchAndParseJWKS(ctx context.Context, client *http.Client) ([]cachedJWKSKey, error) {
-	return fetchFromURL(ctx, client, nvidiaJWKSURL)
-}
-
-// fetchFromURL fetches a JWKS from the given URL and returns usable key entries.
-// This is separated from fetchAndParseJWKS so tests can point at a local server.
-func fetchFromURL(ctx context.Context, client *http.Client, url string) ([]cachedJWKSKey, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	kfCtx, cancel := context.WithCancel(context.Background())
+	k, err := keyfunc.NewDefaultCtx(kfCtx, []string{jwksURL})
 	if err != nil {
-		return nil, fmt.Errorf("build JWKS request: %w", err)
+		cancel()
+		return nil, fmt.Errorf("initialize JWKS for %s: %w", jwksURL, err)
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
+	entry := &jwksEntry{kf: k, cancel: cancel}
+	actual, loaded := jwksInstances.LoadOrStore(jwksURL, entry)
+	if loaded {
+		// Another goroutine won the race; shut down ours.
+		cancel()
+		return actual.(*jwksEntry).kf, nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JWKS endpoint returned HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB max
-	if err != nil {
-		return nil, fmt.Errorf("read JWKS body: %w", err)
-	}
-
-	return parseJWKS(body)
+	return k, nil
 }
 
-// parseJWKS converts raw JWKS JSON bytes into a slice of cachedJWKSKey.
-// Only EC keys are supported (NVIDIA NRAS uses ES384).
-func parseJWKS(data []byte) ([]cachedJWKSKey, error) {
-	var raw jwksJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("unmarshal JWKS JSON: %w", err)
-	}
-
-	var keys []cachedJWKSKey
-	for _, k := range raw.Keys {
-		if k.Kty != "EC" {
-			continue
-		}
-		pub, err := ecPublicKeyFromJWK(k.Crv, k.X, k.Y)
-		if err != nil {
-			slog.Debug("JWKS: skipping malformed EC key", "kid", k.Kid, "err", err)
-			continue
-		}
-		keys = append(keys, cachedJWKSKey{kid: k.Kid, key: pub})
-	}
-
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("JWKS contains no usable EC keys")
-	}
-	return keys, nil
+// resetJWKS shuts down and removes all cached JWKS instances. Used by tests.
+func resetJWKS() {
+	jwksInstances.Range(func(key, value any) bool {
+		value.(*jwksEntry).cancel()
+		jwksInstances.Delete(key)
+		return true
+	})
 }
 
 // VerifyNVIDIAPayload verifies the NVIDIA attestation payload via local SPDM
@@ -222,18 +137,20 @@ func VerifyNVIDIAPayload(payload string, expectedNonce Nonce) *NvidiaVerifyResul
 }
 
 // verifyNVIDIAJWT verifies an NVIDIA NRAS attestation JWT. It fetches (and
-// caches) the NVIDIA JWKS, verifies the JWT signature, and extracts claims.
-func verifyNVIDIAJWT(ctx context.Context, jwtPayload string, client *http.Client) *NvidiaVerifyResult {
+// caches) the NVIDIA JWKS via keyfunc/v3, verifies the JWT signature, and
+// extracts claims. Nonce freshness is verified separately via the EAT layer
+// (factor 14: nvidia_nonce_match).
+func verifyNVIDIAJWT(ctx context.Context, jwtPayload, jwksURL string) *NvidiaVerifyResult {
 	result := &NvidiaVerifyResult{Format: "JWT"}
 
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+	kf, err := getOrCreateKeyfunc(ctx, jwksURL)
+	if err != nil {
+		result.SignatureErr = fmt.Errorf("JWKS initialization: %w", err)
+		return result
 	}
 
-	keyFunc := jwksCache.keyfunc(ctx, client)
-
 	claims := &nvidiaClaims{}
-	token, err := jwt.ParseWithClaims(jwtPayload, claims, keyFunc,
+	token, err := jwt.ParseWithClaims(jwtPayload, claims, kf.Keyfunc,
 		jwt.WithValidMethods([]string{"ES256", "ES384", "ES512"}),
 		jwt.WithExpirationRequired(),
 	)
@@ -346,7 +263,7 @@ func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Clien
 		}
 	}
 
-	return verifyNVIDIAJWT(ctx, extracted, client)
+	return verifyNVIDIAJWT(ctx, extracted, nvidiaJWKSURL)
 }
 
 // extractNRASJWT parses the NRAS response body. NRAS returns a JSON array

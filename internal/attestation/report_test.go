@@ -363,20 +363,20 @@ func TestBuildReportNvidiaPresent(t *testing.T) {
 	}
 }
 
-// TestBuildReportAttestationFreshnessSkipNilTDX verifies attestation_freshness
+// TestBuildReportAttestationFreshnessSkipNilTDX verifies intel_pcs_collateral
 // is Skip when no TDX result is available.
 func TestBuildReportAttestationFreshnessSkipNilTDX(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport("venice", "m", raw, nonce, nil, nil, nil, nil, nil)
 
-	f := findFactor(t, report, "attestation_freshness")
+	f := findFactor(t, report, "intel_pcs_collateral")
 	if f.Status != Skip {
-		t.Errorf("attestation_freshness with nil tdxResult: got %s, want SKIP", f.Status)
+		t.Errorf("intel_pcs_collateral with nil tdxResult: got %s, want SKIP", f.Status)
 	}
 }
 
-// TestBuildReportAttestationFreshnessPassWithTcbStatus verifies attestation_freshness
+// TestBuildReportAttestationFreshnessPassWithTcbStatus verifies intel_pcs_collateral
 // passes when TcbStatus is set.
 func TestBuildReportAttestationFreshnessPassWithTcbStatus(t *testing.T) {
 	nonce := NewNonce()
@@ -387,13 +387,13 @@ func TestBuildReportAttestationFreshnessPassWithTcbStatus(t *testing.T) {
 	}
 	report := BuildReport("venice", "m", raw, nonce, nil, tdxResult, nil, nil, nil)
 
-	f := findFactor(t, report, "attestation_freshness")
+	f := findFactor(t, report, "intel_pcs_collateral")
 	if f.Status != Pass {
-		t.Errorf("attestation_freshness with TcbStatus: got %s, want PASS; detail: %s", f.Status, f.Detail)
+		t.Errorf("intel_pcs_collateral with TcbStatus: got %s, want PASS; detail: %s", f.Status, f.Detail)
 	}
 }
 
-// TestBuildReportAttestationFreshnessSkipOffline verifies attestation_freshness
+// TestBuildReportAttestationFreshnessSkipOffline verifies intel_pcs_collateral
 // is Skip when TDX result exists but no collateral was fetched (offline).
 func TestBuildReportAttestationFreshnessSkipOffline(t *testing.T) {
 	nonce := NewNonce()
@@ -403,9 +403,9 @@ func TestBuildReportAttestationFreshnessSkipOffline(t *testing.T) {
 	}
 	report := BuildReport("venice", "m", raw, nonce, nil, tdxResult, nil, nil, nil)
 
-	f := findFactor(t, report, "attestation_freshness")
+	f := findFactor(t, report, "intel_pcs_collateral")
 	if f.Status != Skip {
-		t.Errorf("attestation_freshness offline: got %s, want SKIP; detail: %s", f.Status, f.Detail)
+		t.Errorf("intel_pcs_collateral offline: got %s, want SKIP; detail: %s", f.Status, f.Detail)
 	}
 }
 
@@ -488,8 +488,8 @@ func TestBuildReportTdxTcbCurrentOffline(t *testing.T) {
 	report := BuildReport("venice", "m", raw, nonce, nil, tdxResult, nil, nil, nil)
 
 	f := findFactor(t, report, "tdx_tcb_current")
-	if f.Status != Pass {
-		t.Errorf("tdx_tcb_current offline: got %s, want PASS; detail: %s", f.Status, f.Detail)
+	if f.Status != Skip {
+		t.Errorf("tdx_tcb_current offline: got %s, want SKIP; detail: %s", f.Status, f.Detail)
 	}
 	if !strings.Contains(f.Detail, "TEE_TCB_SVN") {
 		t.Errorf("detail should contain TEE_TCB_SVN: %s", f.Detail)

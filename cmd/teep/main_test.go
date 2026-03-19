@@ -26,7 +26,7 @@ func buildTestReport(provider, model string) *attestation.VerificationReport {
 		{Name: "signing_key_present", Status: attestation.Pass, Detail: "Signing key: 04a3b2...", Enforced: true},
 		// Tier 2 (7-15)
 		{Name: "tdx_reportdata_binding", Status: attestation.Pass, Detail: "REPORTDATA binds signing key + nonce", Enforced: true},
-		{Name: "attestation_freshness", Status: attestation.Skip, Detail: "Quote age not determinable", Enforced: false},
+		{Name: "intel_pcs_collateral", Status: attestation.Skip, Detail: "Quote age not determinable", Enforced: false},
 		{Name: "tdx_tcb_current", Status: attestation.Pass, Detail: "TCB SVN: 03000000000000000000000000000000", Enforced: false},
 		{Name: "nvidia_payload_present", Status: attestation.Pass, Detail: "NVIDIA payload present (512 chars)", Enforced: false},
 		{Name: "nvidia_signature", Status: attestation.Pass, Detail: "JWT signature valid (RS256)", Enforced: false},

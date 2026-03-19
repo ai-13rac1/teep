@@ -233,7 +233,7 @@ func VerifyTDXQuote(ctx context.Context, base64Quote, signingKeyHex string, nonc
 	if !offline {
 		collateralOpts := &tdxverify.Options{
 			GetCollateral:    true,
-			CheckRevocations: false,
+			CheckRevocations: true,
 			Getter: &trust.RetryHTTPSGetter{
 				Timeout:       30 * time.Second,
 				MaxRetryDelay: 5 * time.Second,
