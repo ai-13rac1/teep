@@ -113,8 +113,10 @@ func New(cfg *config.Config) *Server {
 // ListenAndServe starts the proxy HTTP server on the configured listen address.
 func (s *Server) ListenAndServe() error {
 	srv := &http.Server{
-		Addr:    s.cfg.ListenAddr,
-		Handler: s.mux,
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("teep proxy listening on %s", s.cfg.ListenAddr)
 	return srv.ListenAndServe()
@@ -216,9 +218,10 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 
 // handleChatCompletions is the core proxy handler for POST /v1/chat/completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MiB max
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
 		return
 	}
 	r.Body.Close()
@@ -276,7 +279,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL := prov.BaseURL + "/api/v1/chat/completions"
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
+	ctx := r.Context()
+	if !req.Stream {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 120*time.Second)
+		defer cancel()
+	}
+	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
 	if err != nil {
 		http.Error(w, "failed to build upstream request", http.StatusInternalServerError)
 		return
@@ -339,6 +348,11 @@ func (s *Server) buildUpstreamBody(
 	// Fetch a fresh attestation to get the current signing key.
 	// The verification cache holds reports; it intentionally does not cache
 	// signing keys — each E2EE session must use a fresh key.
+	//
+	// CRITICAL: Re-verify REPORTDATA binding on this fresh response.
+	// Without this, a MITM could substitute the signing key in the second
+	// fetch while the cached report (from the first fetch) still shows
+	// tdx_reportdata_binding as Pass.
 	nonce := attestation.NewNonce()
 	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 	if err != nil {
@@ -346,6 +360,16 @@ func (s *Server) buildUpstreamBody(
 	}
 	if raw.SigningKey == "" {
 		return nil, nil, fmt.Errorf("attestation response missing signing_key")
+	}
+	if raw.IntelQuote == "" {
+		return nil, nil, fmt.Errorf("fresh attestation missing TDX quote; cannot verify signing key binding")
+	}
+	tdxResult := attestation.VerifyTDXQuote(raw.IntelQuote, raw.SigningKey, nonce)
+	if tdxResult.ParseErr != nil {
+		return nil, nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
+	}
+	if tdxResult.ReportDataBindingErr != nil {
+		return nil, nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", tdxResult.ReportDataBindingErr)
 	}
 
 	session, err := attestation.NewSession()
@@ -492,7 +516,7 @@ func (s *Server) relayStream(w http.ResponseWriter, body io.Reader, session *att
 		if err != nil {
 			log.Printf("proxy: stream decryption failed: %v", err)
 			// Abort: do not emit any plaintext.
-			fmt.Fprintf(w, "data: {\"error\":\"stream decryption failed\"}\n\n")
+			fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
 			flusher.Flush()
 			return
 		}

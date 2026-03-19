@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -148,12 +149,9 @@ func verifyReportDataBinding(reportData []byte, signingKeyHex string, nonce Nonc
 	h.Write(nonce[:])
 	expected := h.Sum(nil) // 32 bytes
 
-	actual := reportData[:32]
-	for i := range expected {
-		if expected[i] != actual[i] {
-			return fmt.Errorf("REPORTDATA[0:32] = %s, expected SHA-256(signing_key||nonce) = %s",
-				hex.EncodeToString(actual), hex.EncodeToString(expected))
-		}
+	if subtle.ConstantTimeCompare(expected, reportData[:32]) != 1 {
+		return fmt.Errorf("REPORTDATA[0:32] = %s, expected SHA-256(signing_key||nonce) = %s",
+			hex.EncodeToString(reportData[:32]), hex.EncodeToString(expected))
 	}
 	return nil
 }

@@ -90,8 +90,15 @@ func (c *nvidiaJWKSCache) keyfunc(ctx context.Context, client *http.Client) jwt.
 		}
 
 		kid, _ := token.Header["kid"].(string)
+		if kid == "" {
+			// No kid in JWT: accept only if JWKS has exactly one key.
+			if len(keys) == 1 {
+				return keys[0].key, nil
+			}
+			return nil, fmt.Errorf("JWT missing kid header and JWKS has %d keys; cannot determine signing key", len(keys))
+		}
 		for _, k := range keys {
-			if kid == "" || k.kid == kid {
+			if k.kid == kid {
 				return k.key, nil
 			}
 		}
@@ -137,7 +144,7 @@ func fetchFromURL(ctx context.Context, client *http.Client, url string) ([]cache
 		return nil, fmt.Errorf("JWKS endpoint returned HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB max
 	if err != nil {
 		return nil, fmt.Errorf("read JWKS body: %w", err)
 	}

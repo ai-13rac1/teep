@@ -76,10 +76,8 @@ func (s *Session) Zero() {
 	if s.PrivateKey == nil {
 		return
 	}
-	b := s.PrivateKey.Serialize()
-	for i := range b {
-		b[i] = 0
-	}
+	s.PrivateKey.Zero()
+	s.PrivateKey = nil
 }
 
 // Encrypt encrypts plaintext for the model's public key using per-message

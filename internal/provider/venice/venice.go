@@ -87,13 +87,17 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB max
 	if err != nil {
 		return nil, fmt.Errorf("venice: read attestation response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("venice: attestation endpoint returned HTTP %d: %s", resp.StatusCode, body)
+		errBody := body
+		if len(errBody) > 512 {
+			errBody = append(errBody[:512], []byte("...[truncated]")...)
+		}
+		return nil, fmt.Errorf("venice: attestation endpoint returned HTTP %d: %s", resp.StatusCode, errBody)
 	}
 
 	var ar attestationResponse

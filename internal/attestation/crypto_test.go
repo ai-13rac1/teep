@@ -384,14 +384,16 @@ func TestDecryptNotHex(t *testing.T) {
 	}
 }
 
-// TestSessionZero verifies Zero does not panic on a valid session.
+// TestSessionZero verifies Zero zeroes the key and nils the pointer.
 func TestSessionZero(t *testing.T) {
 	s, err := NewSession()
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	// Should not panic.
 	s.Zero()
+	if s.PrivateKey != nil {
+		t.Fatal("PrivateKey should be nil after Zero()")
+	}
 }
 
 // TestSessionZeroNilKey verifies Zero does not panic when PrivateKey is nil.

@@ -209,8 +209,8 @@ func checkFilePermissions(path string) error {
 		return fmt.Errorf("stat %q: %w", path, err)
 	}
 	mode := info.Mode().Perm()
-	if mode&0o044 != 0 {
-		return fmt.Errorf("%q has insecure permissions %04o (group- or world-readable); restrict to 0600", path, mode)
+	if mode&0o066 != 0 {
+		return fmt.Errorf("%q has insecure permissions %04o (group- or world-readable/writable); restrict to 0600", path, mode)
 	}
 	return nil
 }

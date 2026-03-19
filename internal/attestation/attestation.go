@@ -72,6 +72,13 @@ type RawAttestation struct {
 	NvidiaPayload string
 }
 
+// cacheKey identifies a provider/model pair for cache lookups.
+// Using a struct avoids delimiter-based key collisions.
+type cacheKey struct {
+	provider string
+	model    string
+}
+
 // cacheEntry stores a verified report and the time it was populated.
 type cacheEntry struct {
 	report    *VerificationReport
@@ -79,18 +86,18 @@ type cacheEntry struct {
 }
 
 // Cache stores expensive attestation verification results keyed by
-// "provider:model". The signing key is intentionally NOT cached — each E2EE
+// provider+model. The signing key is intentionally NOT cached — each E2EE
 // session fetches a fresh signing key to prevent TOCTOU with key rotation.
 type Cache struct {
 	mu      sync.RWMutex
-	entries map[string]*cacheEntry
+	entries map[cacheKey]*cacheEntry
 	ttl     time.Duration
 }
 
 // NewCache returns a Cache with the specified TTL.
 func NewCache(ttl time.Duration) *Cache {
 	return &Cache{
-		entries: make(map[string]*cacheEntry),
+		entries: make(map[cacheKey]*cacheEntry),
 		ttl:     ttl,
 	}
 }
@@ -100,7 +107,7 @@ func NewCache(ttl time.Duration) *Cache {
 func (c *Cache) Get(provider, model string) (*VerificationReport, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	e, ok := c.entries[provider+":"+model]
+	e, ok := c.entries[cacheKey{provider, model}]
 	if !ok || time.Since(e.fetchedAt) > c.ttl {
 		return nil, false
 	}
@@ -111,7 +118,7 @@ func (c *Cache) Get(provider, model string) (*VerificationReport, bool) {
 func (c *Cache) Put(provider, model string, report *VerificationReport) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[provider+":"+model] = &cacheEntry{
+	c.entries[cacheKey{provider, model}] = &cacheEntry{
 		report:    report,
 		fetchedAt: time.Now(),
 	}
@@ -121,14 +128,14 @@ func (c *Cache) Put(provider, model string, report *VerificationReport) {
 // hammering when attestation has recently failed. Entries expire after TTL.
 type NegativeCache struct {
 	mu      sync.RWMutex
-	entries map[string]time.Time
+	entries map[cacheKey]time.Time
 	ttl     time.Duration
 }
 
 // NewNegativeCache returns a NegativeCache with the specified TTL.
 func NewNegativeCache(ttl time.Duration) *NegativeCache {
 	return &NegativeCache{
-		entries: make(map[string]time.Time),
+		entries: make(map[cacheKey]time.Time),
 		ttl:     ttl,
 	}
 }
@@ -138,7 +145,7 @@ func NewNegativeCache(ttl time.Duration) *NegativeCache {
 func (c *NegativeCache) IsBlocked(provider, model string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	t, ok := c.entries[provider+":"+model]
+	t, ok := c.entries[cacheKey{provider, model}]
 	return ok && time.Since(t) < c.ttl
 }
 
@@ -146,5 +153,5 @@ func (c *NegativeCache) IsBlocked(provider, model string) bool {
 func (c *NegativeCache) Record(provider, model string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[provider+":"+model] = time.Now()
+	c.entries[cacheKey{provider, model}] = time.Now()
 }

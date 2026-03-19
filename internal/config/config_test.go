@@ -409,6 +409,17 @@ func TestCheckFilePermissionsOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestCheckFilePermissionsGroupWritable(t *testing.T) {
+	path := writeConfigFile(t, "[policy]", 0o600)
+	// os.WriteFile is subject to umask; chmod explicitly.
+	if err := os.Chmod(path, 0o620); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := checkFilePermissions(path); err == nil {
+		t.Error("checkFilePermissions(0620): expected error for group-writable, got nil")
+	}
+}
+
 func TestCheckFilePermissionsNotFound(t *testing.T) {
 	if err := checkFilePermissions("/nonexistent/path/file.toml"); err == nil {
 		t.Error("checkFilePermissions on nonexistent file: expected error, got nil")

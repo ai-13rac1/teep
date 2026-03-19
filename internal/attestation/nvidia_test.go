@@ -6,9 +6,11 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,8 +93,14 @@ func keyfuncFromURL(ctx context.Context, client *http.Client, url string) jwt.Ke
 			return nil, err
 		}
 		kid, _ := token.Header["kid"].(string)
+		if kid == "" {
+			if len(keys) == 1 {
+				return keys[0].key, nil
+			}
+			return nil, fmt.Errorf("JWT missing kid header and JWKS has %d keys", len(keys))
+		}
 		for _, k := range keys {
-			if kid == "" || k.kid == kid {
+			if k.kid == kid {
 				return k.key, nil
 			}
 		}
@@ -414,5 +422,52 @@ func TestExtractPartialClaims(t *testing.T) {
 	}
 	if !result.ExpiresAt.IsZero() {
 		t.Errorf("ExpiresAt should be zero when ExpiresAt claim is nil")
+	}
+}
+
+// TestJWKSMultipleKeysNoKid verifies that a JWT without a kid header fails
+// when the JWKS contains multiple keys (cannot determine which to use).
+func TestJWKSMultipleKeysNoKid(t *testing.T) {
+	key1 := generateTestRSAKey(t)
+	key2 := generateTestRSAKey(t)
+
+	// Build JWKS with two keys
+	jwks := jwksJSON{
+		Keys: []jwkKeyJSON{
+			{
+				Kty: "RSA",
+				Kid: "key-1",
+				N:   base64.RawURLEncoding.EncodeToString(key1.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key1.PublicKey.E)).Bytes()),
+				Alg: "RS256",
+				Use: "sig",
+			},
+			{
+				Kty: "RSA",
+				Kid: "key-2",
+				N:   base64.RawURLEncoding.EncodeToString(key2.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key2.PublicKey.E)).Bytes()),
+				Alg: "RS256",
+				Use: "sig",
+			},
+		},
+	}
+	jwksBody, _ := json.Marshal(jwks)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jwksBody)
+	}))
+	defer srv.Close()
+
+	// Sign JWT with key1 but omit kid header
+	jwtStr := makeTestJWT(t, key1, "", "pass", "", "nvidia", time.Now().Add(time.Hour))
+
+	kf := keyfuncFromURL(context.Background(), srv.Client(), srv.URL)
+	_, err := jwt.Parse(jwtStr, kf, jwt.WithValidMethods([]string{"RS256"}))
+	if err == nil {
+		t.Fatal("expected error for JWT without kid when JWKS has multiple keys, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing kid") {
+		t.Errorf("error should mention missing kid, got: %v", err)
 	}
 }
