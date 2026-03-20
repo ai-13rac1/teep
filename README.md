@@ -2,7 +2,7 @@
 
 A local TEE (Trusted Execution Environment) proxy for AI APIs. Teep sits between OpenAI-compatible clients and TEE-capable providers, handling attestation verification and channel security transparently.
 
-It also benchmarks vendor attestation against a 21-factor verification framework, exposing gaps in TEE implementations.
+It also benchmarks vendor attestation against a 23-factor verification framework, exposing gaps in TEE implementations.
 
 ```
 Client (OpenAI SDK) --> 127.0.0.1:8080 (teep)
@@ -62,36 +62,49 @@ Example output (Venice AI):
 
 ```
 Attestation Report: venice / e2ee-qwen3-5-122b-a10b
-════════════════════════════════════════════════════
+═══════════════════════════════════════════════════
+
+  Hardware:      intel-tdx
+  Upstream:      Qwen/Qwen3.5-122B-A10B
+  App:           dstack-nvidia-0.5.5
+  Compose hash:  242a62724303cc32...
+  OS image:      9b69bb1698bacbb6...
+  Device:        71b4c123bc28aa4d...
+  PPID:          ba19033e7e0a7678...
+  Nonce source:  client
+  Candidates:    1/6 evaluated
+  Event log:     30 entries
 
 Tier 1: Core Attestation
-  ✓ nonce_match                nonce matches (64 hex chars) (client-supplied)
+  ✓ nonce_match                nonce matches (64 hex chars) (client-supplied)  [ENFORCED]
   ✓ tdx_quote_present          TDX quote present (10012 hex chars)
-  ✓ tdx_quote_structure        QuoteV4 (648 header + 4358 signed data bytes)
+  ✓ tdx_quote_structure        valid QuoteV4, MRTD: b24d3b24e9e3c160...
   ✓ tdx_cert_chain             certificate chain valid (Intel root CA)
   ✓ tdx_quote_signature        quote signature verified
-  ✓ tdx_debug_disabled         debug bit is 0 (production enclave)
-  ✓ signing_key_present        signing key present (04e3a1c5b2...)
+  ✓ tdx_debug_disabled         debug bit is 0 (production enclave)  [ENFORCED]
+  ✓ signing_key_present        signing key present (041d9bbc96...)  [ENFORCED]
 
 Tier 2: Binding & Crypto
   ✓ tdx_reportdata_binding     REPORTDATA binds signing key via Ethereum address  [ENFORCED]
   ✓ intel_pcs_collateral       Intel PCS collateral fetched (TCB status: UpToDate)
-  ✓ tdx_tcb_current            TCB status UpToDate (TEE_TCB_SVN: 03000500...)
-  ✓ nvidia_payload_present     NVIDIA payload present (97782 chars)
-  ✓ nvidia_signature            signature valid (ECDSA-P384, NVIDIA Device Identity CA)
-  ✓ nvidia_claims              EAT claims valid (arch: HOPPER, GPUs: 8)
-  ✓ nvidia_nonce_match         nonce matches in EAT (64 hex chars, HOPPER)
+  ✓ tdx_tcb_current            TCB is UpToDate per Intel PCS
+  ✓ nvidia_payload_present     NVIDIA payload present (97494 chars)
+  ✓ nvidia_signature           EAT: 8 GPU cert chains and SPDM ECDSA P-384 signatures verified (arch: HOPPER)
+  ✓ nvidia_claims              EAT: arch=HOPPER, 8 GPUs, nonce verified
+  ✓ nvidia_nonce_match         EAT nonce + 8 GPU SPDM requester nonces match submitted nonce
   ✓ nvidia_nras_verified       NRAS: true (JWT verified)
-  ✓ e2ee_capable               secp256k1 key valid; E2EE key exchange possible
+  ✓ e2ee_capable               signing key is valid secp256k1 uncompressed point; E2EE key exchange possible (ecdsa)
 
 Tier 3: Supply Chain & Channel Integrity
   ✗ tls_key_binding            no TLS certificate binding in attestation
   ✗ cpu_gpu_chain              CPU-GPU attestation not bound
   ✗ measured_model_weights     no model weight hashes
-  ✗ build_transparency_log     no build transparency log
-  ✓ cpu_id_registry            registered (machine: ..., label: ...)
+  ? build_transparency_log     compose hash present (242a6272...) but not an independent transparency log
+  ✗ cpu_id_registry            hardware not found in Proof of Cloud registry
+  ✓ compose_binding            sha256(app_compose) matches MRConfigID
+  ✓ sigstore_verification      3 image digest(s) found in Sigstore transparency log
 
-Score: 17/21 passed, 0 skipped, 4 failed
+Score: 18/23 passed, 1 skipped, 4 failed
 ```
 
 NEAR AI scores differently — it passes `tls_key_binding` (TLS certificate SPKI bound to attestation) but does not yet support `e2ee_capable` or `cpu_id_registry`.
@@ -165,6 +178,8 @@ Config file should have `0600` permissions. Teep warns on startup if it is group
 | 19 | `measured_model_weights` | Attestation proves specific model weights by hash |
 | 20 | `build_transparency_log` | Runtime measurements match an immutable transparency log |
 | 21 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
+| 22 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
+| 23 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
 
 ## Supported Providers
 
