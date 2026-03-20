@@ -182,7 +182,7 @@ func applyEnvOverrides(cfg *Config) {
 	}
 
 	applyAPIKeyEnv(cfg, "venice", "VENICE_API_KEY", "https://api.venice.ai", true)
-	applyAPIKeyEnv(cfg, "nearai", "NEARAI_API_KEY", "https://api.near.ai", false)
+	applyAPIKeyEnv(cfg, "nearai", "NEARAI_API_KEY", "https://completions.near.ai", false)
 }
 
 // applyAPIKeyEnv sets or updates the API key for the named provider from the

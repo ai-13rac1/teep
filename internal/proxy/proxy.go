@@ -182,6 +182,19 @@ func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, b
 			return p, mapped, true
 		}
 	}
+
+	// Fallback for single-provider pinned backends (e.g. NEAR AI) where model
+	// names are discovered dynamically at request time rather than pre-mapped in
+	// config. Let the pinned handler's resolver validate/resolve the model.
+	if len(s.providers) == 1 {
+		for _, p := range s.providers {
+			if p.PinnedHandler != nil {
+				mapped := p.MapModel(clientModel)
+				return p, mapped, true
+			}
+		}
+	}
+
 	return nil, "", false
 }
 
