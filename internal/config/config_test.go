@@ -319,8 +319,8 @@ func TestEnvNearAIAPIKey(t *testing.T) {
 	if nearai.APIKey != "direct-nearai-key" {
 		t.Errorf("nearai APIKey: got %q, want %q", nearai.APIKey, "direct-nearai-key")
 	}
-	if nearai.BaseURL != "https://api.near.ai" {
-		t.Errorf("nearai BaseURL default: got %q, want %q", nearai.BaseURL, "https://api.near.ai")
+	if nearai.BaseURL != "https://completions.near.ai" {
+		t.Errorf("nearai BaseURL default: got %q, want %q", nearai.BaseURL, "https://completions.near.ai")
 	}
 }
 

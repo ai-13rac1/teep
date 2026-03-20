@@ -18,8 +18,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -33,13 +35,16 @@ const attestationPath = "/v1/attestation/report"
 // returned by NEAR AI's attestation endpoint.
 type modelAttestation struct {
 	Model              string `json:"model"`
+	ModelName          string `json:"model_name"`
 	IntelQuote         string `json:"intel_quote"`
 	NvidiaPayload      string `json:"nvidia_payload"`
 	SigningKey         string `json:"signing_key"`
+	SigningPublicKey   string `json:"signing_public_key"`
 	SigningAddress     string `json:"signing_address"`
 	SigningAlgo        string `json:"signing_algo"`
 	TLSCertFingerprint string `json:"tls_cert_fingerprint"`
 	Nonce              string `json:"nonce"`
+	RequestNonce       string `json:"request_nonce"`
 }
 
 // attestationResponse is the JSON shape returned by NEAR AI's attestation
@@ -49,35 +54,47 @@ type attestationResponse struct {
 	// ModelAttestations is the primary response field: an array of per-node
 	// attestation records.
 	ModelAttestations []modelAttestation `json:"model_attestations"`
+	AllAttestations   []modelAttestation `json:"all_attestations"`
 
 	// Top-level fields are present when the server returns a flat response
 	// rather than the array form. Both forms are tolerated.
 	Model              string `json:"model"`
+	ModelName          string `json:"model_name"`
 	IntelQuote         string `json:"intel_quote"`
 	NvidiaPayload      string `json:"nvidia_payload"`
 	SigningKey         string `json:"signing_key"`
+	SigningPublicKey   string `json:"signing_public_key"`
 	SigningAddress     string `json:"signing_address"`
 	SigningAlgo        string `json:"signing_algo"`
 	TLSCertFingerprint string `json:"tls_cert_fingerprint"`
 	Nonce              string `json:"nonce"`
+	RequestNonce       string `json:"request_nonce"`
 	Verified           bool   `json:"verified"`
 }
 
 // Attester fetches attestation data from NEAR AI's /v1/attestation/report
 // endpoint. The nonce is sent as a query parameter and echoed back.
 type Attester struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL  string
+	apiKey   string
+	client   *http.Client
+	resolver DomainResolver
 }
 
 // NewAttester returns a NEAR AI Attester configured with the given base URL
 // and API key. It uses a 30-second HTTP timeout via config.NewAttestationClient.
 func NewAttester(baseURL, apiKey string) *Attester {
+	return NewAttesterWithResolver(baseURL, apiKey, NewEndpointResolver())
+}
+
+// NewAttesterWithResolver returns a NEAR AI Attester configured with the given
+// base URL, API key, and model->domain resolver.
+func NewAttesterWithResolver(baseURL, apiKey string, resolver DomainResolver) *Attester {
 	return &Attester{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		client:  config.NewAttestationClient(),
+		baseURL:  baseURL,
+		apiKey:   apiKey,
+		client:   config.NewAttestationClient(),
+		resolver: resolver,
 	}
 }
 
@@ -87,9 +104,25 @@ func NewAttester(baseURL, apiKey string) *Attester {
 // response includes TLS certificate binding data. The model parameter selects
 // which attestation to use when the response contains multiple entries.
 func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
-	endpoint, err := url.Parse(a.baseURL + attestationPath)
+	baseURL := a.baseURL
+
+	base, err := url.Parse(a.baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("nearai: parse base URL %q: %w", a.baseURL, err)
+	}
+
+	if shouldResolveModelDomain(base.Hostname()) && a.resolver != nil {
+		domain, err := a.resolver.Resolve(ctx, model)
+		if err != nil {
+			return nil, fmt.Errorf("nearai: resolve model %q: %w", model, err)
+		}
+		baseURL = "https://" + domain
+		slog.Debug("nearai model resolved", "model", model, "domain", domain)
+	}
+
+	endpoint, err := url.Parse(baseURL + attestationPath)
+	if err != nil {
+		return nil, fmt.Errorf("nearai: parse endpoint base URL %q: %w", baseURL, err)
 	}
 	q := endpoint.Query()
 	q.Set("nonce", nonce.Hex())
@@ -125,6 +158,11 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	return parseAttestationResponse(body, model)
 }
 
+func shouldResolveModelDomain(host string) bool {
+	host = strings.ToLower(host)
+	return host == "api.near.ai" || host == "completions.near.ai"
+}
+
 // parseAttestationResponse unmarshals a NEAR AI attestation JSON response body
 // and selects the entry matching model. Used by both FetchAttestation (HTTP
 // client path) and PinnedHandler (raw connection path).
@@ -134,38 +172,25 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		return nil, fmt.Errorf("nearai: unmarshal attestation response: %w", err)
 	}
 
+	if len(ar.AllAttestations) > 0 {
+		selected := selectByModel(ar.AllAttestations, model)
+		return rawFromModelAttestation(selected, ar.Verified, body), nil
+	}
+
 	// If the response contains model_attestations, pick the best match for the
 	// requested model. Fall back to the first entry if no exact match.
 	if len(ar.ModelAttestations) > 0 {
-		selected := &ar.ModelAttestations[0]
-		for i := range ar.ModelAttestations {
-			if ar.ModelAttestations[i].Model == model {
-				selected = &ar.ModelAttestations[i]
-				break
-			}
-		}
-		return &attestation.RawAttestation{
-			Verified:       ar.Verified,
-			Nonce:          selected.Nonce,
-			Model:          selected.Model,
-			TEEProvider:    "TDX+NVIDIA",
-			SigningKey:     selected.SigningKey,
-			SigningAddress: selected.SigningAddress,
-			SigningAlgo:    selected.SigningAlgo,
-			TLSFingerprint: selected.TLSCertFingerprint,
-			IntelQuote:     selected.IntelQuote,
-			NvidiaPayload:  selected.NvidiaPayload,
-			RawBody:        body,
-		}, nil
+		selected := selectByModel(ar.ModelAttestations, model)
+		return rawFromModelAttestation(selected, ar.Verified, body), nil
 	}
 
 	// Flat response form: use top-level fields directly.
 	return &attestation.RawAttestation{
 		Verified:       ar.Verified,
-		Nonce:          ar.Nonce,
-		Model:          ar.Model,
+		Nonce:          firstNonEmpty(ar.Nonce, ar.RequestNonce),
+		Model:          firstNonEmpty(ar.Model, ar.ModelName),
 		TEEProvider:    "TDX+NVIDIA",
-		SigningKey:     ar.SigningKey,
+		SigningKey:     firstNonEmpty(ar.SigningKey, ar.SigningPublicKey),
 		SigningAddress: ar.SigningAddress,
 		SigningAlgo:    ar.SigningAlgo,
 		TLSFingerprint: ar.TLSCertFingerprint,
@@ -173,6 +198,43 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		NvidiaPayload:  ar.NvidiaPayload,
 		RawBody:        body,
 	}, nil
+}
+
+func selectByModel(list []modelAttestation, model string) modelAttestation {
+	selected := list[0]
+	for i := range list {
+		candidateModel := firstNonEmpty(list[i].Model, list[i].ModelName)
+		if candidateModel == model {
+			selected = list[i]
+			break
+		}
+	}
+	return selected
+}
+
+func rawFromModelAttestation(m modelAttestation, verified bool, body []byte) *attestation.RawAttestation {
+	return &attestation.RawAttestation{
+		Verified:       verified,
+		Nonce:          firstNonEmpty(m.Nonce, m.RequestNonce),
+		Model:          firstNonEmpty(m.Model, m.ModelName),
+		TEEProvider:    "TDX+NVIDIA",
+		SigningKey:     firstNonEmpty(m.SigningKey, m.SigningPublicKey),
+		SigningAddress: m.SigningAddress,
+		SigningAlgo:    m.SigningAlgo,
+		TLSFingerprint: m.TLSCertFingerprint,
+		IntelQuote:     m.IntelQuote,
+		NvidiaPayload:  m.NvidiaPayload,
+		RawBody:        body,
+	}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Preparer injects the NEAR AI Authorization header into an outgoing request.

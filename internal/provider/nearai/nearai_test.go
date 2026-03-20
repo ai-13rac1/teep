@@ -295,6 +295,41 @@ func TestAttester_FetchAttestation_FlatResponse_NewFields(t *testing.T) {
 	}
 }
 
+func TestAttester_FetchAttestation_AllAttestations_UsesNewFieldNames(t *testing.T) {
+	body := `{
+		"all_attestations": [
+			{
+				"model_name": "openai/gpt-oss-120b",
+				"intel_quote": "cXVvdGU=",
+				"nvidia_payload": "jwt",
+				"signing_public_key": "04cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"signing_address": "0x1111111111111111111111111111111111111111",
+				"signing_algo": "ecdsa",
+				"tls_cert_fingerprint": "deadbeef",
+				"request_nonce": "abc123"
+			}
+		]
+	}`
+	srv := makeServer(t, http.StatusOK, body)
+	defer srv.Close()
+
+	a := nearai.NewAttester(srv.URL, "key")
+	raw, err := a.FetchAttestation(context.Background(), "openai/gpt-oss-120b", attestation.NewNonce())
+	if err != nil {
+		t.Fatalf("FetchAttestation: %v", err)
+	}
+
+	if raw.Model != "openai/gpt-oss-120b" {
+		t.Errorf("Model = %q, want %q", raw.Model, "openai/gpt-oss-120b")
+	}
+	if raw.SigningKey == "" {
+		t.Fatal("SigningKey should be populated from signing_public_key")
+	}
+	if raw.Nonce != "abc123" {
+		t.Errorf("Nonce = %q, want %q", raw.Nonce, "abc123")
+	}
+}
+
 // --- Preparer tests ---
 
 func TestPreparer_PrepareRequest_SetsAuthHeader(t *testing.T) {
