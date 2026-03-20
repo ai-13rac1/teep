@@ -26,7 +26,7 @@ report-venice: build
 	./teep verify --provider venice --model e2ee-qwen3-5-122b-a10b --log-level debug --save-dir /tmp/teep-attestation-venice
 
 report-near: build
-	./teep verify --provider nearai --model qwen2.5-72b-instruct --log-level debug --save-dir /tmp/teep-attestation-nearai
+	./teep verify --provider nearai --model Qwen/Qwen3.5-122B-A10B --log-level debug --save-dir /tmp/teep-attestation-nearai
 
 clean:
 	rm -f teep
