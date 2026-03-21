@@ -12,12 +12,16 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -109,10 +113,16 @@ func runServe(args []string) {
 		slog.Error("proxy init failed", "err", err)
 		os.Exit(1)
 	}
-	if err := srv.ListenAndServe(); err != nil {
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	err = srv.ListenAndServe(ctx)
+	stop()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}
+	slog.Info("server stopped")
 }
 
 // filterProviders narrows cfg.Providers to a single named provider.

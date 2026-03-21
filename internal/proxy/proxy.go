@@ -112,7 +112,10 @@ func New(cfg *config.Config) (*Server, error) {
 }
 
 // ListenAndServe starts the proxy HTTP server on the configured listen address.
-func (s *Server) ListenAndServe() error {
+// It blocks until ctx is cancelled (e.g. via signal.NotifyContext), then
+// initiates a graceful shutdown with a 5-second deadline to drain in-flight
+// requests (which zeros any active E2EE sessions via their defers).
+func (s *Server) ListenAndServe(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.cfg.ListenAddr,
 		Handler:           s.mux,
@@ -122,7 +125,19 @@ func (s *Server) ListenAndServe() error {
 		IdleTimeout:       120 * time.Second,
 	}
 	slog.Info("teep proxy listening", "addr", s.cfg.ListenAddr)
-	return srv.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		slog.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx) //nolint:contextcheck // parent ctx is cancelled; need a fresh deadline for graceful drain
+	}
 }
 
 // ServeHTTP implements http.Handler so Server can be used with httptest.NewServer.

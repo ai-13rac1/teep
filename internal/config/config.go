@@ -231,8 +231,16 @@ func RedactKey(key string) string {
 	return key[:4] + "****"
 }
 
-// NewAttestationClient returns an *http.Client with a 30-second timeout,
-// suitable for fetching attestation data from TEE provider endpoints.
+// NewAttestationClient returns an *http.Client with a 30-second timeout and
+// tuned transport, suitable for fetching attestation data from TEE provider
+// endpoints. The default MaxIdleConnsPerHost (2) is too low for providers
+// that serve multiple models from the same host.
 func NewAttestationClient() *http.Client {
-	return &http.Client{Timeout: AttestationTimeout}
+	return &http.Client{
+		Timeout: AttestationTimeout,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 }
