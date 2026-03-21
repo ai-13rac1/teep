@@ -113,6 +113,61 @@ func TestWriteHTTPRequest_ValidHTTP(t *testing.T) {
 	}
 }
 
+func TestWriteHTTPRequest_MissingHost(t *testing.T) {
+	var buf bytes.Buffer
+	bw := bufio.NewWriter(&buf)
+
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer key")
+	// No Host header set.
+
+	err := writeHTTPRequest(bw, "GET", "/path", headers, nil)
+	if err == nil {
+		t.Fatal("expected error for missing Host header")
+	}
+	if !strings.Contains(err.Error(), "Host") {
+		t.Errorf("error should mention Host: %v", err)
+	}
+}
+
+func TestExtractSPKI(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	handler := &PinnedHandler{}
+	spki, err := handler.extractSPKI(conn)
+	if err != nil {
+		t.Fatalf("extractSPKI: %v", err)
+	}
+	if spki == "" {
+		t.Fatal("SPKI hash is empty")
+	}
+	t.Logf("SPKI hash: %s", spki)
+
+	// Verify it's deterministic — same cert should produce same hash.
+	conn2, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	if err != nil {
+		t.Fatalf("dial 2: %v", err)
+	}
+	defer conn2.Close()
+
+	spki2, err := handler.extractSPKI(conn2)
+	if err != nil {
+		t.Fatalf("extractSPKI 2: %v", err)
+	}
+	if spki != spki2 {
+		t.Errorf("SPKI mismatch: %q vs %q", spki, spki2)
+	}
+}
+
 // TestPinnedHandler_SPKICacheHit verifies that when the SPKI is already cached,
 // no attestation request is made and the chat request goes through directly.
 func TestPinnedHandler_SPKICacheHit(t *testing.T) {

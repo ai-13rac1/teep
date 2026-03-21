@@ -754,6 +754,232 @@ func TestBuildReportSigstoreFail(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------------------------
+// NVIDIA detail formatter tests
+// --------------------------------------------------------------------------
+
+func TestNvidiaSignatureDetail(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *NvidiaVerifyResult
+		want   string
+	}{
+		{
+			"EAT format",
+			&NvidiaVerifyResult{Format: "EAT", GPUCount: 8, Arch: "HOPPER"},
+			"EAT: 8 GPU cert chains and SPDM ECDSA P-384 signatures verified (arch: HOPPER)",
+		},
+		{
+			"JWT format",
+			&NvidiaVerifyResult{Format: "JWT", Algorithm: "ES384"},
+			"JWT signature valid (ES384)",
+		},
+		{
+			"unknown format",
+			&NvidiaVerifyResult{Format: "UNKNOWN"},
+			"signature valid",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nvidiaSignatureDetail(tc.result)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNvidiaClaimsDetail(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *NvidiaVerifyResult
+		want   string
+	}{
+		{
+			"EAT format",
+			&NvidiaVerifyResult{Format: "EAT", Arch: "HOPPER", GPUCount: 4},
+			"EAT: arch=HOPPER, 4 GPUs, nonce verified",
+		},
+		{
+			"JWT format true",
+			&NvidiaVerifyResult{Format: "JWT", OverallResult: true},
+			"JWT claims valid (overall result: true)",
+		},
+		{
+			"JWT format false",
+			&NvidiaVerifyResult{Format: "JWT", OverallResult: false},
+			"JWT claims valid (overall result: false)",
+		},
+		{
+			"unknown format",
+			&NvidiaVerifyResult{Format: "UNKNOWN"},
+			"claims valid",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nvidiaClaimsDetail(tc.result)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNvidiaNonceDetail(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *NvidiaVerifyResult
+		want   string
+	}{
+		{
+			"EAT format",
+			&NvidiaVerifyResult{Format: "EAT", GPUCount: 8},
+			"EAT nonce + 8 GPU SPDM requester nonces match submitted nonce",
+		},
+		{
+			"JWT format",
+			&NvidiaVerifyResult{Format: "JWT"},
+			"nonce in NVIDIA payload matches submitted nonce",
+		},
+		{
+			"empty format",
+			&NvidiaVerifyResult{},
+			"nonce in NVIDIA payload matches submitted nonce",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nvidiaNonceDetail(tc.result)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// BuildReport: NVIDIA factor pass paths with NvidiaVerifyResult
+// --------------------------------------------------------------------------
+
+func TestBuildReportNvidiaSignaturePass(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format:   "EAT",
+		Arch:     "HOPPER",
+		GPUCount: 8,
+		Nonce:    nonce.Hex(),
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_signature")
+	if f.Status != Pass {
+		t.Errorf("nvidia_signature with passing result: got %s (%s), want PASS", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "HOPPER") {
+		t.Errorf("detail should mention HOPPER: %s", f.Detail)
+	}
+	if !strings.Contains(f.Detail, "8 GPU") {
+		t.Errorf("detail should mention 8 GPU: %s", f.Detail)
+	}
+}
+
+func TestBuildReportNvidiaClaimsPass(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format:   "EAT",
+		Arch:     "HOPPER",
+		GPUCount: 4,
+		Nonce:    nonce.Hex(),
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_claims")
+	if f.Status != Pass {
+		t.Errorf("nvidia_claims with passing result: got %s (%s), want PASS", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "arch=HOPPER") {
+		t.Errorf("detail should mention arch=HOPPER: %s", f.Detail)
+	}
+}
+
+func TestBuildReportNvidiaNoncePass(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format:   "EAT",
+		Arch:     "HOPPER",
+		GPUCount: 8,
+		Nonce:    nonce.Hex(),
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_nonce_match")
+	if f.Status != Pass {
+		t.Errorf("nvidia_nonce_match with matching nonce: got %s (%s), want PASS", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "8 GPU") {
+		t.Errorf("detail should mention 8 GPU: %s", f.Detail)
+	}
+}
+
+func TestBuildReportNvidiaSignatureFail(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format:       "EAT",
+		SignatureErr: errors.New("bad cert chain"),
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_signature")
+	if f.Status != Fail {
+		t.Errorf("nvidia_signature with error: got %s, want FAIL", f.Status)
+	}
+	if !strings.Contains(f.Detail, "bad cert chain") {
+		t.Errorf("detail should mention error: %s", f.Detail)
+	}
+}
+
+func TestBuildReportNvidiaClaimsFail(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format:    "EAT",
+		ClaimsErr: errors.New("invalid arch"),
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_claims")
+	if f.Status != Fail {
+		t.Errorf("nvidia_claims with error: got %s, want FAIL", f.Status)
+	}
+}
+
+func TestBuildReportNvidiaNonceMismatch(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.NvidiaPayload = `{"evidence_list":[]}`
+	nvidiaResult := &NvidiaVerifyResult{
+		Format: "EAT",
+		Nonce:  "wrong-nonce",
+	}
+
+	report := BuildReport("venice", "m", raw, nonce, nil, nil, nvidiaResult, nil, nil, nil, nil)
+	f := findFactor(t, report, "nvidia_nonce_match")
+	if f.Status != Fail {
+		t.Errorf("nvidia_nonce_match with mismatch: got %s, want FAIL", f.Status)
+	}
+}
+
 // TestBuildReportSigstoreSkip verifies sigstore_verification skips without digests.
 func TestBuildReportSigstoreSkip(t *testing.T) {
 	nonce := NewNonce()

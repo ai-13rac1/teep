@@ -1454,6 +1454,171 @@ func TestAuthorizationHeaderSetViaVenicePreparer(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------------------------
+// SafePrefix
+// --------------------------------------------------------------------------
+
+func TestSafePrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		n    int
+		want string
+	}{
+		{"short", "abc", 5, "abc"},
+		{"exact", "abcde", 5, "abcde"},
+		{"long", "abcdefgh", 5, "abcde"},
+		{"empty", "", 5, ""},
+		{"zero_n", "abc", 0, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := proxy.SafePrefix(tc.s, tc.n)
+			if got != tc.want {
+				t.Errorf("SafePrefix(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// DecryptSSEChunk
+// --------------------------------------------------------------------------
+
+func TestDecryptSSEChunk(t *testing.T) {
+	// Create a session and encrypt some content using the session's own pubkey.
+	session, err := attestation.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	plaintext := "Hello, SSE!"
+	enc, err := attestation.Encrypt([]byte(plaintext), session.PrivateKey.PubKey())
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	t.Run("decrypt_success", func(t *testing.T) {
+		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"content":%q},"index":0}]}`, enc)
+		got, err := proxy.DecryptSSEChunk(chunk, session)
+		if err != nil {
+			t.Fatalf("DecryptSSEChunk: %v", err)
+		}
+
+		content := extractDeltaContent(t, got)
+		if content != plaintext {
+			t.Errorf("content = %q, want %q", content, plaintext)
+		}
+	})
+
+	t.Run("empty_delta_passthrough", func(t *testing.T) {
+		chunk := `{"id":"c1","choices":[{"delta":{"role":"assistant"},"index":0}]}`
+		got, err := proxy.DecryptSSEChunk(chunk, session)
+		if err != nil {
+			t.Fatalf("DecryptSSEChunk: %v", err)
+		}
+		if got != chunk {
+			t.Errorf("expected passthrough for empty delta, got %q", got)
+		}
+	})
+
+	t.Run("no_choices_passthrough", func(t *testing.T) {
+		chunk := `{"id":"c1","usage":{"prompt_tokens":5}}`
+		got, err := proxy.DecryptSSEChunk(chunk, session)
+		if err != nil {
+			t.Fatalf("DecryptSSEChunk: %v", err)
+		}
+		if got != chunk {
+			t.Errorf("expected passthrough for no choices, got %q", got)
+		}
+	})
+
+	t.Run("non_encrypted_content_errors", func(t *testing.T) {
+		chunk := `{"id":"c1","choices":[{"delta":{"content":"plain text"},"index":0}]}`
+		_, err := proxy.DecryptSSEChunk(chunk, session)
+		if err == nil {
+			t.Fatal("expected error for non-encrypted content")
+		}
+		t.Logf("got expected error: %v", err)
+	})
+
+	t.Run("invalid_json_errors", func(t *testing.T) {
+		_, err := proxy.DecryptSSEChunk("not json", session)
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
+// --------------------------------------------------------------------------
+// DecryptNonStreamResponse
+// --------------------------------------------------------------------------
+
+func TestDecryptNonStreamResponse(t *testing.T) {
+	session, err := attestation.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	plaintext := "Hello, non-stream!"
+	enc, err := attestation.Encrypt([]byte(plaintext), session.PrivateKey.PubKey())
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	t.Run("decrypt_success", func(t *testing.T) {
+		body := []byte(nonStreamResponse(enc))
+		got, err := proxy.DecryptNonStreamResponse(body, session)
+		if err != nil {
+			t.Fatalf("DecryptNonStreamResponse: %v", err)
+		}
+
+		content := extractMessageContent(t, got)
+		if content != plaintext {
+			t.Errorf("content = %q, want %q", content, plaintext)
+		}
+	})
+
+	t.Run("no_choices_passthrough", func(t *testing.T) {
+		body := []byte(`{"id":"c1","usage":{"prompt_tokens":5}}`)
+		got, err := proxy.DecryptNonStreamResponse(body, session)
+		if err != nil {
+			t.Fatalf("DecryptNonStreamResponse: %v", err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Errorf("expected passthrough for no choices")
+		}
+	})
+
+	t.Run("empty_content_passthrough", func(t *testing.T) {
+		body := []byte(nonStreamResponse(""))
+		got, err := proxy.DecryptNonStreamResponse(body, session)
+		if err != nil {
+			t.Fatalf("DecryptNonStreamResponse: %v", err)
+		}
+		content := extractMessageContent(t, got)
+		if content != "" {
+			t.Errorf("content = %q, want empty", content)
+		}
+	})
+
+	t.Run("non_encrypted_content_errors", func(t *testing.T) {
+		body := []byte(nonStreamResponse("plain text"))
+		_, err := proxy.DecryptNonStreamResponse(body, session)
+		if err == nil {
+			t.Fatal("expected error for non-encrypted content")
+		}
+		t.Logf("got expected error: %v", err)
+	})
+
+	t.Run("invalid_json_errors", func(t *testing.T) {
+		_, err := proxy.DecryptNonStreamResponse([]byte("not json"), session)
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
 func TestNewUnknownProviderError(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",

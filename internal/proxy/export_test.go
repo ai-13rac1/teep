@@ -17,3 +17,18 @@ func (s *Server) ProviderByName(name string) *provider.Provider {
 func ReassembleNonStream(body io.Reader, session *attestation.Session) ([]byte, error) {
 	return reassembleNonStream(body, session)
 }
+
+// DecryptSSEChunk exposes decryptSSEChunk for external tests.
+func DecryptSSEChunk(data string, session *attestation.Session) (string, error) {
+	return decryptSSEChunk(data, session)
+}
+
+// DecryptNonStreamResponse exposes decryptNonStreamResponse for external tests.
+func DecryptNonStreamResponse(body []byte, session *attestation.Session) ([]byte, error) {
+	return decryptNonStreamResponse(body, session)
+}
+
+// SafePrefix exposes safePrefix for external tests.
+func SafePrefix(s string, n int) string {
+	return safePrefix(s, n)
+}

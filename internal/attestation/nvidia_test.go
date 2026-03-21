@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -333,6 +334,55 @@ func TestExtractNRASJWT(t *testing.T) {
 	_, err = extractNRASJWT(`[]`)
 	if err == nil {
 		t.Error("expected error for empty array, got nil")
+	}
+}
+
+// --------------------------------------------------------------------------
+// VerifyNVIDIAPayload dispatcher tests
+// --------------------------------------------------------------------------
+
+func TestVerifyNVIDIAPayload_EmptyPayload(t *testing.T) {
+	result := VerifyNVIDIAPayload("", NewNonce())
+	if result.SignatureErr == nil {
+		t.Fatal("expected error for empty payload")
+	}
+	t.Logf("got expected error: %v", result.SignatureErr)
+}
+
+func TestVerifyNVIDIAPayload_NonEATPayload(t *testing.T) {
+	// JWT-style payload starts with 'e' (base64 header), not '{'
+	result := VerifyNVIDIAPayload("eyJhbGciOiJSUzI1NiJ9.payload.sig", NewNonce())
+	if result.SignatureErr == nil {
+		t.Fatal("expected error for non-EAT payload")
+	}
+	if result.Format != "" {
+		t.Errorf("Format = %q, want empty (not yet detected)", result.Format)
+	}
+	t.Logf("got expected error: %v", result.SignatureErr)
+}
+
+func TestVerifyNVIDIAPayload_EATDispatch(t *testing.T) {
+	nonce := NewNonce()
+	// Minimal EAT payload with matching nonce but no valid certs/evidence.
+	// verifyNVIDIAEAT will detect the format but fail on GPU cert verification.
+	payload := fmt.Sprintf(`{"arch":"HOPPER","nonce":%q,"evidence_list":[{"arch":"HOPPER","certificate":"","evidence":""}]}`, nonce.Hex())
+
+	result := VerifyNVIDIAPayload(payload, nonce)
+	// EAT format should be detected even though verification fails.
+	if result.Format != "EAT" {
+		t.Errorf("Format = %q, want EAT", result.Format)
+	}
+	if result.Arch != "HOPPER" {
+		t.Errorf("Arch = %q, want HOPPER", result.Arch)
+	}
+	if result.GPUCount != 1 {
+		t.Errorf("GPUCount = %d, want 1", result.GPUCount)
+	}
+	// Cert/evidence verification will fail — that's expected.
+	if result.SignatureErr == nil {
+		t.Log("SignatureErr is nil — cert verification passed unexpectedly")
+	} else {
+		t.Logf("expected cert verification error: %v", result.SignatureErr)
 	}
 }
 

@@ -2,6 +2,7 @@ package nearai_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -375,6 +376,37 @@ func TestAttester_FetchAttestation_NormalizesUnprefixedKey(t *testing.T) {
 
 	if raw.SigningKey != "04"+rawKey {
 		t.Errorf("SigningKey = %q (len %d), want '04' prefix + 128 chars (len 130)", raw.SigningKey, len(raw.SigningKey))
+	}
+}
+
+// --- extractAppCompose tests ---
+
+func TestExtractAppCompose(t *testing.T) {
+	tests := []struct {
+		name    string
+		tcbInfo json.RawMessage
+		want    string
+	}{
+		{"nil", nil, ""},
+		{"empty", json.RawMessage(``), ""},
+		{"non_json", json.RawMessage(`not json`), ""},
+		{"object_with_app_compose", json.RawMessage(`{"app_compose":"version: '3'"}`), "version: '3'"},
+		{"object_missing_app_compose", json.RawMessage(`{"other_field":"value"}`), ""},
+		{
+			"json_string_wrapping",
+			json.RawMessage(`"{\"app_compose\":\"wrapped content\"}"`),
+			"wrapped content",
+		},
+		{"number", json.RawMessage(`42`), ""},
+		{"array", json.RawMessage(`[1,2,3]`), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nearai.ExtractAppCompose(tc.tcbInfo)
+			if got != tc.want {
+				t.Errorf("ExtractAppCompose(%s) = %q, want %q", tc.tcbInfo, got, tc.want)
+			}
+		})
 	}
 }
 
