@@ -1262,6 +1262,77 @@ func TestReassembleNonStream(t *testing.T) {
 	}
 }
 
+func TestReassembleNonStream_WithReasoning(t *testing.T) {
+	session, err := attestation.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// Encrypt content and reasoning chunks separately.
+	encThink1, err := attestation.Encrypt([]byte("Let me "), session.PrivateKey.PubKey())
+	if err != nil {
+		t.Fatalf("Encrypt think1: %v", err)
+	}
+	encThink2, err := attestation.Encrypt([]byte("think..."), session.PrivateKey.PubKey())
+	if err != nil {
+		t.Fatalf("Encrypt think2: %v", err)
+	}
+	encContent, err := attestation.Encrypt([]byte("Hello!"), session.PrivateKey.PubKey())
+	if err != nil {
+		t.Fatalf("Encrypt content: %v", err)
+	}
+
+	// Build SSE: two reasoning chunks, then one content chunk.
+	var sse strings.Builder
+	fmt.Fprintf(&sse, "data: %s\n\n", fmt.Sprintf(
+		`{"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","reasoning":%q},"finish_reason":null}]}`,
+		encThink1,
+	))
+	fmt.Fprintf(&sse, "data: %s\n\n", fmt.Sprintf(
+		`{"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"reasoning":%q},"finish_reason":null}]}`,
+		encThink2,
+	))
+	fmt.Fprintf(&sse, "data: %s\n\n", fmt.Sprintf(
+		`{"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`,
+		encContent,
+	))
+	fmt.Fprintf(&sse, "data: [DONE]\n\n")
+
+	result, err := proxy.ReassembleNonStream(strings.NewReader(sse.String()), session)
+	if err != nil {
+		t.Fatalf("ReassembleNonStream: %v", err)
+	}
+
+	t.Logf("result: %s", result)
+
+	// Parse and verify both fields present in message.
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Role      string `json:"role"`
+				Content   string `json:"content"`
+				Reasoning string `json:"reasoning"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.Choices) == 0 {
+		t.Fatal("no choices")
+	}
+	msg := parsed.Choices[0].Message
+	if msg.Role != "assistant" {
+		t.Errorf("role = %q, want %q", msg.Role, "assistant")
+	}
+	if msg.Content != "Hello!" {
+		t.Errorf("content = %q, want %q", msg.Content, "Hello!")
+	}
+	if msg.Reasoning != "Let me think..." {
+		t.Errorf("reasoning = %q, want %q", msg.Reasoning, "Let me think...")
+	}
+}
+
 // --------------------------------------------------------------------------
 // Upstream body drain on non-200
 // --------------------------------------------------------------------------
@@ -1548,6 +1619,78 @@ func TestDecryptSSEChunk(t *testing.T) {
 			t.Fatal("expected error for invalid JSON")
 		}
 	})
+
+	t.Run("reasoning_decrypted", func(t *testing.T) {
+		reasoning := "Let me think..."
+		encReasoning, err := attestation.Encrypt([]byte(reasoning), session.PrivateKey.PubKey())
+		if err != nil {
+			t.Fatalf("Encrypt reasoning: %v", err)
+		}
+
+		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"reasoning":%q},"index":0}]}`, encReasoning)
+		got, err := proxy.DecryptSSEChunk(chunk, session)
+		if err != nil {
+			t.Fatalf("DecryptSSEChunk: %v", err)
+		}
+
+		// Parse and check reasoning was decrypted.
+		var parsed struct {
+			Choices []struct {
+				Delta struct {
+					Reasoning string `json:"reasoning"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(parsed.Choices) == 0 {
+			t.Fatal("no choices in result")
+		}
+		if parsed.Choices[0].Delta.Reasoning != reasoning {
+			t.Errorf("reasoning = %q, want %q", parsed.Choices[0].Delta.Reasoning, reasoning)
+		}
+	})
+
+	t.Run("content_and_reasoning_both_decrypted", func(t *testing.T) {
+		contentText := "Hello!"
+		reasoningText := "I should say hello."
+		encContent, err := attestation.Encrypt([]byte(contentText), session.PrivateKey.PubKey())
+		if err != nil {
+			t.Fatalf("Encrypt content: %v", err)
+		}
+		encReasoning, err := attestation.Encrypt([]byte(reasoningText), session.PrivateKey.PubKey())
+		if err != nil {
+			t.Fatalf("Encrypt reasoning: %v", err)
+		}
+
+		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"content":%q,"reasoning":%q},"index":0}]}`, encContent, encReasoning)
+		got, err := proxy.DecryptSSEChunk(chunk, session)
+		if err != nil {
+			t.Fatalf("DecryptSSEChunk: %v", err)
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(parsed.Choices) == 0 {
+			t.Fatal("no choices in result")
+		}
+		if parsed.Choices[0].Delta.Content != contentText {
+			t.Errorf("content = %q, want %q", parsed.Choices[0].Delta.Content, contentText)
+		}
+		if parsed.Choices[0].Delta.Reasoning != reasoningText {
+			t.Errorf("reasoning = %q, want %q", parsed.Choices[0].Delta.Reasoning, reasoningText)
+		}
+	})
 }
 
 // --------------------------------------------------------------------------
@@ -1615,6 +1758,47 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 		_, err := proxy.DecryptNonStreamResponse([]byte("not json"), session)
 		if err == nil {
 			t.Fatal("expected error for invalid JSON")
+		}
+	})
+
+	t.Run("reasoning_decrypted", func(t *testing.T) {
+		reasoning := "Thinking about it..."
+		encReasoning, err := attestation.Encrypt([]byte(reasoning), session.PrivateKey.PubKey())
+		if err != nil {
+			t.Fatalf("Encrypt reasoning: %v", err)
+		}
+
+		body := fmt.Sprintf(`{
+			"id": "chatcmpl-test",
+			"object": "chat.completion",
+			"created": 1234567890,
+			"model": "test-model",
+			"choices": [{"index":0,"message":{"role":"assistant","content":%q,"reasoning":%q},"finish_reason":"stop"}]
+		}`, enc, encReasoning)
+		got, err := proxy.DecryptNonStreamResponse([]byte(body), session)
+		if err != nil {
+			t.Fatalf("DecryptNonStreamResponse: %v", err)
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(got, &parsed); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(parsed.Choices) == 0 {
+			t.Fatal("no choices")
+		}
+		if parsed.Choices[0].Message.Content != plaintext {
+			t.Errorf("content = %q, want %q", parsed.Choices[0].Message.Content, plaintext)
+		}
+		if parsed.Choices[0].Message.Reasoning != reasoning {
+			t.Errorf("reasoning = %q, want %q", parsed.Choices[0].Message.Reasoning, reasoning)
 		}
 	})
 }
