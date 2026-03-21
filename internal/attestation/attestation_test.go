@@ -1,6 +1,7 @@
 package attestation
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -195,5 +196,141 @@ func TestNegativeCacheOverwrite(t *testing.T) {
 	c.Record("p", "m")
 	if !c.IsBlocked("p", "m") {
 		t.Error("IsBlocked after re-Record returned false")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Cache.Len / Cache.Models / NegativeCache.Len tests
+// --------------------------------------------------------------------------
+
+func TestCacheLen(t *testing.T) {
+	c := NewCache(time.Minute)
+	t.Logf("empty cache Len = %d", c.Len())
+	if c.Len() != 0 {
+		t.Errorf("empty cache Len = %d, want 0", c.Len())
+	}
+
+	c.Put("venice", "model-a", &VerificationReport{})
+	t.Logf("after 1 Put, Len = %d", c.Len())
+	if c.Len() != 1 {
+		t.Errorf("Len after 1 Put = %d, want 1", c.Len())
+	}
+
+	c.Put("nearai", "model-b", &VerificationReport{})
+	t.Logf("after 2 Puts, Len = %d", c.Len())
+	if c.Len() != 2 {
+		t.Errorf("Len after 2 Puts = %d, want 2", c.Len())
+	}
+
+	// Overwrite same key — should not increase Len.
+	c.Put("venice", "model-a", &VerificationReport{})
+	t.Logf("after overwrite, Len = %d", c.Len())
+	if c.Len() != 2 {
+		t.Errorf("Len after overwrite = %d, want 2", c.Len())
+	}
+}
+
+func TestCacheModels(t *testing.T) {
+	c := NewCache(time.Minute)
+
+	// Empty cache returns empty slice.
+	models := c.Models()
+	t.Logf("empty cache Models = %v", models)
+	if len(models) != 0 {
+		t.Errorf("empty cache Models len = %d, want 0", len(models))
+	}
+
+	c.Put("venice", "qwen3", &VerificationReport{})
+	c.Put("nearai", "llama", &VerificationReport{})
+
+	models = c.Models()
+	t.Logf("after 2 Puts, Models = %v", models)
+	if len(models) != 2 {
+		t.Errorf("Models len = %d, want 2", len(models))
+	}
+
+	// Check that both entries are present (order not guaranteed).
+	found := map[string]bool{}
+	for _, m := range models {
+		found[m.Provider+"/"+m.Model] = true
+		t.Logf("  %s/%s fetched at %v", m.Provider, m.Model, m.FetchedAt)
+		if m.FetchedAt.IsZero() {
+			t.Errorf("FetchedAt is zero for %s/%s", m.Provider, m.Model)
+		}
+	}
+	if !found["venice/qwen3"] {
+		t.Error("venice/qwen3 not in Models()")
+	}
+	if !found["nearai/llama"] {
+		t.Error("nearai/llama not in Models()")
+	}
+}
+
+func TestCacheModels_ExcludesExpired(t *testing.T) {
+	c := NewCache(time.Nanosecond)
+	c.Put("p", "m", &VerificationReport{})
+
+	// Entry expires immediately (TTL = 1ns).
+	models := c.Models()
+	t.Logf("expired cache Models len = %d", len(models))
+	if len(models) != 0 {
+		t.Errorf("expired entry should not appear in Models; got %d", len(models))
+	}
+}
+
+func TestNegativeCacheLen(t *testing.T) {
+	c := NewNegativeCache(time.Minute)
+	t.Logf("empty negative cache Len = %d", c.Len())
+	if c.Len() != 0 {
+		t.Errorf("empty Len = %d, want 0", c.Len())
+	}
+
+	c.Record("venice", "model-a")
+	t.Logf("after 1 Record, Len = %d", c.Len())
+	if c.Len() != 1 {
+		t.Errorf("Len after 1 Record = %d, want 1", c.Len())
+	}
+
+	c.Record("nearai", "model-b")
+	t.Logf("after 2 Records, Len = %d", c.Len())
+	if c.Len() != 2 {
+		t.Errorf("Len after 2 Records = %d, want 2", c.Len())
+	}
+}
+
+// --------------------------------------------------------------------------
+// Cache eviction tests
+// --------------------------------------------------------------------------
+
+func TestCachePutEviction(t *testing.T) {
+	c := NewCache(time.Nanosecond) // Everything expires instantly.
+	for i := range 1001 {
+		c.Put("p", fmt.Sprintf("m-%d", i), &VerificationReport{})
+	}
+	t.Logf("cache Len before eviction trigger = %d", c.Len())
+
+	// Next Put triggers eviction of all expired entries.
+	c.Put("p", "final", &VerificationReport{})
+	t.Logf("cache Len after eviction = %d", c.Len())
+
+	// After eviction, only "final" (and maybe a few not-yet-expired) should remain.
+	if c.Len() > 5 {
+		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
+	}
+}
+
+func TestNegativeCacheRecordEviction(t *testing.T) {
+	c := NewNegativeCache(time.Nanosecond) // Everything expires instantly.
+	for i := range 1001 {
+		c.Record("p", fmt.Sprintf("m-%d", i))
+	}
+	t.Logf("negative cache Len before eviction trigger = %d", c.Len())
+
+	// Next Record triggers eviction of all expired entries.
+	c.Record("p", "final")
+	t.Logf("negative cache Len after eviction = %d", c.Len())
+
+	if c.Len() > 5 {
+		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
 	}
 }

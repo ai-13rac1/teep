@@ -38,3 +38,18 @@ func SafePrefix(s string, n int) string {
 func PrepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session *attestation.Session) error {
 	return prepareUpstreamHeaders(req, prov, session)
 }
+
+// RelayStream exposes relayStream for external tests.
+func (s *Server) RelayStream(w http.ResponseWriter, body io.Reader, session *attestation.Session) {
+	s.relayStream(w, body, session)
+}
+
+// RelayNonStream exposes relayNonStream for external tests.
+func (s *Server) RelayNonStream(w http.ResponseWriter, body io.Reader, session *attestation.Session) {
+	s.relayNonStream(w, body, session)
+}
+
+// RelayReassembledNonStream exposes relayReassembledNonStream for external tests.
+func (s *Server) RelayReassembledNonStream(w http.ResponseWriter, body io.Reader, session *attestation.Session) {
+	s.relayReassembledNonStream(w, body, session)
+}

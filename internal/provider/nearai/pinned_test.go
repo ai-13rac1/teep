@@ -395,3 +395,331 @@ func TestSetDialer(t *testing.T) {
 		t.Error("custom dialer was not invoked")
 	}
 }
+
+// --------------------------------------------------------------------------
+// HandlePinned end-to-end tests
+// --------------------------------------------------------------------------
+
+// nearaiAttestationJSON builds a minimal NEAR AI attestation response JSON
+// with the given SPKI hash as TLS fingerprint and the given nonce.
+func nearaiAttestationJSON(spkiHash, nonceHex string) string {
+	return fmt.Sprintf(`{
+		"verified": true,
+		"model": "test-model",
+		"model_name": "test-model",
+		"nonce": %q,
+		"signing_key": "04aaaa",
+		"signing_address": "0xtest",
+		"signing_algo": "ecdsa",
+		"intel_quote": "",
+		"nvidia_payload": "",
+		"tls_cert_fingerprint": %q
+	}`, nonceHex, spkiHash)
+}
+
+func TestHandlePinned_CacheMiss(t *testing.T) {
+	// TLS server handles both attestation and chat.
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("server received: %s %s", r.Method, r.URL.String())
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nearaiAttestationJSON(spkiHash, nonceHex)))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello from pinned"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.String(), http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	// Compute the server's SPKI hash.
+	spkiHash = computeTestServerSPKI(t, srv)
+	t.Logf("test server SPKI: %s", spkiHash)
+
+	domain := hostFromURL(t, srv.URL)
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"endpoints":[{"domain":"%s","models":["test-model"]}]}`, domain)
+	}))
+	defer endpointSrv.Close()
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		attestation.NewSPKICache(),
+		"test-key",
+		true, // offline — skip Sigstore/Rekor
+		attestation.DefaultEnforced,
+		ReportDataVerifier{},
+	)
+
+	// Inject dialer that connects to our test TLS server.
+	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		return conn, err
+	})
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	t.Logf("status: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	t.Logf("body: %s", body)
+	if !strings.Contains(string(body), "hello from pinned") {
+		t.Errorf("body = %q, want to contain 'hello from pinned'", body)
+	}
+
+	// Report should be non-nil (attestation was fetched).
+	if resp.Report == nil {
+		t.Error("Report should be non-nil on cache miss (attestation was fetched)")
+	}
+}
+
+func TestHandlePinned_CacheHitViaSetDialer(t *testing.T) {
+	var requestPaths []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPaths = append(requestPaths, r.URL.Path)
+		t.Logf("server received: %s %s", r.Method, r.URL.String())
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"cached"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.Path, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	spkiHash := computeTestServerSPKI(t, srv)
+	domain := hostFromURL(t, srv.URL)
+
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"endpoints":[{"domain":"%s","models":["test-model"]}]}`, domain)
+	}))
+	defer endpointSrv.Close()
+
+	spkiCache := attestation.NewSPKICache()
+	spkiCache.Add(domain, spkiHash)
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		spkiCache,
+		"test-key",
+		true,
+		attestation.DefaultEnforced,
+		ReportDataVerifier{},
+	)
+	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	t.Logf("body: %s", body)
+	if !strings.Contains(string(body), "cached") {
+		t.Errorf("body = %q, want to contain 'cached'", body)
+	}
+
+	// No attestation request should have been made.
+	for _, p := range requestPaths {
+		if strings.Contains(p, "attestation") {
+			t.Errorf("unexpected attestation request: %s", p)
+		}
+	}
+
+	// Report should be nil on cache hit.
+	if resp.Report != nil {
+		t.Error("Report should be nil on SPKI cache hit")
+	}
+}
+
+func TestHandlePinned_MismatchedFingerprint(t *testing.T) {
+	// Server returns a wrong TLS fingerprint in attestation.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("server received: %s %s", r.Method, r.URL.String())
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			// Return a wrong fingerprint.
+			_, _ = w.Write([]byte(nearaiAttestationJSON("sha256:wrong_fingerprint_value", nonceHex)))
+			return
+		}
+		http.Error(w, "should not reach chat", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	domain := hostFromURL(t, srv.URL)
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"endpoints":[{"domain":"%s","models":["test-model"]}]}`, domain)
+	}))
+	defer endpointSrv.Close()
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		attestation.NewSPKICache(),
+		"test-key",
+		true,
+		attestation.DefaultEnforced,
+		ReportDataVerifier{},
+	)
+	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+
+	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for mismatched TLS fingerprint")
+	}
+	if !strings.Contains(err.Error(), "SPKI") && !strings.Contains(err.Error(), "fingerprint") {
+		t.Errorf("error should mention SPKI/fingerprint mismatch: %v", err)
+	}
+}
+
+func TestHandlePinned_DomainResolveError(t *testing.T) {
+	// Endpoint server returns an error.
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer endpointSrv.Close()
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		attestation.NewSPKICache(),
+		"test-key",
+		true,
+		attestation.DefaultEnforced,
+		ReportDataVerifier{},
+	)
+
+	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"unknown-model","messages":[]}`),
+		Model:   "unknown-model",
+	})
+
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for domain resolution failure")
+	}
+	if !strings.Contains(err.Error(), "resolve") {
+		t.Errorf("error should mention 'resolve': %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// connClosingReader tests
+// --------------------------------------------------------------------------
+
+type mockReadCloser struct {
+	closeErr error
+}
+
+func (m *mockReadCloser) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (m *mockReadCloser) Close() error {
+	return m.closeErr
+}
+
+type mockConn struct {
+	net.Conn
+	closeErr error
+}
+
+func (m *mockConn) Close() error {
+	return m.closeErr
+}
+
+func TestConnClosingReader_BothSucceed(t *testing.T) {
+	r := &connClosingReader{
+		ReadCloser: &mockReadCloser{},
+		conn:       &mockConn{},
+	}
+	err := r.Close()
+	t.Logf("Close error: %v", err)
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestConnClosingReader_ReaderFails(t *testing.T) {
+	readerErr := errors.New("reader close failed")
+	r := &connClosingReader{
+		ReadCloser: &mockReadCloser{closeErr: readerErr},
+		conn:       &mockConn{},
+	}
+	err := r.Close()
+	t.Logf("Close error: %v", err)
+	if !errors.Is(err, readerErr) {
+		t.Errorf("expected reader error, got %v", err)
+	}
+}
+
+func TestConnClosingReader_ConnFails(t *testing.T) {
+	connErr := errors.New("conn close failed")
+	r := &connClosingReader{
+		ReadCloser: &mockReadCloser{},
+		conn:       &mockConn{closeErr: connErr},
+	}
+	err := r.Close()
+	t.Logf("Close error: %v", err)
+	if !errors.Is(err, connErr) {
+		t.Errorf("expected conn error, got %v", err)
+	}
+}
+
+func TestConnClosingReader_BothFail(t *testing.T) {
+	readerErr := errors.New("reader close failed")
+	connErr := errors.New("conn close failed")
+	r := &connClosingReader{
+		ReadCloser: &mockReadCloser{closeErr: readerErr},
+		conn:       &mockConn{closeErr: connErr},
+	}
+	err := r.Close()
+	t.Logf("Close error: %v", err)
+	// ReadCloser error takes priority.
+	if !errors.Is(err, readerErr) {
+		t.Errorf("expected reader error (first error wins), got %v", err)
+	}
+}

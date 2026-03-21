@@ -429,6 +429,87 @@ func TestFilterProviders_UnknownProvider(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// extractProvider tests
+// --------------------------------------------------------------------------
+
+func TestExtractProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantName string
+		wantRest []string
+	}{
+		{"empty", []string{}, "", []string{}},
+		{"flag_first", []string{"--offline"}, "", []string{"--offline"}},
+		{"provider_only", []string{"venice"}, "venice", []string{}},
+		{"provider_plus_flags", []string{"nearai", "--model", "x"}, "nearai", []string{"--model", "x"}},
+		{"dash_flag_first", []string{"-v"}, "", []string{"-v"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			name, rest := extractProvider(tc.args)
+			t.Logf("extractProvider(%v) = (%q, %v)", tc.args, name, rest)
+			if name != tc.wantName {
+				t.Errorf("name = %q, want %q", name, tc.wantName)
+			}
+			if len(rest) != len(tc.wantRest) {
+				t.Fatalf("rest len = %d, want %d", len(rest), len(tc.wantRest))
+			}
+			for i, r := range rest {
+				if r != tc.wantRest[i] {
+					t.Errorf("rest[%d] = %q, want %q", i, r, tc.wantRest[i])
+				}
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// providerNotFoundError tests
+// --------------------------------------------------------------------------
+
+func TestProviderNotFoundError_KnownNoConfig(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{}}
+	err := providerNotFoundError("venice", cfg)
+	t.Logf("error: %v", err)
+	if !strings.Contains(err.Error(), "VENICE_API_KEY") {
+		t.Errorf("error should mention VENICE_API_KEY: %v", err)
+	}
+	// Should not mention "known:" since no providers are configured.
+	if strings.Contains(err.Error(), "known:") {
+		t.Errorf("error should not mention 'known:' when no providers configured: %v", err)
+	}
+}
+
+func TestProviderNotFoundError_KnownWithOtherProviders(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"nearai": {Name: "nearai"},
+	}}
+	err := providerNotFoundError("venice", cfg)
+	t.Logf("error: %v", err)
+	if !strings.Contains(err.Error(), "VENICE_API_KEY") {
+		t.Errorf("error should mention VENICE_API_KEY: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nearai") {
+		t.Errorf("error should mention existing provider 'nearai': %v", err)
+	}
+}
+
+func TestProviderNotFoundError_Unknown(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"venice": {Name: "venice"},
+	}}
+	err := providerNotFoundError("foobar", cfg)
+	t.Logf("error: %v", err)
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should say 'not found': %v", err)
+	}
+	if !strings.Contains(err.Error(), "venice") {
+		t.Errorf("error should mention known provider 'venice': %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
 // parseLogLevel tests
 // --------------------------------------------------------------------------
 

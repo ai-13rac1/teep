@@ -1909,3 +1909,248 @@ func TestPrepareUpstreamHeaders_WithSession(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer prepared-key")
 	}
 }
+
+// --------------------------------------------------------------------------
+// relayStream tests
+// --------------------------------------------------------------------------
+
+// newMinimalServer creates a minimal proxy.Server for testing relay methods.
+func newMinimalServer(t *testing.T) *proxy.Server {
+	t.Helper()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: "http://localhost",
+				APIKey:  "key",
+				E2EE:    false,
+			},
+		},
+		Enforced: []string{},
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	return srv
+}
+
+func TestRelayStream_EmptyBody(t *testing.T) {
+	srv := newMinimalServer(t)
+	rec := httptest.NewRecorder()
+
+	srv.RelayStream(rec, strings.NewReader(""), nil)
+
+	t.Logf("status: %d, body: %q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "empty upstream stream") {
+		t.Errorf("body = %q, want 'empty upstream stream'", rec.Body.String())
+	}
+}
+
+func TestRelayStream_NonDataLines(t *testing.T) {
+	srv := newMinimalServer(t)
+	rec := httptest.NewRecorder()
+
+	// SSE with a comment line, a non-data event, then a data chunk and DONE.
+	body := ": this is a comment\nevent: heartbeat\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+	srv.RelayStream(rec, strings.NewReader(body), nil)
+
+	t.Logf("status: %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+
+	output := rec.Body.String()
+	t.Logf("output: %q", output)
+
+	// Comment should be relayed.
+	if !strings.Contains(output, ": this is a comment") {
+		t.Error("comment line not relayed")
+	}
+	// Event line should be relayed.
+	if !strings.Contains(output, "event: heartbeat") {
+		t.Error("event line not relayed")
+	}
+	// Data chunk should be present.
+	if !strings.Contains(output, "data: {\"choices\"") {
+		t.Error("data chunk not relayed")
+	}
+	// DONE marker should be present.
+	if !strings.Contains(output, "data: [DONE]") {
+		t.Error("DONE marker not relayed")
+	}
+}
+
+func TestRelayStream_PlaintextPassthrough(t *testing.T) {
+	srv := newMinimalServer(t)
+	rec := httptest.NewRecorder()
+
+	body := streamSSE("hello world")
+	srv.RelayStream(rec, strings.NewReader(body), nil)
+
+	t.Logf("status: %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+
+	chunks := readSSEChunks(t, strings.NewReader(rec.Body.String()))
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want 1", len(chunks))
+	}
+	content := extractDeltaContent(t, chunks[0])
+	t.Logf("content: %q", content)
+	if content != "hello world" {
+		t.Errorf("content = %q, want %q", content, "hello world")
+	}
+}
+
+// --------------------------------------------------------------------------
+// relayNonStream tests
+// --------------------------------------------------------------------------
+
+func TestRelayNonStream_NilSession(t *testing.T) {
+	srv := newMinimalServer(t)
+	rec := httptest.NewRecorder()
+
+	body := nonStreamResponse("hello from upstream")
+	srv.RelayNonStream(rec, strings.NewReader(body), nil)
+
+	t.Logf("status: %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+
+	ct := rec.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	content := extractMessageContent(t, rec.Body.Bytes())
+	t.Logf("content: %q", content)
+	if content != "hello from upstream" {
+		t.Errorf("content = %q, want %q", content, "hello from upstream")
+	}
+}
+
+func TestRelayReassembledNonStream_MalformedSSE(t *testing.T) {
+	srv := newMinimalServer(t)
+	rec := httptest.NewRecorder()
+
+	// No valid SSE data lines — should fail during reassembly.
+	srv.RelayReassembledNonStream(rec, strings.NewReader("not valid sse"), nil)
+
+	t.Logf("status: %d, body: %q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rec.Code)
+	}
+}
+
+// --------------------------------------------------------------------------
+// handleIndex tests
+// --------------------------------------------------------------------------
+
+func TestHandleIndex_Fresh(t *testing.T) {
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	t.Logf("Content-Type: %s", ct)
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(body)
+	t.Logf("response length: %d bytes", len(html))
+
+	for _, want := range []string{"teep", "venice", "Provider", "Requests", "Attestation Cache"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("response missing %q", want)
+		}
+	}
+}
+
+func TestHandleIndex_AfterRequest(t *testing.T) {
+	combined := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/tee/attestation") {
+			nonceHex := r.URL.Query().Get("nonce")
+			var n attestation.Nonce
+			b, _ := hex.DecodeString(nonceHex)
+			copy(n[:], b)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(attestationJSON(n, true)))
+			return
+		}
+		if r.URL.Path == "/api/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nonStreamResponse("hello")))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer combined.Close()
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: combined.URL,
+				APIKey:  "key",
+				E2EE:    false,
+			},
+		},
+		Enforced: []string{},
+	}
+
+	proxySrv := newProxyServer(t, cfg)
+	defer proxySrv.Close()
+
+	// Make a chat request to populate stats.
+	chatResp, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("POST chat: %v", err)
+	}
+	_, _ = io.ReadAll(chatResp.Body)
+	chatResp.Body.Close()
+	t.Logf("chat response status: %d", chatResp.StatusCode)
+
+	// Now GET / and verify stats are reflected.
+	resp, err := http.Get(proxySrv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(body)
+	t.Logf("index page length: %d bytes", len(html))
+
+	// Should show model name in the models table.
+	if !strings.Contains(html, "test-model") {
+		t.Error("index page missing model name 'test-model' after request")
+	}
+}
