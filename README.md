@@ -1,5 +1,9 @@
 # Teep
 
+[![CI](https://github.com/13rac1/teep/actions/workflows/ci.yml/badge.svg)](https://github.com/13rac1/teep/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/13rac1/teep/graph/badge.svg)](https://codecov.io/gh/13rac1/teep)
+[![License: AGPL](https://img.shields.io/badge/License-AGPL-green.svg)](https://opensource.org/license/agpl-3-0)
+
 A local TEE (Trusted Execution Environment) proxy for AI APIs. Teep sits between OpenAI-compatible clients and TEE-capable providers, handling attestation verification and channel security transparently.
 
 It also benchmarks vendor attestation against a 23-factor verification framework, exposing gaps in TEE implementations.
