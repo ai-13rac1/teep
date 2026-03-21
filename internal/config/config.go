@@ -3,7 +3,7 @@
 //
 // Load order:
 //
-//  1. Built-in defaults (listen addr 127.0.0.1:8080, default enforced factors).
+//  1. Built-in defaults (listen addr 127.0.0.1:8337, default enforced factors).
 //  2. TOML file at $TEEP_CONFIG, if set.
 //  3. Environment variables (TEEP_LISTEN_ADDR, VENICE_API_KEY, NEARAI_API_KEY).
 //
@@ -26,7 +26,7 @@ import (
 const (
 	// DefaultListenAddr is the proxy's default listen address.
 	// It deliberately binds only to loopback — never to all interfaces.
-	DefaultListenAddr = "127.0.0.1:8080"
+	DefaultListenAddr = "127.0.0.1:8337"
 
 	// AttestationTimeout is the HTTP client timeout for attestation fetches.
 	AttestationTimeout = 30 * time.Second

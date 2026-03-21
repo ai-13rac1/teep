@@ -360,7 +360,7 @@ Help topics:
 
 Environment variables:
   TEEP_CONFIG        Path to TOML config file.
-  TEEP_LISTEN_ADDR   Override listen address (default: 127.0.0.1:8080).
+  TEEP_LISTEN_ADDR   Override listen address (default: 127.0.0.1:8337).
   VENICE_API_KEY     Venice AI API key.
   NEARAI_API_KEY     NEAR AI API key.
 `)
@@ -380,7 +380,7 @@ The proxy intercepts OpenAI-compatible chat completion requests, performs TEE
 attestation verification against the upstream provider, and optionally enables
 end-to-end encryption (E2EE) when the attestation passes.
 
-Clients send requests to http://127.0.0.1:8080/v1/chat/completions (or the
+Clients send requests to http://127.0.0.1:8337/v1/chat/completions (or the
 address set by TEEP_LISTEN_ADDR) using the same format as the OpenAI API.
 
 The proxy:

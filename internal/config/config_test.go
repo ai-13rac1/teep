@@ -453,14 +453,14 @@ func TestNewAttestationClient(t *testing.T) {
 // the function does not panic on valid inputs.
 func TestWarnNonLoopbackLoopback(t *testing.T) {
 	// These must not panic or cause issues.
-	warnNonLoopback("127.0.0.1:8080")
-	warnNonLoopback("[::1]:8080")
+	warnNonLoopback("127.0.0.1:8337")
+	warnNonLoopback("[::1]:8337")
 }
 
 func TestWarnNonLoopbackNonLoopback(t *testing.T) {
 	// Non-loopback should not panic, just log.
-	warnNonLoopback("0.0.0.0:8080")
-	warnNonLoopback("192.168.1.1:8080")
+	warnNonLoopback("0.0.0.0:8337")
+	warnNonLoopback("192.168.1.1:8337")
 }
 
 func TestWarnNonLoopbackUnparseable(t *testing.T) {
@@ -472,7 +472,7 @@ func TestWarnNonLoopbackUnparseable(t *testing.T) {
 // addr is non-loopback (the warning is logged but Load still returns a config).
 func TestLoadNonLoopbackEnvAddrLoads(t *testing.T) {
 	unsetenv(t, "TEEP_CONFIG")
-	setenv(t, "TEEP_LISTEN_ADDR", "0.0.0.0:8080")
+	setenv(t, "TEEP_LISTEN_ADDR", "0.0.0.0:8337")
 	unsetenv(t, "VENICE_API_KEY")
 	unsetenv(t, "NEARAI_API_KEY")
 
@@ -480,8 +480,8 @@ func TestLoadNonLoopbackEnvAddrLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if cfg.ListenAddr != "0.0.0.0:8080" {
-		t.Errorf("ListenAddr: got %q, want %q", cfg.ListenAddr, "0.0.0.0:8080")
+	if cfg.ListenAddr != "0.0.0.0:8337" {
+		t.Errorf("ListenAddr: got %q, want %q", cfg.ListenAddr, "0.0.0.0:8337")
 	}
 }
 

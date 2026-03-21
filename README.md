@@ -9,7 +9,7 @@ A local TEE (Trusted Execution Environment) proxy for AI APIs. Teep sits between
 It also benchmarks vendor attestation against a 23-factor verification framework, exposing gaps in TEE implementations.
 
 ```
-Client (OpenAI SDK) --> 127.0.0.1:8080 (teep)
+Client (OpenAI SDK) --> 127.0.0.1:8337 (teep)
                           |
                           |-- Verify attestation (TDX + NVIDIA GPU)
                           |
@@ -40,12 +40,12 @@ export NEARAI_API_KEY="your-key-here"
 ./teep serve nearai
 ```
 
-Point any OpenAI-compatible client at `http://127.0.0.1:8080`:
+Point any OpenAI-compatible client at `http://127.0.0.1:8337`:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://127.0.0.1:8337/v1", api_key="unused")
 resp = client.chat.completions.create(
     model="e2ee-qwen3-5-122b-a10b",  # Venice
     # model="qwen3-235b-a22b",       # NEAR AI
@@ -123,7 +123,7 @@ Exits with code 1 if any enforced factor fails.
 |----------|-------------|
 | `VENICE_API_KEY` | Venice AI API key |
 | `NEARAI_API_KEY` | NEAR AI API key |
-| `TEEP_LISTEN_ADDR` | Listen address (default `127.0.0.1:8080`) |
+| `TEEP_LISTEN_ADDR` | Listen address (default `127.0.0.1:8337`) |
 | `TEEP_CONFIG` | Path to optional TOML config file |
 
 ### TOML Config File
