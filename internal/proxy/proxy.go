@@ -220,7 +220,10 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		return nil
 	}
 
+	totalStart := time.Now()
 	nonce := attestation.NewNonce()
+	var fetchDur, tdxDur, nvidiaDur, nrasDur, pocDur, composeDur time.Duration
+
 	slog.Debug("attestation fetch starting", "provider", prov.Name, "model", upstreamModel)
 	fetchStart := time.Now()
 	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
@@ -229,7 +232,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		s.negCache.Record(prov.Name, upstreamModel)
 		return nil
 	}
-	slog.Debug("attestation fetch complete", "provider", prov.Name, "elapsed", time.Since(fetchStart))
+	fetchDur = time.Since(fetchStart)
+	slog.Debug("attestation fetch complete", "provider", prov.Name, "elapsed", fetchDur)
 
 	var tdxResult *attestation.TDXVerifyResult
 	if raw.IntelQuote != "" {
@@ -241,7 +245,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 			tdxResult.ReportDataBindingErr = err
 			tdxResult.ReportDataBindingDetail = detail
 		}
-		slog.Debug("TDX verification complete", "provider", prov.Name, "elapsed", time.Since(tdxStart))
+		tdxDur = time.Since(tdxStart)
+		slog.Debug("TDX verification complete", "provider", prov.Name, "elapsed", tdxDur)
 	}
 
 	var nvidiaResult *attestation.NvidiaVerifyResult
@@ -249,7 +254,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		slog.Debug("NVIDIA verification starting", "provider", prov.Name)
 		nvidiaStart := time.Now()
 		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
-		slog.Debug("NVIDIA verification complete", "provider", prov.Name, "elapsed", time.Since(nvidiaStart))
+		nvidiaDur = time.Since(nvidiaStart)
+		slog.Debug("NVIDIA verification complete", "provider", prov.Name, "elapsed", nvidiaDur)
 	}
 
 	var nrasResult *attestation.NvidiaVerifyResult
@@ -257,7 +263,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		slog.Debug("NVIDIA NRAS verification starting", "provider", prov.Name)
 		nrasStart := time.Now()
 		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, s.attestClient)
-		slog.Debug("NVIDIA NRAS verification complete", "provider", prov.Name, "elapsed", time.Since(nrasStart))
+		nrasDur = time.Since(nrasStart)
+		slog.Debug("NVIDIA NRAS verification complete", "provider", prov.Name, "elapsed", nrasDur)
 	}
 
 	var pocResult *attestation.PoCResult
@@ -266,13 +273,15 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		pocStart := time.Now()
 		poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, s.attestClient)
 		pocResult = poc.CheckQuote(ctx, raw.IntelQuote)
-		slog.Debug("Proof of Cloud check complete", "provider", prov.Name, "elapsed", time.Since(pocStart),
+		pocDur = time.Since(pocStart)
+		slog.Debug("Proof of Cloud check complete", "provider", prov.Name, "elapsed", pocDur,
 			"registered", pocResult != nil && pocResult.Registered)
 	}
 
 	var composeResult *attestation.ComposeBindingResult
 	var sigstoreResults []attestation.SigstoreResult
 	if raw.AppCompose != "" && tdxResult != nil && tdxResult.ParseErr == nil {
+		composeStart := time.Now()
 		composeResult = &attestation.ComposeBindingResult{Checked: true}
 		composeResult.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
 
@@ -291,7 +300,20 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		if len(digests) > 0 && !s.cfg.Offline {
 			sigstoreResults = attestation.CheckSigstoreDigests(ctx, digests, s.attestClient)
 		}
+		composeDur = time.Since(composeStart)
 	}
+
+	slog.Info("verification complete",
+		"provider", prov.Name,
+		"model", upstreamModel,
+		"total", time.Since(totalStart),
+		"fetch", fetchDur,
+		"tdx", tdxDur,
+		"nvidia", nvidiaDur,
+		"nras", nrasDur,
+		"poc", pocDur,
+		"compose", composeDur,
+	)
 
 	return attestation.BuildReport(prov.Name, upstreamModel, raw, nonce, s.cfg.Enforced, tdxResult, nvidiaResult, nrasResult, pocResult, composeResult, sigstoreResults)
 }
