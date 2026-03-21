@@ -113,6 +113,7 @@ func New(cfg *config.Config) (*Server, error) {
 		slog.Info("registered provider", "provider", name, "base_url", cp.BaseURL, "api_key", config.RedactKey(cp.APIKey), "e2ee", cp.E2EE)
 	}
 
+	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
@@ -783,4 +784,66 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(report) //nolint:errchkjson // response body already committed
+}
+
+// handleIndex serves a status page at /.
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+	var provName, baseURL, e2ee string
+	for name, p := range s.providers {
+		provName = name
+		baseURL = p.BaseURL
+		if p.E2EE {
+			e2ee = "enabled"
+		} else {
+			e2ee = "disabled"
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>teep</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #222; line-height: 1.6; }
+  h1 { font-size: 1.4em; }
+  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f4f4f4; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 0.85em; }
+  table { border-collapse: collapse; width: 100%%; }
+  td, th { text-align: left; padding: 4px 12px 4px 0; }
+  th { color: #666; font-weight: normal; }
+  .muted { color: #888; }
+</style>
+</head>
+<body>
+<h1>teep</h1>
+<p>TEE attestation proxy running on <code>%s</code></p>
+
+<h2>Provider</h2>
+<table>
+  <tr><th>Name</th><td>%s</td></tr>
+  <tr><th>Upstream</th><td>%s</td></tr>
+  <tr><th>E2EE</th><td>%s</td></tr>
+</table>
+
+<h2>Endpoints</h2>
+<table>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>Proxy chat requests with TEE attestation</td></tr>
+  <tr><td><code>GET /v1/models</code></td><td>List models</td></tr>
+  <tr><td><code>GET /v1/tee/report</code></td><td>Cached attestation report <span class="muted">(after first request)</span></td></tr>
+</table>
+
+<h2>Quick start</h2>
+<pre>curl http://%s/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "MODEL_NAME",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'</pre>
+
+<p class="muted">Or point any OpenAI-compatible client at <code>http://%s/v1</code></p>
+</body>
+</html>
+`, s.cfg.ListenAddr, provName, baseURL, e2ee, s.cfg.ListenAddr, s.cfg.ListenAddr)
 }
