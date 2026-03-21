@@ -90,6 +90,11 @@ func (st *stats) getModelStats(prov, model string) *modelStats {
 	return v.(*modelStats) //nolint:forcetypeassert // sync.Map always stores *modelStats
 }
 
+// fmtDur formats a duration as seconds with 3 decimal places (e.g. "4.200s").
+func fmtDur(d time.Duration) string {
+	return fmt.Sprintf("%.3fs", d.Seconds())
+}
+
 // chatRequest is a minimal parse of an OpenAI chat completions request.
 // Only fields the proxy needs to inspect or rewrite are decoded here.
 type chatRequest struct {
@@ -341,13 +346,13 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	slog.Info("verification complete",
 		"provider", prov.Name,
 		"model", upstreamModel,
-		"total", totalDur,
-		"fetch", fetchDur,
-		"tdx", tdxDur,
-		"nvidia", nvidiaDur,
-		"nras", nrasDur,
-		"poc", pocDur,
-		"compose", composeDur,
+		"total", fmtDur(totalDur),
+		"fetch", fmtDur(fetchDur),
+		"tdx", fmtDur(tdxDur),
+		"nvidia", fmtDur(nvidiaDur),
+		"nras", fmtDur(nrasDur),
+		"poc", fmtDur(pocDur),
+		"compose", fmtDur(composeDur),
 	)
 
 	ms := s.stats.getModelStats(prov.Name, upstreamModel)
@@ -358,6 +363,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 
 // handleChatCompletions is the core proxy handler for POST /v1/chat/completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	requestStart := time.Now()
+
 	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MiB max
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -382,6 +389,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-request timing: populated as the request progresses, logged on exit.
+	var attestDur, e2eeDur, upstreamDur time.Duration
+	var status string
+	defer func() {
+		slog.Info("request complete",
+			"provider", prov.Name,
+			"model", upstreamModel,
+			"stream", req.Stream,
+			"status", status,
+			"attest", fmtDur(attestDur),
+			"e2ee", fmtDur(e2eeDur),
+			"upstream", fmtDur(upstreamDur),
+			"total", fmtDur(time.Since(requestStart)),
+		)
+	}()
+
 	s.stats.requests.Add(1)
 	ms := s.stats.getModelStats(prov.Name, upstreamModel)
 	ms.requests.Add(1)
@@ -393,6 +416,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		status = "neg_cached"
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		http.Error(w,
@@ -404,11 +428,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Connection-pinned providers (NEAR AI) handle attestation + chat on a
 	// single TLS connection. No separate attestation cache or E2EE needed.
 	if prov.PinnedHandler != nil {
+		status = "pinned"
 		s.stats.plaintext.Add(1)
 		s.handlePinnedChat(w, r, prov, upstreamModel, body, req)
 		return
 	}
 
+	attestStart := time.Now()
 	report, cached := s.cache.Get(prov.Name, upstreamModel)
 	if cached {
 		s.stats.cacheHits.Add(1)
@@ -416,6 +442,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.stats.cacheMisses.Add(1)
 		report = s.fetchAndVerify(r.Context(), prov, upstreamModel)
 		if report == nil {
+			status = "attest_failed"
 			s.stats.errors.Add(1)
 			ms.errors.Add(1)
 			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
@@ -423,8 +450,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		s.cache.Put(prov.Name, upstreamModel, report)
 	}
+	attestDur = time.Since(attestStart)
 
 	if report.Blocked() {
+		status = "blocked"
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		w.Header().Set("Content-Type", "application/json")
@@ -440,14 +469,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.stats.plaintext.Add(1)
 	}
 
+	e2eeStart := time.Now()
 	upstreamBody, session, err := s.buildUpstreamBody(r.Context(), body, req, upstreamModel, e2eeActive, prov)
 	if err != nil {
+		status = "e2ee_failed"
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		slog.Error("build upstream body failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, "failed to prepare upstream request", http.StatusInternalServerError)
 		return
 	}
+	e2eeDur = time.Since(e2eeStart)
 	if session != nil {
 		defer session.Zero()
 	}
@@ -474,8 +506,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	upstreamStart := time.Now()
 	resp, err := s.upstreamClient.Do(upstreamReq)
 	if err != nil {
+		status = "upstream_failed"
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		slog.Error("upstream request failed", "provider", prov.Name, "model", upstreamModel, "err", err)
@@ -488,6 +522,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if resp.StatusCode != http.StatusOK {
+		status = fmt.Sprintf("upstream_%d", resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, io.LimitReader(resp.Body, 10<<20))
 		return
@@ -502,13 +537,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.relayReassembledNonStream(w, resp.Body, session)
 		}
+		upstreamDur = time.Since(upstreamStart)
+		status = "ok"
 		return
 	}
 	if req.Stream {
 		s.relayStream(w, resp.Body, session)
+		upstreamDur = time.Since(upstreamStart)
+		status = "ok"
 		return
 	}
 	s.relayNonStream(w, resp.Body, session)
+	upstreamDur = time.Since(upstreamStart)
+	status = "ok"
 }
 
 // handlePinnedChat handles chat completions for connection-pinned providers.
