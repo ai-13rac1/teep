@@ -317,7 +317,32 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		}
 	}
 
-	return attestation.BuildReport(providerName, modelName, raw, nonce, cfg.Enforced, tdxResult, nvidiaResult, nrasResult, pocResult, composeResult, sigstoreResults)
+	var rekorResults []attestation.RekorProvenance
+	if len(sigstoreResults) > 0 && !cfg.Offline {
+		for _, sr := range sigstoreResults {
+			if sr.OK {
+				slog.Info("fetching Rekor provenance", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+				prov := attestation.FetchRekorProvenance(ctx, sr.Digest, client)
+				switch {
+				case prov.Err != nil:
+					slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...", "err", prov.Err)
+				case prov.HasCert:
+					slog.Info("Rekor provenance found",
+						"digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...",
+						"issuer", prov.OIDCIssuer,
+						"repo", prov.SourceRepo,
+						"commit", prov.SourceCommit[:min(7, len(prov.SourceCommit))],
+						"runner", prov.RunnerEnv,
+					)
+				default:
+					slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+				}
+				rekorResults = append(rekorResults, prov)
+			}
+		}
+	}
+
+	return attestation.BuildReport(providerName, modelName, raw, nonce, cfg.Enforced, tdxResult, nvidiaResult, nrasResult, pocResult, composeResult, sigstoreResults, rekorResults)
 }
 
 // newAttester returns the appropriate Attester for the named provider.

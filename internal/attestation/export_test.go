@@ -8,3 +8,6 @@ func restoreNRASURL(url string)  { nrasAttestURL = url }
 
 func overrideJWKSURL(url string) { nvidiaJWKSURL = url }
 func restoreJWKSURL(url string)  { nvidiaJWKSURL = url }
+
+func overrideRekorBase(base string) { rekorAPIBase = base }
+func restoreRekorBase(base string)  { rekorAPIBase = base }

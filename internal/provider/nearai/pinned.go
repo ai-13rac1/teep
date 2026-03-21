@@ -290,7 +290,16 @@ func (h *PinnedHandler) attestOnConn(
 		}
 	}
 
-	report := attestation.BuildReport("nearai", model, raw, nonce, h.enforced, tdxResult, nil, nil, nil, composeResult, sigstoreResults)
+	var rekorResults []attestation.RekorProvenance
+	if len(sigstoreResults) > 0 && !h.offline {
+		for _, sr := range sigstoreResults {
+			if sr.OK {
+				rekorResults = append(rekorResults, attestation.FetchRekorProvenance(ctx, sr.Digest, &http.Client{Timeout: 10 * time.Second}))
+			}
+		}
+	}
+
+	report := attestation.BuildReport("nearai", model, raw, nonce, h.enforced, tdxResult, nil, nil, nil, composeResult, sigstoreResults, rekorResults)
 	return report, nil
 }
 

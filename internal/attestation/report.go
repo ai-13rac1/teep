@@ -109,7 +109,9 @@ type ComposeBindingResult struct {
 // and VerifyNVIDIANRAS. Tier 3 factors (17-21) check supply-chain data.
 // Factors 22-23 (compose_binding, sigstore_verification) check the app_compose
 // manifest binding to the TDX quote and Sigstore transparency log presence.
-func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enforced []string, tdxResult *TDXVerifyResult, nvidiaResult, nrasResult *NvidiaVerifyResult, pocResult *PoCResult, composeResult *ComposeBindingResult, sigstoreResults []SigstoreResult) *VerificationReport {
+// Factor 20 (build_transparency_log) uses rekorResults to check Fulcio cert
+// provenance from the Rekor transparency log.
+func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enforced []string, tdxResult *TDXVerifyResult, nvidiaResult, nrasResult *NvidiaVerifyResult, pocResult *PoCResult, composeResult *ComposeBindingResult, sigstoreResults []SigstoreResult, rekorResults []RekorProvenance) *VerificationReport {
 	enforcedSet := make(map[string]bool, len(enforced))
 	for _, name := range enforced {
 		enforcedSet[name] = true
@@ -376,16 +378,52 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 	addFactor("measured_model_weights", Fail,
 		"no model weight hashes")
 
-	if raw.ComposeHash != "" {
-		hashPreview := raw.ComposeHash
-		if len(hashPreview) > 8 {
-			hashPreview = hashPreview[:8] + "..."
+	if len(rekorResults) == 0 {
+		if raw.ComposeHash != "" {
+			hashPreview := raw.ComposeHash
+			if len(hashPreview) > 8 {
+				hashPreview = hashPreview[:8] + "..."
+			}
+			addFactor("build_transparency_log", Skip,
+				fmt.Sprintf("compose hash present (%s) but no Rekor provenance fetched", hashPreview))
+		} else {
+			addFactor("build_transparency_log", Fail,
+				"no build transparency log")
 		}
-		addFactor("build_transparency_log", Skip,
-			fmt.Sprintf("compose hash present (%s) but not an independent transparency log", hashPreview))
 	} else {
-		addFactor("build_transparency_log", Fail,
-			"no build transparency log")
+		var verified int
+		var detail string
+		var failed bool
+		for i := range rekorResults {
+			r := &rekorResults[i]
+			if r.Err != nil || !r.HasCert {
+				continue // third-party image or fetch error — skip, don't fail
+			}
+			if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
+				failed = true
+				detail = "unexpected OIDC issuer: " + r.OIDCIssuer
+				break
+			}
+			verified++
+			if detail == "" {
+				repo := r.SourceRepo
+				commit := r.SourceCommit
+				if len(commit) > 7 {
+					commit = commit[:7]
+				}
+				detail = fmt.Sprintf("%s@%s, %s", repo, commit, r.RunnerEnv)
+			}
+		}
+		switch {
+		case failed:
+			addFactor("build_transparency_log", Fail, detail)
+		case verified > 0:
+			addFactor("build_transparency_log", Pass,
+				fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s)", verified, len(rekorResults), detail))
+		default:
+			addFactor("build_transparency_log", Skip,
+				"all images signed with raw keys (no Fulcio build provenance)")
+		}
 	}
 
 	if pocResult != nil && pocResult.Registered { //nolint:gocritic // ifElseChain: conditions compare different fields
