@@ -148,7 +148,7 @@ func VerifyNVIDIAPayload(payload string, expectedNonce Nonce) *NvidiaVerifyResul
 // caches) the NVIDIA JWKS via keyfunc/v3, verifies the JWT signature, and
 // extracts claims. Nonce freshness is verified separately via the EAT layer
 // (factor 14: nvidia_nonce_match).
-func verifyNVIDIAJWT(ctx context.Context, jwtPayload, jwksURL string) *NvidiaVerifyResult {
+func verifyNVIDIAJWT(ctx context.Context, jwtPayload, jwksURL string, opts ...jwt.ParserOption) *NvidiaVerifyResult {
 	result := &NvidiaVerifyResult{Format: "JWT"}
 
 	kf, err := getOrCreateKeyfunc(ctx, jwksURL)
@@ -158,10 +158,11 @@ func verifyNVIDIAJWT(ctx context.Context, jwtPayload, jwksURL string) *NvidiaVer
 	}
 
 	claims := &nvidiaClaims{}
-	token, err := jwt.ParseWithClaims(jwtPayload, claims, kf.Keyfunc,
+	parserOpts := append([]jwt.ParserOption{
 		jwt.WithValidMethods([]string{"ES256", "ES384", "ES512"}),
 		jwt.WithExpirationRequired(),
-	)
+	}, opts...)
+	token, err := jwt.ParseWithClaims(jwtPayload, claims, kf.Keyfunc, parserOpts...)
 
 	if err != nil {
 		if isSignatureError(err) {
@@ -209,7 +210,7 @@ func isSignatureError(err error) bool {
 // This provides defense-in-depth: local SPDM verification proves evidence is
 // well-formed; NRAS compares GPU firmware measurements against NVIDIA's golden
 // Reference Integrity Manifest values.
-func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Client) *NvidiaVerifyResult {
+func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Client, opts ...jwt.ParserOption) *NvidiaVerifyResult {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -271,7 +272,7 @@ func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Clien
 		}
 	}
 
-	return verifyNVIDIAJWT(ctx, extracted, nvidiaJWKSURL)
+	return verifyNVIDIAJWT(ctx, extracted, nvidiaJWKSURL, opts...)
 }
 
 // extractNRASJWT parses the NRAS response body. NRAS returns a JSON array

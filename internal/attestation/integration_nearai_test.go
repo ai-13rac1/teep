@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/go-tdx-guest/pcs"
 	tdxtesting "github.com/google/go-tdx-guest/testing"
 	"github.com/google/go-tdx-guest/verify/trust"
@@ -67,7 +69,8 @@ func TestIntegration_NearAI_Fixture(t *testing.T) {
 	// 1. Load fixtures
 	// ---------------------------------------------------------------
 	fdir := fixtureDir(t)
-	t.Logf("loading fixtures from %s", fdir)
+	captureTime := parseCaptureTime(t, fdir)
+	t.Logf("loading fixtures from %s (captured %s)", fdir, captureTime.Format(time.RFC3339))
 
 	attestBody := readFixtureFrom(t, fdir, "nearai_attestation.json")
 	nonceHex := strings.TrimSpace(string(readFixtureFrom(t, fdir, "nearai_fixture_nonce.txt")))
@@ -200,7 +203,10 @@ func TestIntegration_NearAI_Fixture(t *testing.T) {
 	t.Log("--- NVIDIA NRAS verification ---")
 	var nrasResult *NvidiaVerifyResult
 	if raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
-		nrasResult = VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client)
+		nrasResult = VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client,
+			jwt.WithTimeFunc(func() time.Time { return captureTime }),
+			jwt.WithLeeway(10*time.Second), // capture dir timestamp predates JWT issuance by a few seconds
+		)
 		t.Logf("NRAS format: %s", nrasResult.Format)
 		t.Logf("NRAS signature err: %v", nrasResult.SignatureErr)
 		t.Logf("NRAS claims err: %v", nrasResult.ClaimsErr)
@@ -334,9 +340,11 @@ func TestIntegration_NearAI_Fixture(t *testing.T) {
 		t.Logf("WARNING: nvidia_claims failed (may need fixture refresh): %s", nvidClaims.Detail)
 	}
 
-	// NRAS — depends on real JWT with time-sensitive claims.
+	// NRAS — JWT expiry is pinned to capture time, so this should pass.
 	nrasF := findFactor(t, report, "nvidia_nras_verified")
-	t.Logf("nvidia_nras_verified: %s (%s)", nrasF.Status, nrasF.Detail)
+	if nrasF.Status != Pass {
+		t.Errorf("nvidia_nras_verified: got %s, want Pass (detail: %s)", nrasF.Status, nrasF.Detail)
+	}
 
 	// PoC — depends on whether the machine is whitelisted.
 	pocF := findFactor(t, report, "cpu_id_registry")
@@ -360,6 +368,19 @@ func TestIntegration_NearAI_Fixture(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
+
+// parseCaptureTime extracts the capture timestamp from the fixture directory
+// name (nearai_YYYYMMDD_HHMMSS). Used to pin JWT expiry checks to capture time
+// so fixtures don't expire.
+func parseCaptureTime(t *testing.T, fdir string) time.Time {
+	t.Helper()
+	base := filepath.Base(fdir)
+	ct, err := time.Parse("nearai_20060102_150405", base)
+	if err != nil {
+		t.Fatalf("parse capture time from %q: %v", base, err)
+	}
+	return ct
+}
 
 func readFixtureFrom(t *testing.T, dir, name string) []byte {
 	t.Helper()
