@@ -41,7 +41,7 @@ const validAttestationJSON = `{
 		"tcb_info": {},
 		"vm_config": "tdx-vm"
 	},
-	"server_verification": {"tdx": {"verified": true}},
+	"server_verification": {"tdx": {"valid": true, "signatureValid": true, "certificateChainValid": true, "rootCaPinned": true, "attestationKeyMatch": true, "reportData": "", "measurements": {"mrtd": "", "mrconfigid": "", "mrowner": "", "mrownerconfig": "", "rtmr0": "", "rtmr1": "", "rtmr2": "", "rtmr3": "", "tdAttributes": "", "xfam": ""}, "crlCheck": {"checked": true, "revoked": false}}, "nvidia": {"valid": true, "signatureVerified": true, "certificateChainStatus": {"valid": true, "intermediatePinned": true, "leafCertExpiry": ""}}, "signingAddressBinding": {"bound": true, "reportDataAddress": ""}, "nonceBinding": {"bound": true, "method": "raw"}, "nvidiaNonceBinding": {"bound": true, "method": "nvidia_payload"}, "verifiedAt": "2026-03-22T13:41:02.018Z", "verificationDurationMs": 327},
 	"model_name": "Qwen/Qwen3.5-122B-A10B",
 	"upstream_model": "Qwen/Qwen3.5-122B-A10B",
 	"signing_algo": "ecdsa",
@@ -136,9 +136,6 @@ func TestAttester_FetchAttestation_ExtendedFields(t *testing.T) {
 	}
 	if raw.CandidatesEval != 1 {
 		t.Errorf("CandidatesEval = %d, want 1", raw.CandidatesEval)
-	}
-	if raw.ServerVerification == nil {
-		t.Error("ServerVerification is nil, want non-nil")
 	}
 }
 

@@ -3,7 +3,6 @@ package attestation
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -88,20 +87,19 @@ type RawAttestation struct {
 	TLSFingerprint string
 
 	// TEE environment metadata from the provider's attestation response.
-	TEEHardware        string          // e.g. "intel-tdx"
-	SigningAlgo        string          // e.g. "ecdsa"
-	UpstreamModel      string          // HuggingFace model ID
-	AppName            string          // dstack app name
-	ComposeHash        string          // docker-compose hash
-	AppCompose         string          // raw app_compose JSON from info.tcb_info
-	OSImageHash        string          // OS image hash
-	DeviceID           string          // TDX device ID
-	EventLog           []EventLogEntry // TDX RTMR extend events
-	EventLogCount      int             // number of event log entries
-	NonceSource        string          // "client" or "server"
-	CandidatesAvail    int             // node pool size
-	CandidatesEval     int             // nodes evaluated
-	ServerVerification json.RawMessage // provider's own verification result (opaque)
+	TEEHardware     string          // e.g. "intel-tdx"
+	SigningAlgo     string          // e.g. "ecdsa"
+	UpstreamModel   string          // HuggingFace model ID
+	AppName         string          // dstack app name
+	ComposeHash     string          // docker-compose hash
+	AppCompose      string          // raw app_compose JSON from info.tcb_info
+	OSImageHash     string          // OS image hash
+	DeviceID        string          // TDX device ID
+	EventLog        []EventLogEntry // TDX RTMR extend events
+	EventLogCount   int             // number of event log entries
+	NonceSource     string          // "client" or "server"
+	CandidatesAvail int             // node pool size
+	CandidatesEval  int             // nodes evaluated
 
 	// RawBody is the unmodified HTTP response body from the provider.
 	// Used by --save-dir to write the original JSON as-is.

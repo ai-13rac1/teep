@@ -1,4 +1,4 @@
-.PHONY: help build test integration integration-venice integration-near integration-nearai-fixture capture-nearai vet fmt lint check clean reports report-venice report-near e2e-venice
+.PHONY: help build test integration integration-venice integration-near integration-nearai-fixture integration-venice-fixture capture-nearai capture-venice vet fmt lint check clean reports report-venice report-near e2e-venice
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-22s %s\n", $$1, $$2}'
@@ -9,7 +9,7 @@ build: ## Build the teep binary
 test: ## Run unit tests with race detector (-short skips integration)
 	go test -short -race ./cmd/... ./internal/...
 
-integration: integration-venice integration-near integration-nearai-fixture ## Run all integration tests
+integration: integration-venice integration-near integration-nearai-fixture integration-venice-fixture ## Run all integration tests
 
 integration-venice: ## Run Venice integration tests (requires VENICE_API_KEY)
 	go test -v -race -timeout 120s -run TestIntegration_Venice ./internal/proxy/
@@ -20,8 +20,14 @@ integration-near: ## Run NEAR AI integration tests (requires NEARAI_API_KEY)
 integration-nearai-fixture: ## Run NEAR AI fixture integration test (no API key needed)
 	go test -v -race -timeout 60s -run TestIntegration_NearAI_Fixture ./internal/attestation/
 
+integration-venice-fixture: ## Run Venice fixture integration test (no API key needed)
+	go test -v -race -timeout 60s -run TestIntegration_Venice_Fixture ./internal/attestation/
+
 capture-nearai: ## Capture NEAR AI fixtures (requires NEARAI_API_KEY)
 	go run ./cmd/capture_nearai
+
+capture-venice: ## Capture Venice fixtures (requires VENICE_API_KEY)
+	go run ./cmd/capture_venice
 
 vet: ## Run go vet
 	go vet ./cmd/... ./internal/...

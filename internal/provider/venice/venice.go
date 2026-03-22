@@ -43,6 +43,86 @@ type eventLogEntry struct {
 	IMR          int    `json:"imr"`
 }
 
+// tcbInfo holds the parsed info.tcb_info object from Venice's attestation
+// response. Contains dstack measurements and the docker-compose manifest.
+type tcbInfo struct {
+	AppCompose  string          `json:"app_compose"`  // JSON-encoded dstack manifest
+	ComposeHash string          `json:"compose_hash"` // hex SHA-256
+	DeviceID    string          `json:"device_id"`    // hex TDX device ID
+	EventLog    []eventLogEntry `json:"event_log"`    // TDX RTMR extend events
+	MRTD        string          `json:"mrtd"`         // hex SHA-384
+	OSImageHash string          `json:"os_image_hash"`
+	RTMR0       string          `json:"rtmr0"` // hex SHA-384
+	RTMR1       string          `json:"rtmr1"`
+	RTMR2       string          `json:"rtmr2"`
+	RTMR3       string          `json:"rtmr3"`
+}
+
+// UnmarshalJSON handles tcb_info being either a direct JSON object or a
+// JSON-encoded string containing JSON (double-encoded by some dstack versions).
+func (t *tcbInfo) UnmarshalJSON(data []byte) error {
+	// Try to unwrap a JSON string first.
+	var str string
+	if json.Unmarshal(data, &str) == nil {
+		data = []byte(str)
+	}
+	type alias tcbInfo // prevent recursion
+	return json.Unmarshal(data, (*alias)(t))
+}
+
+// ServerVerification holds Venice's gateway-level verification result.
+// The gateway re-verifies the TDX quote and reports its findings; this is
+// an untrusted claim (the gateway is not hardware-attested itself).
+type ServerVerification struct {
+	TDX struct {
+		Valid                 bool   `json:"valid"`
+		SignatureValid        bool   `json:"signatureValid"`
+		CertificateChainValid bool   `json:"certificateChainValid"`
+		RootCAPinned          bool   `json:"rootCaPinned"`
+		AttestationKeyMatch   bool   `json:"attestationKeyMatch"`
+		ReportData            string `json:"reportData"`
+		Measurements          struct {
+			MRTD          string `json:"mrtd"`
+			MRConfigID    string `json:"mrconfigid"`
+			MROwner       string `json:"mrowner"`
+			MROwnerConfig string `json:"mrownerconfig"`
+			RTMR0         string `json:"rtmr0"`
+			RTMR1         string `json:"rtmr1"`
+			RTMR2         string `json:"rtmr2"`
+			RTMR3         string `json:"rtmr3"`
+			TDAttributes  string `json:"tdAttributes"`
+			XFAM          string `json:"xfam"`
+		} `json:"measurements"`
+		CRLCheck struct {
+			Checked bool `json:"checked"`
+			Revoked bool `json:"revoked"`
+		} `json:"crlCheck"`
+	} `json:"tdx"`
+	Nvidia struct {
+		Valid             bool `json:"valid"`
+		SignatureVerified bool `json:"signatureVerified"`
+		CertificateChain  struct {
+			Valid              bool   `json:"valid"`
+			IntermediatePinned bool   `json:"intermediatePinned"`
+			LeafCertExpiry     string `json:"leafCertExpiry"`
+		} `json:"certificateChainStatus"`
+	} `json:"nvidia"`
+	SigningAddressBinding struct {
+		Bound             bool   `json:"bound"`
+		ReportDataAddress string `json:"reportDataAddress"`
+	} `json:"signingAddressBinding"`
+	NonceBinding struct {
+		Bound  bool   `json:"bound"`
+		Method string `json:"method"`
+	} `json:"nonceBinding"`
+	NvidiaNonceBinding struct {
+		Bound  bool   `json:"bound"`
+		Method string `json:"method"`
+	} `json:"nvidiaNonceBinding"`
+	VerifiedAt             string `json:"verifiedAt"`
+	VerificationDurationMs int    `json:"verificationDurationMs"`
+}
+
 func toEventLogEntries(local []eventLogEntry) []attestation.EventLogEntry {
 	out := make([]attestation.EventLogEntry, len(local))
 	for i, e := range local {
@@ -60,17 +140,17 @@ func toEventLogEntries(local []eventLogEntry) []attestation.EventLogEntry {
 // veniceInfo holds the nested "info" object from Venice's attestation
 // response, containing dstack environment metadata.
 type veniceInfo struct {
-	AppCert      string          `json:"app_cert"`
-	AppID        string          `json:"app_id"`
-	AppName      string          `json:"app_name"`
-	ComposeHash  string          `json:"compose_hash"`
-	DeviceID     string          `json:"device_id"`
-	InstanceID   string          `json:"instance_id"`
-	KeyProvider  string          `json:"key_provider_info"`
-	MRAggregated string          `json:"mr_aggregated"`
-	OSImageHash  string          `json:"os_image_hash"`
-	TCBInfo      json.RawMessage `json:"tcb_info"`
-	VMConfig     string          `json:"vm_config"`
+	AppCert      string   `json:"app_cert"`
+	AppID        string   `json:"app_id"`
+	AppName      string   `json:"app_name"`
+	ComposeHash  string   `json:"compose_hash"`
+	DeviceID     string   `json:"device_id"`
+	InstanceID   string   `json:"instance_id"`
+	KeyProvider  string   `json:"key_provider_info"`
+	MRAggregated string   `json:"mr_aggregated"`
+	OSImageHash  string   `json:"os_image_hash"`
+	TCBInfo      *tcbInfo `json:"tcb_info"`
+	VMConfig     string   `json:"vm_config"`
 }
 
 // attestationResponse is the JSON shape returned by Venice's attestation
@@ -87,16 +167,16 @@ type attestationResponse struct {
 	NvidiaPayload  string `json:"nvidia_payload"`
 
 	// Extended fields (10 propagated to RawAttestation).
-	EventLog           []eventLogEntry `json:"event_log"`
-	Info               veniceInfo      `json:"info"`
-	ServerVerification json.RawMessage `json:"server_verification"`
-	ModelName          string          `json:"model_name"`
-	UpstreamModel      string          `json:"upstream_model"`
-	SigningAlgo        string          `json:"signing_algo"`
-	TEEHardware        string          `json:"tee_hardware"`
-	NonceSource        string          `json:"nonce_source"`
-	CandidatesAvail    int             `json:"candidates_available"`
-	CandidatesEval     int             `json:"candidates_evaluated"`
+	EventLog           []eventLogEntry     `json:"event_log"`
+	Info               veniceInfo          `json:"info"`
+	ServerVerification *ServerVerification `json:"server_verification"`
+	ModelName          string              `json:"model_name"`
+	UpstreamModel      string              `json:"upstream_model"`
+	SigningAlgo        string              `json:"signing_algo"`
+	TEEHardware        string              `json:"tee_hardware"`
+	NonceSource        string              `json:"nonce_source"`
+	CandidatesAvail    int                 `json:"candidates_available"`
+	CandidatesEval     int                 `json:"candidates_evaluated"`
 
 	// Duplicate fields (parsed to silence jsonstrict, not propagated).
 	SigningPublicKey string `json:"signing_public_key"`
@@ -176,6 +256,11 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 			"event", e.Event, "type", e.EventType, "digest", digest)
 	}
 
+	var appCompose string
+	if ar.Info.TCBInfo != nil {
+		appCompose = ar.Info.TCBInfo.AppCompose
+	}
+
 	return &attestation.RawAttestation{
 		Verified:       ar.Verified,
 		Nonce:          ar.Nonce,
@@ -186,44 +271,22 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		IntelQuote:     ar.IntelQuote,
 		NvidiaPayload:  ar.NvidiaPayload,
 
-		TEEHardware:        ar.TEEHardware,
-		SigningAlgo:        ar.SigningAlgo,
-		UpstreamModel:      ar.UpstreamModel,
-		AppName:            ar.Info.AppName,
-		ComposeHash:        ar.Info.ComposeHash,
-		OSImageHash:        ar.Info.OSImageHash,
-		DeviceID:           ar.Info.DeviceID,
-		AppCompose:         extractAppCompose(ar.Info.TCBInfo),
-		EventLog:           toEventLogEntries(ar.EventLog),
-		EventLogCount:      len(ar.EventLog),
-		NonceSource:        ar.NonceSource,
-		CandidatesAvail:    ar.CandidatesAvail,
-		CandidatesEval:     ar.CandidatesEval,
-		ServerVerification: ar.ServerVerification,
+		TEEHardware:     ar.TEEHardware,
+		SigningAlgo:     ar.SigningAlgo,
+		UpstreamModel:   ar.UpstreamModel,
+		AppName:         ar.Info.AppName,
+		ComposeHash:     ar.Info.ComposeHash,
+		OSImageHash:     ar.Info.OSImageHash,
+		DeviceID:        ar.Info.DeviceID,
+		AppCompose:      appCompose,
+		EventLog:        toEventLogEntries(ar.EventLog),
+		EventLogCount:   len(ar.EventLog),
+		NonceSource:     ar.NonceSource,
+		CandidatesAvail: ar.CandidatesAvail,
+		CandidatesEval:  ar.CandidatesEval,
 
 		RawBody: body,
 	}, nil
-}
-
-// extractAppCompose parses a tcb_info JSON payload and returns the app_compose
-// string field. Returns "" if tcb_info is nil, not an object, or lacks app_compose.
-func extractAppCompose(tcbInfo json.RawMessage) string {
-	if len(tcbInfo) == 0 {
-		return ""
-	}
-	raw := tcbInfo
-	// tcb_info may be a JSON string containing escaped JSON; unwrap it.
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		raw = json.RawMessage(str)
-	}
-	var obj struct {
-		AppCompose string `json:"app_compose"`
-	}
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
-	}
-	return obj.AppCompose
 }
 
 // Preparer injects Venice E2EE headers into an outgoing chat completions

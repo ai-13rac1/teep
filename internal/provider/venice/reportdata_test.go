@@ -1,6 +1,7 @@
 package venice_test
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"testing"
 
@@ -19,6 +20,25 @@ func keccakAddress(pubKeyUncompressed []byte) []byte {
 	return hash[12:32]
 }
 
+// buildReportData constructs a Venice-style 64-byte REPORTDATA:
+// [0:20] = keccak256 address, [20:32] = zero, [32:64] = nonce.
+func buildReportData(addr []byte, nonce attestation.Nonce) [64]byte {
+	var rd [64]byte
+	copy(rd[:20], addr)
+	copy(rd[32:64], nonce[:])
+	return rd
+}
+
+// randomNonce generates a random 32-byte nonce for testing.
+func randomNonce(t *testing.T) attestation.Nonce {
+	t.Helper()
+	var n attestation.Nonce
+	if _, err := rand.Read(n[:]); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	return n
+}
+
 func TestReportDataVerifier_CorrectBinding(t *testing.T) {
 	priv, err := secp256k1.GeneratePrivateKey()
 	if err != nil {
@@ -26,16 +46,15 @@ func TestReportDataVerifier_CorrectBinding(t *testing.T) {
 	}
 	pubKeyBytes := priv.PubKey().SerializeUncompressed()
 	addr := keccakAddress(pubKeyBytes)
-
-	var reportData [64]byte
-	copy(reportData[:20], addr)
+	nonce := randomNonce(t)
+	reportData := buildReportData(addr, nonce)
 
 	raw := &attestation.RawAttestation{
 		SigningKey: hex.EncodeToString(pubKeyBytes),
 	}
 
 	v := venice.ReportDataVerifier{}
-	detail, err := v.VerifyReportData(reportData, raw, attestation.Nonce{})
+	detail, err := v.VerifyReportData(reportData, raw, nonce)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,9 +71,8 @@ func TestReportDataVerifier_SigningAddressMatch(t *testing.T) {
 	}
 	pubKeyBytes := priv.PubKey().SerializeUncompressed()
 	addr := keccakAddress(pubKeyBytes)
-
-	var reportData [64]byte
-	copy(reportData[:20], addr)
+	nonce := randomNonce(t)
+	reportData := buildReportData(addr, nonce)
 
 	raw := &attestation.RawAttestation{
 		SigningKey:     hex.EncodeToString(pubKeyBytes),
@@ -62,7 +80,7 @@ func TestReportDataVerifier_SigningAddressMatch(t *testing.T) {
 	}
 
 	v := venice.ReportDataVerifier{}
-	_, err = v.VerifyReportData(reportData, raw, attestation.Nonce{})
+	_, err = v.VerifyReportData(reportData, raw, nonce)
 	if err != nil {
 		t.Fatalf("unexpected error with matching signing_address: %v", err)
 	}
@@ -144,4 +162,56 @@ func TestReportDataVerifier_CompressedKey(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for compressed key, got nil")
 	}
+}
+
+func TestReportDataVerifier_NonceBinding(t *testing.T) {
+	priv, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	pubKeyBytes := priv.PubKey().SerializeUncompressed()
+	addr := keccakAddress(pubKeyBytes)
+	nonce := randomNonce(t)
+	reportData := buildReportData(addr, nonce)
+
+	raw := &attestation.RawAttestation{
+		SigningKey: hex.EncodeToString(pubKeyBytes),
+	}
+
+	v := venice.ReportDataVerifier{}
+	detail, err := v.VerifyReportData(reportData, raw, nonce)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Logf("detail: %s", detail)
+
+	// Verify the nonce bytes in REPORTDATA match what we set.
+	if reportData[32] == 0 && reportData[33] == 0 {
+		t.Error("nonce bytes should be non-zero")
+	}
+}
+
+func TestReportDataVerifier_WrongNonce(t *testing.T) {
+	priv, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	pubKeyBytes := priv.PubKey().SerializeUncompressed()
+	addr := keccakAddress(pubKeyBytes)
+
+	// Set one nonce in REPORTDATA, pass a different nonce to verifier.
+	nonceInReport := randomNonce(t)
+	differentNonce := randomNonce(t)
+	reportData := buildReportData(addr, nonceInReport)
+
+	raw := &attestation.RawAttestation{
+		SigningKey: hex.EncodeToString(pubKeyBytes),
+	}
+
+	v := venice.ReportDataVerifier{}
+	_, err = v.VerifyReportData(reportData, raw, differentNonce)
+	if err == nil {
+		t.Error("expected error for mismatched nonce, got nil")
+	}
+	t.Logf("expected error: %v", err)
 }

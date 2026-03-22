@@ -17,7 +17,7 @@ type ReportDataVerifier struct{}
 
 // VerifyReportData checks that reportData[0:20] matches the keccak256-derived
 // address of the enclave public key in raw.SigningKey.
-func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation.RawAttestation, _ attestation.Nonce) (string, error) {
+func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation.RawAttestation, nonce attestation.Nonce) (string, error) {
 	signingKeyBytes, err := hex.DecodeString(raw.SigningKey)
 	if err != nil {
 		return "", fmt.Errorf("enclave public key is not valid hex: %w", err)
@@ -46,5 +46,11 @@ func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation
 			raw.SigningAddress, derived)
 	}
 
-	return fmt.Sprintf("REPORTDATA binds enclave public key via keccak256-derived address (%s)", derived), nil
+	// Venice REPORTDATA layout: [0:20] = keccak256 address, [20:32] = zero, [32:64] = nonce.
+	if subtle.ConstantTimeCompare(nonce[:], reportData[32:64]) != 1 {
+		return "", fmt.Errorf("REPORTDATA[32:64] = %s, expected nonce %s",
+			hex.EncodeToString(reportData[32:64]), nonce.Hex())
+	}
+
+	return fmt.Sprintf("REPORTDATA binds enclave key (%s) and nonce", derived), nil
 }
