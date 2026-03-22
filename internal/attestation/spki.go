@@ -23,7 +23,7 @@ func ComputeSPKIHash(certDER []byte) (string, error) {
 
 const (
 	// maxSPKIsPerDomain limits the number of SPKI hashes stored per domain.
-	// When exceeded, one arbitrary entry is evicted.
+	// When exceeded, the oldest entry is evicted.
 	maxSPKIsPerDomain = 16
 
 	// defaultSPKITTL is how long a cached SPKI hash is trusted before
@@ -75,7 +75,7 @@ func (c *SPKICache) Contains(domain, spkiHex string) bool {
 
 // Add records a verified SPKI hash for domain. Expired entries for the domain
 // are pruned first. If the per-domain limit is still exceeded after pruning,
-// one arbitrary entry is evicted.
+// the oldest entry is evicted.
 func (c *SPKICache) Add(domain, spkiHex string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -89,9 +89,16 @@ func (c *SPKICache) Add(domain, spkiHex string) {
 		}
 	}
 	if len(c.domains[domain]) >= maxSPKIsPerDomain {
-		for k := range c.domains[domain] {
-			delete(c.domains[domain], k)
-			break
+		var oldestKey string
+		var oldestAt time.Time
+		for k, e := range c.domains[domain] {
+			if oldestKey == "" || e.addedAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = e.addedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(c.domains[domain], oldestKey)
 		}
 	}
 	c.domains[domain][spkiHex] = spkiEntry{addedAt: time.Now()}

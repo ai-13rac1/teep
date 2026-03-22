@@ -33,6 +33,24 @@ func (stubPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedReque
 	}, nil
 }
 
+type blockedPinnedHandler struct{}
+
+func (blockedPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	body := io.NopCloser(strings.NewReader(""))
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+		Report: &attestation.VerificationReport{
+			Provider: "nearai",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Fail, Enforced: true, Detail: "mismatch"},
+			},
+		},
+	}, nil
+}
+
 // --------------------------------------------------------------------------
 // Test helpers
 // --------------------------------------------------------------------------
@@ -868,6 +886,54 @@ func TestSinglePinnedProvider_AllowsDynamicModelName(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestPinnedProvider_BlockedReportReturns502(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"nearai": {
+				Name:    "nearai",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+				E2EE:    false,
+			},
+		},
+		Enforced: []string{},
+	}
+
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	prov := srv.ProviderByName("nearai")
+	if prov == nil {
+		t.Fatal("nearai provider missing")
+	}
+	prov.PinnedHandler = blockedPinnedHandler{}
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	resp, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("POST chat: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 502; body=%s", resp.StatusCode, body)
+	}
+
+	var report attestation.VerificationReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if !report.Blocked() {
+		t.Fatal("report.Blocked() = false, want true")
 	}
 }
 

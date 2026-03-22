@@ -38,6 +38,7 @@ import (
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearai"
 	"github.com/13rac1/teep/internal/provider/venice"
+	"github.com/13rac1/teep/internal/tlsct"
 )
 
 const (
@@ -137,23 +138,19 @@ type Server struct {
 func New(cfg *config.Config) (*Server, error) {
 	spkiCache := attestation.NewSPKICache()
 	s := &Server{
-		cfg:          cfg,
-		providers:    make(map[string]*provider.Provider, len(cfg.Providers)),
-		cache:        attestation.NewCache(attestationCacheTTL),
-		negCache:     attestation.NewNegativeCache(negativeCacheTTL),
-		spkiCache:    spkiCache,
-		mux:          http.NewServeMux(),
-		attestClient: config.NewAttestationClient(),
-		upstreamClient: &http.Client{
-			Transport: &http.Transport{
-				IdleConnTimeout: 90 * time.Second,
-			},
-		},
-		stats: stats{startTime: time.Now()},
+		cfg:            cfg,
+		providers:      make(map[string]*provider.Provider, len(cfg.Providers)),
+		cache:          attestation.NewCache(attestationCacheTTL),
+		negCache:       attestation.NewNegativeCache(negativeCacheTTL),
+		spkiCache:      spkiCache,
+		mux:            http.NewServeMux(),
+		attestClient:   config.NewAttestationClient(),
+		upstreamClient: tlsct.NewHTTPClientWithTransport(0, &http.Transport{IdleConnTimeout: 90 * time.Second}),
+		stats:          stats{startTime: time.Now()},
 	}
 
 	for name, cp := range cfg.Providers {
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced)
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced, cfg.MeasurementPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -205,7 +202,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // fromConfig constructs a provider.Provider from a config.Provider, attaching
 // the correct Attester, Preparer, and PinnedHandler for the known provider names.
-func fromConfig(cp *config.Provider, spkiCache *attestation.SPKICache, offline bool, enforced []string) (*provider.Provider, error) {
+func fromConfig(
+	cp *config.Provider,
+	spkiCache *attestation.SPKICache,
+	offline bool,
+	enforced []string,
+	policy attestation.MeasurementPolicy,
+) (*provider.Provider, error) {
 	p := &provider.Provider{
 		Name:    cp.Name,
 		BaseURL: cp.BaseURL,
@@ -230,6 +233,7 @@ func fromConfig(cp *config.Provider, spkiCache *attestation.SPKICache, offline b
 			cp.APIKey,
 			offline,
 			enforced,
+			policy,
 			rdVerifier,
 		)
 	default:
@@ -387,6 +391,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Raw:        raw,
 		Nonce:      nonce,
 		Enforced:   s.cfg.Enforced,
+		Policy:     s.cfg.MeasurementPolicy,
 		TDX:        tdxResult,
 		Nvidia:     nvidiaResult,
 		NvidiaNRAS: nrasResult,
@@ -624,15 +629,28 @@ func (s *Server) handlePinnedChat(
 
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(ctx, &pinnedReq)
 	if err != nil {
+		s.negCache.Record(prov.Name, upstreamModel)
 		slog.Error("pinned chat failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer pinnedResp.Body.Close()
 
-	// Cache the verification report if one was produced (SPKI cache miss).
-	if pinnedResp.Report != nil {
-		s.cache.Put(prov.Name, upstreamModel, pinnedResp.Report)
+	// Use the report from this request (SPKI miss) or cached report (SPKI hit)
+	// to enforce fail-closed policy before forwarding any upstream response.
+	report := pinnedResp.Report
+	if report != nil {
+		s.cache.Put(prov.Name, upstreamModel, report)
+	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		report = cached
+	}
+
+	if report != nil && report.Blocked() {
+		s.negCache.Record(prov.Name, upstreamModel)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(report) //nolint:errchkjson // response body already committed
+		return
 	}
 
 	// Copy response headers, excluding hop-by-hop headers that Go's

@@ -46,8 +46,12 @@ func TestReportDataVerifier_CorrectBinding(t *testing.T) {
 }
 
 func TestReportDataVerifier_0xPrefixedAddress(t *testing.T) {
-	addrBytes := []byte{0xde, 0xad, 0xbe, 0xef}
-	fpBytes := []byte{0xca, 0xfe}
+	addrBytes := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+		0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
+	fpBytes := make([]byte, 32)
+	for i := range fpBytes {
+		fpBytes[i] = byte(i)
+	}
 	nonce := attestation.NewNonce()
 	reportData := buildNEARReportData(addrBytes, fpBytes, nonce)
 

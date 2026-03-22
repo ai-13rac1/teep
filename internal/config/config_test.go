@@ -156,6 +156,49 @@ enforce = ["nonce_match", "typo_factor"]
 	}
 }
 
+func TestLoadTOMLMeasurementPolicy(t *testing.T) {
+	valid48 := strings.Repeat("ab", 48)
+	toml := `
+[policy]
+mrtd_allow = ["` + valid48 + `"]
+mrseam_allow = ["0x` + valid48 + `"]
+rtmr0_allow = ["` + valid48 + `"]
+`
+	path := writeConfigFile(t, toml, 0o600)
+	setenv(t, "TEEP_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.MeasurementPolicy.HasMRTDPolicy() {
+		t.Fatal("expected MRTD allowlist policy to be configured")
+	}
+	if !cfg.MeasurementPolicy.HasMRSeamPolicy() {
+		t.Fatal("expected MRSEAM allowlist policy to be configured")
+	}
+	if !cfg.MeasurementPolicy.HasRTMRPolicy(0) {
+		t.Fatal("expected RTMR0 allowlist policy to be configured")
+	}
+}
+
+func TestLoadTOMLMeasurementPolicyInvalidLength(t *testing.T) {
+	toml := `
+[policy]
+mrtd_allow = ["abcd"]
+`
+	path := writeConfigFile(t, toml, 0o600)
+	setenv(t, "TEEP_CONFIG", path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid measurement length")
+	}
+	if !strings.Contains(err.Error(), "mrtd_allow") {
+		t.Fatalf("error should mention mrtd_allow, got: %v", err)
+	}
+}
+
 func TestLoadTOMLEmptyPolicyKeepsDefaults(t *testing.T) {
 	// An [policy] section with no enforce list must keep the built-in defaults.
 	toml := `

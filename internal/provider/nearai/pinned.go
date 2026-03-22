@@ -2,18 +2,23 @@ package nearai
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/tlsct"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -40,7 +45,9 @@ type PinnedHandler struct {
 	apiKey     string
 	offline    bool
 	enforced   []string
+	policy     attestation.MeasurementPolicy
 	rdVerifier provider.ReportDataVerifier
+	ctChecker  *CTChecker
 	dialFn     func(ctx context.Context, domain string) (*tls.Conn, error) // nil → use default tlsDial
 
 	verifySF singleflight.Group
@@ -53,6 +60,7 @@ func NewPinnedHandler(
 	apiKey string,
 	offline bool,
 	enforced []string,
+	policy attestation.MeasurementPolicy,
 	rdVerifier provider.ReportDataVerifier,
 ) *PinnedHandler {
 	return &PinnedHandler{
@@ -61,7 +69,9 @@ func NewPinnedHandler(
 		apiKey:     apiKey,
 		offline:    offline,
 		enforced:   enforced,
+		policy:     policy,
 		rdVerifier: rdVerifier,
+		ctChecker:  NewCTChecker(),
 	}
 }
 
@@ -70,6 +80,12 @@ func NewPinnedHandler(
 // of resolving real domains.
 func (h *PinnedHandler) SetDialer(fn func(ctx context.Context, domain string) (*tls.Conn, error)) {
 	h.dialFn = fn
+}
+
+// SetCTChecker overrides the certificate transparency checker.
+// Intended for tests.
+func (h *PinnedHandler) SetCTChecker(checker *CTChecker) {
+	h.ctChecker = checker
 }
 
 // HandlePinned opens a TLS connection to the backend, verifies its certificate
@@ -104,6 +120,12 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 	if err != nil {
 		return nil, fmt.Errorf("extract SPKI: %w", err)
 	}
+	if h.ctChecker != nil {
+		state := conn.ConnectionState()
+		if err := h.ctChecker.CheckTLSState(ctx, domain, &state); err != nil {
+			return nil, fmt.Errorf("certificate transparency check failed: %w", err)
+		}
+	}
 
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
@@ -122,6 +144,13 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 			if err != nil {
 				return nil, err
 			}
+			if r.Blocked() {
+				slog.Warn("attestation blocked by policy, refusing to cache SPKI",
+					"domain", domain,
+					"model", req.Model,
+				)
+				return r, nil
+			}
 			h.spkiCache.Add(domain, liveSPKI)
 			slog.Info("SPKI verified and cached", "domain", domain, "spki", liveSPKI[:16]+"...")
 			return r, nil
@@ -134,6 +163,15 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 		}
 	} else {
 		slog.Debug("SPKI cache hit, skipping attestation", "domain", domain, "spki", liveSPKI[:16]+"...")
+	}
+
+	if report != nil && report.Blocked() {
+		return &provider.PinnedResponse{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Report:     report,
+		}, nil
 	}
 
 	// 5. Send the actual chat request on the same connection.
@@ -259,12 +297,32 @@ func (h *PinnedHandler) attestOnConn(
 		}
 	}
 
+	var nvidiaResult *attestation.NvidiaVerifyResult
+	if raw.NvidiaPayload != "" {
+		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+	}
+
+	var nrasResult *attestation.NvidiaVerifyResult
+	if !h.offline && raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
+		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, tlsct.NewHTTPClient(30*time.Second))
+	}
+
+	var pocResult *attestation.PoCResult
+	if !h.offline && raw.IntelQuote != "" {
+		poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, tlsct.NewHTTPClient(30*time.Second))
+		pocResult = poc.CheckQuote(ctx, raw.IntelQuote)
+	}
+
 	// Verify live SPKI matches the attested TLS fingerprint.
 	if raw.TLSFingerprint == "" {
 		return nil, errors.New("attestation response missing tls_cert_fingerprint")
 	}
-	if liveSPKI != raw.TLSFingerprint {
-		return nil, fmt.Errorf("live SPKI %s != attested TLS fingerprint %s", liveSPKI[:16]+"...", raw.TLSFingerprint[:16]+"...")
+	match, err := constantTimeHexEqual(liveSPKI, raw.TLSFingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("compare live SPKI vs attested TLS fingerprint: %w", err)
+	}
+	if !match {
+		return nil, fmt.Errorf("live SPKI %s != attested TLS fingerprint %s", truncate(liveSPKI, 16)+"...", truncate(raw.TLSFingerprint, 16)+"...")
 	}
 
 	var composeResult *attestation.ComposeBindingResult
@@ -286,7 +344,7 @@ func (h *PinnedHandler) attestOnConn(
 		}
 		digests := attestation.ExtractImageDigests(source)
 		if len(digests) > 0 && !h.offline {
-			sigstoreResults = attestation.CheckSigstoreDigests(ctx, digests, &http.Client{Timeout: 10 * time.Second})
+			sigstoreResults = attestation.CheckSigstoreDigests(ctx, digests, tlsct.NewHTTPClient(10*time.Second))
 		}
 	}
 
@@ -294,21 +352,25 @@ func (h *PinnedHandler) attestOnConn(
 	if len(sigstoreResults) > 0 && !h.offline {
 		for _, sr := range sigstoreResults {
 			if sr.OK {
-				rekorResults = append(rekorResults, attestation.FetchRekorProvenance(ctx, sr.Digest, &http.Client{Timeout: 10 * time.Second}))
+				rekorResults = append(rekorResults, attestation.FetchRekorProvenance(ctx, sr.Digest, tlsct.NewHTTPClient(10*time.Second)))
 			}
 		}
 	}
 
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider: "nearai",
-		Model:    model,
-		Raw:      raw,
-		Nonce:    nonce,
-		Enforced: h.enforced,
-		TDX:      tdxResult,
-		Compose:  composeResult,
-		Sigstore: sigstoreResults,
-		Rekor:    rekorResults,
+		Provider:   "nearai",
+		Model:      model,
+		Raw:        raw,
+		Nonce:      nonce,
+		Enforced:   h.enforced,
+		Policy:     h.policy,
+		TDX:        tdxResult,
+		Nvidia:     nvidiaResult,
+		NvidiaNRAS: nrasResult,
+		PoC:        pocResult,
+		Compose:    composeResult,
+		Sigstore:   sigstoreResults,
+		Rekor:      rekorResults,
 	})
 	return report, nil
 }
@@ -329,6 +391,9 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 	if host == "" {
 		return errors.New("headers missing required Host field")
 	}
+	if strings.ContainsAny(host, "\r\n") {
+		return errors.New("host header contains invalid CR/LF characters")
+	}
 	if _, err := fmt.Fprintf(w, "Host: %s\r\n", host); err != nil {
 		return err
 	}
@@ -346,6 +411,9 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 			continue
 		}
 		for _, val := range vals {
+			if strings.ContainsAny(val, "\r\n") {
+				return fmt.Errorf("header %q contains invalid CR/LF characters", key)
+			}
 			if _, err := fmt.Fprintf(w, "%s: %s\r\n", key, val); err != nil {
 				return err
 			}
@@ -365,6 +433,21 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 	}
 
 	return w.Flush()
+}
+
+func constantTimeHexEqual(a, b string) (bool, error) {
+	aBytes, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(a)), "0x"))
+	if err != nil {
+		return false, fmt.Errorf("first value is not valid hex: %w", err)
+	}
+	bBytes, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(b)), "0x"))
+	if err != nil {
+		return false, fmt.Errorf("second value is not valid hex: %w", err)
+	}
+	if len(aBytes) != len(bBytes) {
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare(aBytes, bBytes) == 1, nil
 }
 
 // connClosingReader wraps an io.ReadCloser so that closing it also closes the

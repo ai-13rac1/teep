@@ -141,10 +141,41 @@ api_key_env = "NEARAI_API_KEY"
 e2ee = false
 
 [policy]
-enforce = ["nonce_match", "tdx_debug_disabled", "signing_key_present", "tdx_reportdata_binding"]
+enforce = [
+  "nonce_match",
+  "tdx_cert_chain",
+  "tdx_quote_signature",
+  "tdx_debug_disabled",
+  "signing_key_present",
+  "tdx_reportdata_binding",
+  "compose_binding",
+  "nvidia_signature",
+  "nvidia_nonce_match",
+  "event_log_integrity",
+]
+
+# Optional measurement allowlists (96 hex chars each, no 0x required)
+mrtd_allow = [
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+]
+mrseam_allow = [
+  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+]
+rtmr0_allow = [
+  "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+]
+rtmr1_allow = []
+rtmr2_allow = []
+rtmr3_allow = []
 ```
 
 Config file should have `0600` permissions. Teep warns on startup if it is group- or world-readable.
+
+When allowlists are configured:
+- `mrtd_allow` and `mrseam_allow` are enforced in `tdx_quote_structure`.
+- `rtmr*_allow` values are enforced in `event_log_integrity` after event-log replay matches quote RTMRs.
+
+Empty allowlists disable policy for that measurement.
 
 ## Verification Factors
 

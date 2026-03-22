@@ -35,10 +35,16 @@ func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation
 	if err != nil {
 		return "", fmt.Errorf("signing_address is not valid hex: %w", err)
 	}
+	if len(addrBytes) != 20 {
+		return "", fmt.Errorf("signing_address must decode to 20 bytes, got %d", len(addrBytes))
+	}
 
 	fpBytes, err := hex.DecodeString(raw.TLSFingerprint)
 	if err != nil {
 		return "", fmt.Errorf("tls_cert_fingerprint is not valid hex: %w", err)
+	}
+	if len(fpBytes) != 32 {
+		return "", fmt.Errorf("tls_cert_fingerprint must decode to 32 bytes, got %d", len(fpBytes))
 	}
 
 	// [0:32] = sha256(signing_address_bytes || tls_fingerprint_bytes)

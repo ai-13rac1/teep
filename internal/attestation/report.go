@@ -75,9 +75,15 @@ func (r *VerificationReport) Blocked() bool {
 // can substitute the enclave public key and intercept all E2EE traffic.
 var DefaultEnforced = []string{
 	"nonce_match",
+	"tdx_cert_chain",
+	"tdx_quote_signature",
 	"tdx_debug_disabled",
 	"signing_key_present",
 	"tdx_reportdata_binding",
+	"compose_binding",
+	"nvidia_signature",
+	"nvidia_nonce_match",
+	"event_log_integrity",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
@@ -109,6 +115,7 @@ type ReportInput struct {
 	Raw      *RawAttestation
 	Nonce    Nonce
 	Enforced []string
+	Policy   MeasurementPolicy
 
 	TDX        *TDXVerifyResult
 	Nvidia     *NvidiaVerifyResult
@@ -176,11 +183,28 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		if in.TDX.ParseErr != nil {
 			addFactor("tdx_quote_structure", Fail, fmt.Sprintf("TDX quote parse failed: %v", in.TDX.ParseErr))
 		} else {
+			mrtdHex := hex.EncodeToString(in.TDX.MRTD)
+			mrSeamHex := hex.EncodeToString(in.TDX.MRSeam)
+
 			detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(in.TDX))
-			if len(in.TDX.MRTD) > 0 {
-				detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.TDX), hex.EncodeToString(in.TDX.MRTD)[:16])
+			if len(mrtdHex) >= 16 {
+				detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.TDX), mrtdHex[:16])
 			}
-			addFactor("tdx_quote_structure", Pass, detail)
+
+			switch {
+			case in.Policy.HasMRTDPolicy() && !containsAllowlist(in.Policy.MRTDAllow, mrtdHex):
+				addFactor("tdx_quote_structure", Fail, fmt.Sprintf("MRTD not in policy allowlist: %s...", prefixHex(mrtdHex)))
+			case in.Policy.HasMRSeamPolicy() && !containsAllowlist(in.Policy.MRSeamAllow, mrSeamHex):
+				addFactor("tdx_quote_structure", Fail, fmt.Sprintf("MRSEAM not in policy allowlist: %s...", prefixHex(mrSeamHex)))
+			case in.Policy.HasMRTDPolicy() && in.Policy.HasMRSeamPolicy():
+				addFactor("tdx_quote_structure", Pass, detail+" (MRTD/MRSEAM policy matched)")
+			case in.Policy.HasMRTDPolicy():
+				addFactor("tdx_quote_structure", Pass, detail+" (MRTD policy matched)")
+			case in.Policy.HasMRSeamPolicy():
+				addFactor("tdx_quote_structure", Pass, detail+" (MRSEAM policy matched)")
+			default:
+				addFactor("tdx_quote_structure", Pass, detail)
+			}
 		}
 
 		// Factor 4: tdx_cert_chain
@@ -528,10 +552,22 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			if mismatch {
 				addFactor("event_log_integrity", Fail, detail)
 			} else {
+				for i := range 4 {
+					if !in.Policy.HasRTMRPolicy(i) {
+						continue
+					}
+					rtmrHex := hex.EncodeToString(in.TDX.RTMRs[i][:])
+					if _, ok := in.Policy.RTMRAllow[i][rtmrHex]; !ok {
+						addFactor("event_log_integrity", Fail,
+							fmt.Sprintf("RTMR[%d] not in policy allowlist: %s...", i, prefixHex(rtmrHex)))
+						goto eventLogDone
+					}
+				}
 				addFactor("event_log_integrity", Pass,
 					fmt.Sprintf("event log replayed (%d entries), all 4 RTMRs match quote", len(in.Raw.EventLog)))
 			}
 		}
+	eventLogDone:
 	}
 
 	// Tally results.
@@ -559,6 +595,18 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		Skipped:   skipped,
 		Metadata:  metadata,
 	}
+}
+
+func prefixHex(s string) string {
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:16]
+}
+
+func containsAllowlist(m map[string]struct{}, v string) bool {
+	_, ok := m[v]
+	return ok
 }
 
 // tdxQuoteVersion returns a human-readable version string for the parsed TDX quote.

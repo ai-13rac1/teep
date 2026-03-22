@@ -120,6 +120,9 @@ func TestEndpointResolver_InvalidDomain(t *testing.T) {
 			"endpoints": [
 				{"domain": "", "models": ["m-empty"]},
 				{"domain": "has spaces", "models": ["m-spaces"]},
+				{"domain": "has\tspace.near.ai", "models": ["m-tab"]},
+				{"domain": "line\nfeed.near.ai", "models": ["m-lf"]},
+				{"domain": "carriage\rreturn.near.ai", "models": ["m-cr"]},
 				{"domain": "http://evil.com", "models": ["m-scheme"]},
 				{"domain": "nodot", "models": ["m-nodot"]},
 				{"domain": "path/slash", "models": ["m-slash"]},
@@ -141,11 +144,48 @@ func TestEndpointResolver_InvalidDomain(t *testing.T) {
 	}
 
 	// All invalid-domain models should fail.
-	for _, model := range []string{"m-empty", "m-spaces", "m-scheme", "m-nodot", "m-slash"} {
+	for _, model := range []string{"m-empty", "m-spaces", "m-tab", "m-lf", "m-cr", "m-scheme", "m-nodot", "m-slash"} {
 		_, err := r.Resolve(context.Background(), model)
 		if err == nil {
 			t.Errorf("Resolve(%q) should fail (invalid domain), but got nil error", model)
 		}
+	}
+}
+
+func TestEndpointResolver_StaleOnRefreshError(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "old.near.ai", "models": ["m"]}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"temporary outage"}`))
+	}))
+	defer srv.Close()
+
+	r := newEndpointResolverForTest(srv.URL)
+
+	domain, err := r.Resolve(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("initial Resolve: %v", err)
+	}
+	if domain != "old.near.ai" {
+		t.Fatalf("domain = %q, want %q", domain, "old.near.ai")
+	}
+
+	r.mu.Lock()
+	r.fetchedAt = time.Now().Add(-10 * time.Minute)
+	r.mu.Unlock()
+
+	domain, err = r.Resolve(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("Resolve with stale-on-error fallback: %v", err)
+	}
+	if domain != "old.near.ai" {
+		t.Errorf("fallback domain = %q, want %q", domain, "old.near.ai")
 	}
 }
 
