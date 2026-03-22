@@ -200,7 +200,6 @@ func TestBuildReportTier3AlwaysFail(t *testing.T) {
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
 
 	tier3AlwaysFail := []string{
-		"tls_key_binding",
 		"cpu_gpu_chain",
 		"measured_model_weights",
 		"build_transparency_log",
@@ -214,6 +213,12 @@ func TestBuildReportTier3AlwaysFail(t *testing.T) {
 		if f.Detail == "" {
 			t.Errorf("Tier 3 factor %q: Detail is empty; should explain what is missing", name)
 		}
+	}
+
+	// tls_key_binding skips when SigningKey is present (E2EE replaces TLS binding).
+	tlsF := findFactor(t, report, "tls_key_binding")
+	if tlsF.Status != Skip {
+		t.Errorf("tls_key_binding with SigningKey (E2EE): got %s, want Skip", tlsF.Status)
 	}
 
 	// cpu_id_registry should Fail when no pocResult, no PPID, no DeviceID.
@@ -240,17 +245,31 @@ func TestBuildReportTLSKeyBindingPass(t *testing.T) {
 	}
 }
 
-// TestBuildReportTLSKeyBindingFail verifies tls_key_binding fails when
-// TLSFingerprint is absent.
-func TestBuildReportTLSKeyBindingFail(t *testing.T) {
+// TestBuildReportTLSKeyBindingSkip verifies tls_key_binding skips when
+// TLSFingerprint is absent but SigningKey is present (E2EE provider).
+func TestBuildReportTLSKeyBindingSkip(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	// TLSFingerprint is empty by default
+	// TLSFingerprint is empty by default; SigningKey is set → E2EE provider
 
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce})
 	f := findFactor(t, report, "tls_key_binding")
+	if f.Status != Skip {
+		t.Errorf("tls_key_binding with E2EE (no TLS): got %s (%s), want SKIP", f.Status, f.Detail)
+	}
+}
+
+// TestBuildReportTLSKeyBindingFail verifies tls_key_binding fails when
+// neither TLSFingerprint nor SigningKey is present.
+func TestBuildReportTLSKeyBindingFail(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, "")
+	// No TLSFingerprint, no SigningKey → neither channel binding method
+
+	report := BuildReport(&ReportInput{Provider: "test", Model: "m", Raw: raw, Nonce: nonce})
+	f := findFactor(t, report, "tls_key_binding")
 	if f.Status != Fail {
-		t.Errorf("tls_key_binding without TLSFingerprint: got %s (%s), want FAIL", f.Status, f.Detail)
+		t.Errorf("tls_key_binding without TLS or E2EE: got %s (%s), want FAIL", f.Status, f.Detail)
 	}
 }
 

@@ -371,14 +371,18 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	// expected to fail all of these today. The detail strings explain what is
 	// missing and why it matters for users evaluating vendor security posture.
 
-	if in.Raw.TLSFingerprint != "" {
+	switch {
+	case in.Raw.TLSFingerprint != "":
 		fpPreview := in.Raw.TLSFingerprint
 		if len(fpPreview) > 16 {
 			fpPreview = fpPreview[:16] + "..."
 		}
 		addFactor("tls_key_binding", Pass,
 			fmt.Sprintf("TLS certificate SPKI bound to attestation (%s)", fpPreview))
-	} else {
+	case in.Raw.SigningKey != "":
+		addFactor("tls_key_binding", Skip,
+			"provider uses E2EE key exchange; TLS binding not applicable")
+	default:
 		addFactor("tls_key_binding", Fail,
 			"no TLS certificate binding in attestation")
 	}
