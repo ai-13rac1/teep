@@ -12,6 +12,24 @@ The report MUST also distinguish between:
 - checks that are computed but do not block traffic, and
 - checks that are enforced fail-closed (request rejected on failure).
 
+## Quality Bar and Deliverables
+
+Future direct-provider audits MUST meet the following quality bar:
+- include an executive summary with severity counts and a one-paragraph overall risk statement,
+- present findings first (ordered by severity) before narrative walkthrough,
+- include at least one concrete positive control and one concrete negative/residual-risk observation for every major section,
+- classify every security check as one of: `enforced fail-closed`, `computed but non-blocking`, or `skipped/advisory`,
+- separate implementation fact from recommendation (no implicit policy assumptions),
+- quantify residual risk when a control is informational-only,
+- cite source locations for every substantive claim (positive and negative).
+
+The final report MUST include all of the following artifacts:
+- findings summary table (severity, location, impact),
+- verification-factor matrix with pass/fail/skip and enforcement status,
+- cache-layer table (keys, TTL, bounds, eviction, stale behavior),
+- offline-mode matrix (active checks vs skipped checks),
+- explicit "open questions / assumptions" section when behavior cannot be proven from code.
+
 ## Model Routing
 
 In this direct inference model, the attestation covers a single model server. There is a model mapping routing API that the teep proxy consults to determine the destination host for a particular model identity string.
@@ -23,8 +41,12 @@ The audit MUST verify model routing safety controls, including:
 - rejection of malformed endpoint domains (scheme/path/whitespace injection),
 - rejection of domains without a dot (non-qualified hostnames),
 - exact model selection behavior when multiple endpoint entries map different models to different domains (last-wins, first-wins, or explicit conflict handling),
+- behavior when duplicate model entries map to different domains in a single refresh (and whether this emits operator-visible warning),
 - concurrency behavior for refreshes (singleflight or equivalent anti-stampede control),
 - behavior when the discovery endpoint is unreachable (stale-on-error vs hard failure),
+- whether first-use behavior is fail-closed when no stale mapping exists,
+- whether IDN/punycode domains are normalized or accepted as-is, and residual homograph risk,
+- CT cache keying and TTL behavior for discovery endpoint checks,
 - maximum response size limits to prevent memory exhaustion from a malicious discovery response.
 
 ## Attestation Fetch and Response Parsing
@@ -38,9 +60,11 @@ The attestation information is provided by an API endpoint as a JSON object that
 The audit MUST verify the attestation response parsing path, including:
 - maximum response body size limit (to prevent memory exhaustion),
 - JSON strict unmarshalling behavior (unknown fields rejection or warning),
+- whether unknown-field warnings are rate-limited/deduplicated,
 - handling of polymorphic response formats (array vs flat object),
 - bounds checking on array lengths (model_attestations, all_attestations) to cap iteration,
 - model selection logic when the response contains multiple attestation entries (exact match, prefix, or fuzzy), and whether failure to find a matching model is a hard error,
+- malformed-element behavior for event-log or nested arrays (fail-whole-response vs silently drop element),
 - that no provider-asserted "verified" field is trusted without independent verification.
 
 ### Nonce Freshness and Replay Resistance
@@ -91,6 +115,11 @@ Current direct-provider expectation:
 
 The auditor MUST note whether MRTD and MRSEAM are checked against any known-good baseline. If not, this means the implementation trusts any TDX module and any VM image that happens to have the correct compose hash — the residual risk MUST be explicitly quantified.
 
+When allowlist policy exists, the audit MUST verify:
+- how MRTD/MRSEAM/RTMR allowlists are configured,
+- input validation rules for allowlist values (length/encoding),
+- whether allowlist mismatches are enforced fail-closed or informational.
+
 ### CVM Image Verification
 
 The attestation API will provide a full docker compose stanza, or equivalent podman/cloud config image description, as an auxiliary portion of the attestation API response.
@@ -114,6 +143,8 @@ The audit MUST verify:
 - Rekor provenance extraction logic,
 - issuer/identity checks used to classify provenance as trusted (what OIDC issuer values are accepted?),
 - behavior when a digest appears in Sigstore but has no Fulcio certificate (raw key signature — is this treated as passing provenance or only presence?).
+
+The audit MUST explicitly state if Sigstore/Rekor are soft-fail in default policy and what traffic is still allowed during outage conditions.
 
 ### Verification Cache Safety
 
@@ -145,6 +176,7 @@ For the NEAR AI provider, this includes verifying:
 The audit MUST verify:
 - that `signing_address` hex decoding handles optional "0x" prefix stripping,
 - that `tls_fingerprint` is decoded from hex before hashing (not hashed as ASCII),
+- that decoded input lengths are validated where applicable (or residual collision/ambiguity risk is documented),
 - that the concatenation order is strictly `(address || fingerprint)` with no separator or length prefix,
 - that both halves of the 64-byte REPORTDATA are verified (not just the first half),
 - that the binding comparison uses constant-time comparison (`subtle.ConstantTimeCompare` or equivalent),
@@ -158,6 +190,7 @@ For direct inference providers that use attestation-bound TLS pinning:
 - the live TLS certificate SPKI hash MUST be extracted from the same active TLS connection used for attestation,
 - the SPKI hash algorithm MUST be documented (SHA-256 of DER-encoded SubjectPublicKeyInfo is standard),
 - the attested TLS fingerprint MUST match the live connection SPKI using exact string comparison,
+- the comparison implementation MUST be evaluated for constant-time behavior (or explicitly justified if not constant-time),
 - attestation fetch and inference request MUST occur on the same TLS connection to prevent TOCTOU swaps,
 - closing the response body MUST close the underlying TCP connection (preventing connection reuse for a different unattested host),
 - any TLS verification bypass mode (for example, `InsecureSkipVerify` / custom pinning replacing CA checks) MUST be justified and cryptographically compensated by attestation checks,
@@ -205,6 +238,8 @@ The audit MUST describe replay algorithm details, including:
 - IMR index validation (must be within [0, 3]),
 - failure semantics: does a malformed event log entry skip the entry or fail the entire replay?
 
+The audit MUST separately verify pre-replay parsing behavior for event log entries, and flag any path that silently drops malformed entries before replay.
+
 The audit MUST also state the exact security boundary of this check: event log replay validates internal consistency of event-log-derived RTMR values with quoted RTMR values, but does not by itself prove that RTMR values match an approved software baseline. If no baseline policy is enforced for MRTD/RTMR/MRSEAM-class measurements, that gap MUST be reported explicitly.
 
 ## Connection Lifetime Safety
@@ -235,11 +270,17 @@ The audit MUST also verify:
 
 The current expected default enforced factors are:
 - `nonce_match` — prevents replay of stale attestations,
+- `tdx_cert_chain` — validates PCK chain to Intel roots,
+- `tdx_quote_signature` — validates quote signature,
 - `tdx_debug_disabled` — prevents debug enclaves from being trusted,
 - `signing_key_present` — ensures the enclave provided a public key,
-- `tdx_reportdata_binding` — prevents key-substitution MITM.
+- `tdx_reportdata_binding` — prevents key-substitution MITM,
+- `compose_binding` — enforces image/config binding to MRCONFIGID,
+- `nvidia_signature` — enforces local NVIDIA signature validation when NVIDIA evidence exists,
+- `nvidia_nonce_match` — enforces NVIDIA nonce freshness binding,
+- `event_log_integrity` — enforces RTMR replay consistency when event logs are present.
 
-The audit MUST evaluate whether additional factors should be enforced by default (for example, `tdx_quote_signature` or `tdx_cert_chain`), and document the rationale for the current enforcement boundary.
+The audit MUST evaluate whether additional factors should be enforced by default (for example, `tdx_tcb_current`, `sigstore_verification`, or `build_transparency_log`), and document the rationale for the current enforcement boundary.
 
 ## Negative Cache and Failure Recovery
 
@@ -276,6 +317,7 @@ For direct inference providers that construct raw HTTP requests on the underlyin
 - that the Host header is always set and matches the attested domain,
 - that Content-Length is derived from the actual body length (not caller-supplied),
 - that no user-supplied data is interpolated into HTTP request lines or headers without sanitization (HTTP header injection prevention),
+- that header values reject CR/LF characters (or equivalent canonicalization/sanitization is applied),
 - that the request path is constructed from trusted constants plus URL-encoded query parameters.
 
 ## Response Size and Resource Limits
@@ -292,6 +334,19 @@ Unbounded reads from untrusted sources represent a denial-of-service vector and 
 
 The audit MUST verify:
 - that API keys are not logged in plaintext (redaction to first-N characters),
-- that the config file permission check warns on group- or world-readable files,
+- that the config file permission check behavior is clearly classified as warning-only or hard-fail,
 - that ephemeral cryptographic key material (E2EE session keys) is zeroed after use, with acknowledgment of language-level limitations (GC may copy),
 - that attestation nonces are not reused across requests.
+
+## Report Writing Requirements
+
+The report MUST avoid vague language such as "looks secure" without code-backed evidence.
+
+Each finding MUST include:
+- severity and exploitability context,
+- exact impacted control and whether it is currently enforced,
+- realistic impact statement (integrity, confidentiality, availability),
+- remediation guidance with concrete code-level direction,
+- at least one source citation proving current behavior.
+
+When no findings are present for a section, the report MUST explicitly state "no issues found in this section" and still note any residual risk or testing gap.
