@@ -40,6 +40,7 @@ The audit MUST verify model routing safety controls, including:
 - model-to-domain mapping cache TTL and refresh behavior,
 - rejection of malformed endpoint domains (scheme/path/whitespace injection),
 - rejection of domains without a dot (non-qualified hostnames),
+- rejection of domains that do not end in the same subdomain as the API endpoint (eg completions.near.ai),
 - exact model selection behavior when multiple endpoint entries map different models to different domains (last-wins, first-wins, or explicit conflict handling),
 - behavior when duplicate model entries map to different domains in a single refresh (and whether this emits operator-visible warning),
 - concurrency behavior for refreshes (singleflight or equivalent anti-stampede control),
@@ -48,6 +49,8 @@ The audit MUST verify model routing safety controls, including:
 - whether IDN/punycode domains are normalized or accepted as-is, and residual homograph risk,
 - CT cache keying and TTL behavior for discovery endpoint checks,
 - maximum response size limits to prevent memory exhaustion from a malicious discovery response.
+
+> NOTE: Even with all of these checks, ultimately nothing strongly authenticates this list of hostnames as belonging to the inference provider. This is a gap that that can only be mitigated only by ensuring that the docker images are those expected to be used by the inference provider (see CVM Image Component Verification below).
 
 ## Attestation Fetch and Response Parsing
 
@@ -134,11 +137,16 @@ The audit MUST also verify the extraction path for the app_compose field, includ
 
 ### CVM Image Component Verification
 
-The docker compose file (or podman/cloud config) will list a series of sub-images. Each of these sub-images MUST be checked against Sigstore and Rekor (or equivalent systems) to establish that they are official builds and not custom variations.
+The docker compose file (or podman/cloud config) will list a series of sub-images.
+
+The teep code MUST provide an enforced allow-list list of sub-images and/or sub-image repositories for a given inference provider that are allowed to appear in this docker-compose file. The hashes need not be included in the teep code, but each of these sub-images MUST be checked against Sigstore and Rekor (or equivalent systems) to establish that they are official builds and not custom variations.
+
+Additionally, the teep code MUST provide an expected Sigstore+Rekor Signer set (as OIDC or Fulcio certs). For Sigstore+Rekor checks, only this expected signer set is to be accepted.
 
 The audit MUST verify:
 - extraction logic for image digests from compose content (regex vs structured parsing, and whether non-sha256 digest algorithms are handled or rejected),
 - deduplication of extracted digests,
+- all sub-images of the docker compose are in the provider's allow-list,
 - Sigstore query behavior and failure handling (is a Sigstore timeout a hard fail or a skip?),
 - Rekor provenance extraction logic,
 - issuer/identity checks used to classify provenance as trusted (what OIDC issuer values are accepted?),
