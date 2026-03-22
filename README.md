@@ -6,7 +6,7 @@
 
 A local TEE (Trusted Execution Environment) proxy for AI APIs. Teep sits between OpenAI-compatible clients and TEE-capable providers, handling attestation verification and channel security transparently.
 
-It also benchmarks vendor attestation against a 23-factor verification framework, exposing gaps in TEE implementations.
+It also benchmarks vendor attestation against a 24-factor verification framework, exposing gaps in TEE implementations.
 
 ```
 Client (OpenAI SDK) --> 127.0.0.1:8337 (teep)
@@ -107,8 +107,9 @@ Tier 3: Supply Chain & Channel Integrity
   ✗ cpu_id_registry            hardware not found in Proof of Cloud registry
   ✓ compose_binding            sha256(app_compose) matches MRConfigID
   ✓ sigstore_verification      3 image digest(s) found in Sigstore transparency log
+  ✓ event_log_integrity        event log replayed (30 entries), all 4 RTMRs match quote
 
-Score: 18/23 passed, 1 skipped, 4 failed
+Score: 19/24 passed, 1 skipped, 4 failed
 ```
 
 NEAR AI scores differently — it passes `tls_key_binding` (TLS certificate SPKI bound to attestation) but does not yet support `e2ee_capable` or `cpu_id_registry`.
@@ -184,6 +185,7 @@ Config file should have `0600` permissions. Teep warns on startup if it is group
 | 21 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
 | 22 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
 | 23 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
+| 24 | `event_log_integrity` | Event log replayed against TDX RTMRs — proves log is authentic and complete |
 
 ## Supported Providers
 

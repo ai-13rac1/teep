@@ -33,14 +33,14 @@ func validSigningKey(t *testing.T) string {
 	return hex.EncodeToString(priv.PubKey().SerializeUncompressed())
 }
 
-// TestBuildReportFactorCount ensures exactly 21 factors are produced.
+// TestBuildReportFactorCount ensures exactly 24 factors are produced.
 func TestBuildReportFactorCount(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport("venice", "test-model", raw, nonce, DefaultEnforced, nil, nil, nil, nil, nil, nil, nil)
 
-	if len(report.Factors) != 23 {
-		t.Errorf("factor count: got %d, want 23", len(report.Factors))
+	if len(report.Factors) != 24 {
+		t.Errorf("factor count: got %d, want 24", len(report.Factors))
 	}
 }
 

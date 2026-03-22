@@ -89,7 +89,7 @@ var KnownFactors = []string{
 	"nvidia_payload_present", "nvidia_signature", "nvidia_claims", "nvidia_nonce_match",
 	"nvidia_nras_verified", "e2ee_capable", "tls_key_binding", "cpu_gpu_chain",
 	"measured_model_weights", "build_transparency_log", "cpu_id_registry",
-	"compose_binding", "sigstore_verification",
+	"compose_binding", "sigstore_verification", "event_log_integrity",
 }
 
 // ComposeBindingResult holds the outcome of verifying the app_compose → MRConfigID binding.
@@ -100,7 +100,7 @@ type ComposeBindingResult struct {
 	Err error
 }
 
-// BuildReport runs all 23 verification factors against raw and returns a
+// BuildReport runs all 24 verification factors against raw and returns a
 // complete VerificationReport. The enforced parameter controls which factor
 // names result in Enforced=true. Pass DefaultEnforced for production use.
 //
@@ -110,14 +110,15 @@ type ComposeBindingResult struct {
 // Factors 22-23 (compose_binding, sigstore_verification) check the app_compose
 // manifest binding to the TDX quote and Sigstore transparency log presence.
 // Factor 20 (build_transparency_log) uses rekorResults to check Fulcio cert
-// provenance from the Rekor transparency log.
+// provenance from the Rekor transparency log. Factor 24 (event_log_integrity)
+// replays the TDX event log and compares the resulting RTMRs to the quote.
 func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enforced []string, tdxResult *TDXVerifyResult, nvidiaResult, nrasResult *NvidiaVerifyResult, pocResult *PoCResult, composeResult *ComposeBindingResult, sigstoreResults []SigstoreResult, rekorResults []RekorProvenance) *VerificationReport {
 	enforcedSet := make(map[string]bool, len(enforced))
 	for _, name := range enforced {
 		enforcedSet[name] = true
 	}
 
-	factors := make([]FactorResult, 0, 23)
+	factors := make([]FactorResult, 0, 24)
 
 	addFactor := func(name string, status Status, detail string) {
 		factors = append(factors, FactorResult{
@@ -486,6 +487,36 @@ func BuildReport(provider, model string, raw *RawAttestation, nonce Nonce, enfor
 		} else {
 			addFactor("sigstore_verification", Fail,
 				fmt.Sprintf("Sigstore check failed for sha256:%s (%s)", failDigest[:min(16, len(failDigest))], failDetail))
+		}
+	}
+
+	// Factor 24: event_log_integrity
+	if len(raw.EventLog) == 0 { //nolint:gocritic // ifElseChain: conditions compare different fields
+		addFactor("event_log_integrity", Skip, "no event log entries in attestation response")
+	} else if tdxResult == nil || tdxResult.ParseErr != nil {
+		addFactor("event_log_integrity", Skip, "no parseable TDX quote; cannot compare RTMRs")
+	} else {
+		replayed, err := ReplayEventLog(raw.EventLog)
+		if err != nil {
+			addFactor("event_log_integrity", Fail, fmt.Sprintf("event log replay failed: %v", err))
+		} else {
+			mismatch := false
+			var detail string
+			for i := range 4 {
+				if replayed[i] != tdxResult.RTMRs[i] {
+					mismatch = true
+					detail = fmt.Sprintf("RTMR[%d] mismatch: replayed %s, quote %s",
+						i, hex.EncodeToString(replayed[i][:])[:16]+"...",
+						hex.EncodeToString(tdxResult.RTMRs[i][:])[:16]+"...")
+					break
+				}
+			}
+			if mismatch {
+				addFactor("event_log_integrity", Fail, detail)
+			} else {
+				addFactor("event_log_integrity", Pass,
+					fmt.Sprintf("event log replayed (%d entries), all 4 RTMRs match quote", len(raw.EventLog)))
+			}
 		}
 	}
 

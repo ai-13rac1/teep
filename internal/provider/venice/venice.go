@@ -33,13 +33,28 @@ import (
 const attestationPath = "/api/v1/tee/attestation"
 
 // eventLogEntry is one entry in Venice's event_log array — a TDX RTMR
-// measurement extend event.
+// measurement extend event. Mirrors attestation.EventLogEntry but with
+// Venice's field order for strict JSON parsing.
 type eventLogEntry struct {
 	Digest       string `json:"digest"`
 	Event        string `json:"event"`
 	EventPayload string `json:"event_payload"`
 	EventType    int    `json:"event_type"`
 	IMR          int    `json:"imr"`
+}
+
+func toEventLogEntries(local []eventLogEntry) []attestation.EventLogEntry {
+	out := make([]attestation.EventLogEntry, len(local))
+	for i, e := range local {
+		out[i] = attestation.EventLogEntry{
+			IMR:          e.IMR,
+			Digest:       e.Digest,
+			EventType:    e.EventType,
+			Event:        e.Event,
+			EventPayload: e.EventPayload,
+		}
+	}
+	return out
 }
 
 // veniceInfo holds the nested "info" object from Venice's attestation
@@ -179,6 +194,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		OSImageHash:        ar.Info.OSImageHash,
 		DeviceID:           ar.Info.DeviceID,
 		AppCompose:         extractAppCompose(ar.Info.TCBInfo),
+		EventLog:           toEventLogEntries(ar.EventLog),
 		EventLogCount:      len(ar.EventLog),
 		NonceSource:        ar.NonceSource,
 		CandidatesAvail:    ar.CandidatesAvail,

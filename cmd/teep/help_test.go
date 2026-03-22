@@ -9,8 +9,8 @@ import (
 )
 
 func TestFactorRegistryCount(t *testing.T) {
-	if len(factorRegistry) != 23 {
-		t.Errorf("factor registry has %d entries, want 23", len(factorRegistry))
+	if len(factorRegistry) != 24 {
+		t.Errorf("factor registry has %d entries, want 24", len(factorRegistry))
 	}
 }
 

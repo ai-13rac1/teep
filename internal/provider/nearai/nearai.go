@@ -238,6 +238,7 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		ComposeHash:    ar.Info.ComposeHash,
 		OSImageHash:    ar.Info.OSImageHash,
 		DeviceID:       ar.Info.DeviceID,
+		EventLog:       parseEventLog(ar.EventLog),
 		EventLogCount:  len(ar.EventLog),
 		RawBody:        body,
 	}
@@ -273,6 +274,7 @@ func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) *a
 		ComposeHash:    m.Info.ComposeHash,
 		OSImageHash:    m.Info.OSImageHash,
 		DeviceID:       m.Info.DeviceID,
+		EventLog:       parseEventLog(m.EventLog),
 		EventLogCount:  len(m.EventLog),
 		RawBody:        body,
 	}
@@ -311,6 +313,18 @@ func normalizeUncompressedKey(key string) string {
 		return "04" + key
 	}
 	return key
+}
+
+func parseEventLog(raw []json.RawMessage) []attestation.EventLogEntry {
+	entries := make([]attestation.EventLogEntry, 0, len(raw))
+	for _, r := range raw {
+		var e attestation.EventLogEntry
+		if err := json.Unmarshal(r, &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries
 }
 
 func firstNonEmpty(vals ...string) string {

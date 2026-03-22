@@ -303,6 +303,7 @@ func TestIntegration_NearAI_Fixture(t *testing.T) {
 		{"build_transparency_log", Pass},
 		{"compose_binding", Pass},
 		{"sigstore_verification", Pass},
+		{"event_log_integrity", Pass},
 	}
 
 	for _, exp := range expectations {
@@ -516,6 +517,7 @@ func fixtureToRaw(m *fixtureModelAttestation, verified bool, body []byte) *RawAt
 		ComposeHash:    m.Info.ComposeHash,
 		OSImageHash:    m.Info.OSImageHash,
 		DeviceID:       m.Info.DeviceID,
+		EventLog:       parseEventLogFixture(m.EventLog),
 		EventLogCount:  len(m.EventLog),
 		RawBody:        body,
 	}
@@ -523,6 +525,18 @@ func fixtureToRaw(m *fixtureModelAttestation, verified bool, body []byte) *RawAt
 		raw.TEEHardware = "intel-tdx"
 	}
 	return raw
+}
+
+func parseEventLogFixture(raw []json.RawMessage) []EventLogEntry {
+	entries := make([]EventLogEntry, 0, len(raw))
+	for _, r := range raw {
+		var e EventLogEntry
+		if err := json.Unmarshal(r, &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries
 }
 
 func firstNonEmpty(a, b string) string {

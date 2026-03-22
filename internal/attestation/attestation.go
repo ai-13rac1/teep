@@ -40,6 +40,16 @@ func ParseNonce(s string) (Nonce, error) {
 	return n, nil
 }
 
+// EventLogEntry is one entry in the TDX event log — a RTMR extend event.
+// The JSON tags match both Venice and NEAR AI attestation response formats.
+type EventLogEntry struct {
+	IMR          int    `json:"imr"`
+	Digest       string `json:"digest"` // 96 hex chars (SHA-384)
+	EventType    int    `json:"event_type"`
+	Event        string `json:"event"`
+	EventPayload string `json:"event_payload"`
+}
+
 // RawAttestation holds the parsed fields from a TEE provider's attestation
 // endpoint response (Venice /tee/attestation, NEAR /attestation/report, etc.).
 // All fields are raw strings exactly as returned by the provider; higher layers
@@ -86,6 +96,7 @@ type RawAttestation struct {
 	AppCompose         string          // raw app_compose JSON from info.tcb_info
 	OSImageHash        string          // OS image hash
 	DeviceID           string          // TDX device ID
+	EventLog           []EventLogEntry // TDX RTMR extend events
 	EventLogCount      int             // number of event log entries
 	NonceSource        string          // "client" or "server"
 	CandidatesAvail    int             // node pool size
