@@ -18,10 +18,10 @@ integration-near: ## Run NEAR AI integration tests (requires NEARAI_API_KEY)
 	go test -v -race -timeout 120s -run TestIntegration_NearAI ./internal/proxy/
 
 integration-nearai-fixture: ## Run NEAR AI fixture integration test (no API key needed)
-	go test -v -race -timeout 60s -run TestIntegration_NearAI_Fixture ./internal/attestation/
+	go test -v -race -timeout 60s -run TestIntegration_NearAI_Fixture ./internal/integration/
 
 integration-venice-fixture: ## Run Venice fixture integration test (no API key needed)
-	go test -v -race -timeout 60s -run TestIntegration_Venice_Fixture ./internal/attestation/
+	go test -v -race -timeout 60s -run TestIntegration_Venice_Fixture ./internal/integration/
 
 capture-nearai: ## Capture NEAR AI fixtures (requires NEARAI_API_KEY)
 	go run ./cmd/capture_nearai

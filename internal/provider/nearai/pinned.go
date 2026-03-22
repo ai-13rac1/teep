@@ -281,7 +281,7 @@ func (h *PinnedHandler) attestOnConn(
 	}
 
 	// Parse the attestation response using shared parser.
-	raw, err := parseAttestationResponse(body, model)
+	raw, err := ParseAttestationResponse(body, model)
 	if err != nil {
 		return nil, err
 	}

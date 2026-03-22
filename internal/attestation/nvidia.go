@@ -17,17 +17,17 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// nvidiaJWKSURL is NVIDIA's public JWKS endpoint for attestation JWT verification.
+// NvidiaJWKSURL is NVIDIA's public JWKS endpoint for attestation JWT verification.
 //
 //nolint:gochecknoglobals // var instead of const to allow test overrides
-var nvidiaJWKSURL = "https://nras.attestation.nvidia.com/.well-known/jwks.json"
+var NvidiaJWKSURL = "https://nras.attestation.nvidia.com/.well-known/jwks.json"
 
-// nrasAttestURL is NVIDIA's Remote Attestation Service endpoint for GPU
+// NRASAttestURL is NVIDIA's Remote Attestation Service endpoint for GPU
 // attestation. POST raw EAT JSON to receive a signed JWT with measurement
 // comparison results against NVIDIA's Reference Integrity Manifest (RIM).
 //
 //nolint:gochecknoglobals // var instead of const to allow test overrides
-var nrasAttestURL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
+var NRASAttestURL = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 
 // NvidiaVerifyResult holds the structured outcome of NVIDIA payload verification.
 // Fields are populated even on partial failure. Supports both EAT (local SPDM
@@ -82,7 +82,7 @@ type jwksEntry struct {
 }
 
 // jwksInstances caches keyfunc instances by JWKS URL. Production uses
-// nvidiaJWKSURL; tests use httptest server URLs. The keyfunc/v3 library handles
+// NvidiaJWKSURL; tests use httptest server URLs. The keyfunc/v3 library handles
 // background refresh, rate-limited unknown-kid refresh, and alg/use validation.
 var jwksInstances sync.Map // URL string → *jwksEntry
 
@@ -216,7 +216,7 @@ func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Clien
 		client = tlsct.NewHTTPClient(30 * time.Second)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nrasAttestURL, strings.NewReader(eatPayload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, NRASAttestURL, strings.NewReader(eatPayload))
 	if err != nil {
 		return &NvidiaVerifyResult{
 			Format:       "JWT",
@@ -273,7 +273,7 @@ func VerifyNVIDIANRAS(ctx context.Context, eatPayload string, client *http.Clien
 		}
 	}
 
-	return verifyNVIDIAJWT(ctx, extracted, nvidiaJWKSURL, opts...)
+	return verifyNVIDIAJWT(ctx, extracted, NvidiaJWKSURL, opts...)
 }
 
 // extractNRASJWT parses the NRAS response body. NRAS returns a JSON array

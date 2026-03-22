@@ -14,8 +14,10 @@ import (
 	"net/http"
 )
 
-// rekorAPIBase is the base URL for the Rekor transparency log API.
-var rekorAPIBase = "https://rekor.sigstore.dev"
+// RekorAPIBase is the base URL for the Rekor transparency log API.
+//
+//nolint:gochecknoglobals // var instead of const to allow test overrides
+var RekorAPIBase = "https://rekor.sigstore.dev"
 
 // Fulcio OIDC extension OID prefix: 1.3.6.1.4.1.57264.1.
 var (
@@ -97,7 +99,7 @@ func fetchRekorUUIDs(ctx context.Context, digest string, client *http.Client) ([
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rekorAPIBase+"/api/v1/index/retrieve", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, RekorAPIBase+"/api/v1/index/retrieve", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +134,7 @@ func fetchRekorEntry(ctx context.Context, uuid string, client *http.Client) ([]b
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rekorAPIBase+"/api/v1/log/entries/retrieve", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, RekorAPIBase+"/api/v1/log/entries/retrieve", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

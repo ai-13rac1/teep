@@ -410,10 +410,10 @@ func TestVerifyNVIDIANRAS_MockSuccess(t *testing.T) {
 	defer jwksSrv.Close()
 
 	// Override the JWKS URL to point to our test server.
-	origJWKS := nvidiaJWKSURL
-	overrideJWKSURL(jwksSrv.URL)
+	origJWKS := NvidiaJWKSURL
+	NvidiaJWKSURL = jwksSrv.URL
 	t.Cleanup(func() {
-		restoreJWKSURL(origJWKS)
+		NvidiaJWKSURL = origJWKS
 		resetJWKS()
 	})
 
@@ -434,9 +434,9 @@ func TestVerifyNVIDIANRAS_MockSuccess(t *testing.T) {
 	}))
 	defer nrasSrv.Close()
 
-	origNRAS := nrasAttestURL
-	overrideNRASURL(nrasSrv.URL)
-	t.Cleanup(func() { restoreNRASURL(origNRAS) })
+	origNRAS := NRASAttestURL
+	NRASAttestURL = nrasSrv.URL
+	t.Cleanup(func() { NRASAttestURL = origNRAS })
 
 	result := VerifyNVIDIANRAS(context.Background(), `{"arch":"HOPPER"}`, nil)
 
@@ -465,9 +465,9 @@ func TestVerifyNVIDIANRAS_ServerError(t *testing.T) {
 	}))
 	defer nrasSrv.Close()
 
-	origNRAS := nrasAttestURL
-	overrideNRASURL(nrasSrv.URL)
-	t.Cleanup(func() { restoreNRASURL(origNRAS) })
+	origNRAS := NRASAttestURL
+	NRASAttestURL = nrasSrv.URL
+	t.Cleanup(func() { NRASAttestURL = origNRAS })
 
 	result := VerifyNVIDIANRAS(context.Background(), `{"arch":"HOPPER"}`, nil)
 
@@ -486,9 +486,9 @@ func TestVerifyNVIDIANRAS_EmptyResponse(t *testing.T) {
 	}))
 	defer nrasSrv.Close()
 
-	origNRAS := nrasAttestURL
-	overrideNRASURL(nrasSrv.URL)
-	t.Cleanup(func() { restoreNRASURL(origNRAS) })
+	origNRAS := NRASAttestURL
+	NRASAttestURL = nrasSrv.URL
+	t.Cleanup(func() { NRASAttestURL = origNRAS })
 
 	result := VerifyNVIDIANRAS(context.Background(), `{"arch":"HOPPER"}`, nil)
 

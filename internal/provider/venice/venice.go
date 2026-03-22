@@ -241,6 +241,13 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("venice: attestation endpoint returned HTTP %d: %s", resp.StatusCode, msg)
 	}
 
+	return ParseAttestationResponse(body)
+}
+
+// ParseAttestationResponse unmarshals a Venice attestation JSON response body
+// into a RawAttestation. Extracted from FetchAttestation so integration tests
+// can parse fixture files without making HTTP calls.
+func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) {
 	var ar attestationResponse
 	if err := jsonstrict.UnmarshalWarn(body, &ar, "venice attestation response"); err != nil {
 		return nil, fmt.Errorf("venice: unmarshal attestation response: %w", err)

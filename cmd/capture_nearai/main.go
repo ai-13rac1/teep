@@ -1,7 +1,7 @@
 // capture_nearai fetches a NEAR AI attestation response and all related
 // external service responses needed for the fixture-based integration test.
 //
-// It saves everything to internal/attestation/testdata/nearai_YYYYMMDD_HHMMSS/.
+// It saves everything to internal/integration/testdata/nearai_YYYYMMDD_HHMMSS/.
 //
 // Usage:
 //
@@ -42,7 +42,7 @@ const (
 	attestationPath = "/v1/attestation/report"
 	nrasURL         = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 	jwksURL         = "https://nras.attestation.nvidia.com/.well-known/jwks.json"
-	testdataDir     = "internal/attestation/testdata"
+	testdataDir     = "internal/integration/testdata"
 	httpTimeout     = 60 * time.Second
 )
 
@@ -132,7 +132,7 @@ func main() {
 	fmt.Println("--- done ---")
 	fmt.Printf("Fixtures saved to %s/\n", saveDir)
 	fmt.Println("Run integration test with:")
-	fmt.Println("  go test -v -race -run TestIntegration_NearAI_Fixture ./internal/attestation/")
+	fmt.Println("  go test -v -race -run TestIntegration_NearAI_Fixture ./internal/integration/")
 	fmt.Println("(auto-discovers latest fixture dir; or override with NEARAI_FIXTURE_DIR=<absolute-path>)")
 }
 

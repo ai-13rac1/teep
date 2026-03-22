@@ -17,13 +17,13 @@ import (
 	"github.com/google/go-tdx-guest/verify/trust"
 )
 
-// tdxCollateralGetter overrides the Intel PCS HTTPS getter used by
+// TDXCollateralGetter overrides the Intel PCS HTTPS getter used by
 // VerifyTDXQuote for collateral fetching. When nil (production), a
 // RetryHTTPSGetter wrapping SimpleHTTPSGetter is used. Tests set this
-// to a fixture-backed getter via overrideTDXGetter in export_test.go.
+// to a fixture-backed getter.
 //
 //nolint:gochecknoglobals // var instead of const to allow test overrides
-var tdxCollateralGetter trust.HTTPSGetter
+var TDXCollateralGetter trust.HTTPSGetter
 
 // TDXVerifyResult holds the structured outcome of TDX quote parsing and
 // verification. Fields are populated even on partial failure so the report
@@ -241,7 +241,7 @@ func VerifyTDXQuote(ctx context.Context, hexQuote string, nonce Nonce, offline b
 	// This is a separate pass so a collateral network error doesn't mask
 	// a successful cert chain / signature verification from pass 1.
 	if !offline {
-		getter := tdxCollateralGetter
+		getter := TDXCollateralGetter
 		if getter == nil {
 			getter = &trust.RetryHTTPSGetter{
 				Timeout:       30 * time.Second,

@@ -6,8 +6,10 @@ import (
 	"net/http"
 )
 
-// sigstoreSearchBase is the base URL for Sigstore transparency log searches.
-var sigstoreSearchBase = "https://search.sigstore.dev/?hash="
+// SigstoreSearchBase is the base URL for Sigstore transparency log searches.
+//
+//nolint:gochecknoglobals // var instead of const to allow test overrides
+var SigstoreSearchBase = "https://search.sigstore.dev/?hash="
 
 // SigstoreResult records the outcome of checking one container image digest
 // against the Sigstore transparency log.
@@ -30,7 +32,7 @@ func CheckSigstoreDigests(ctx context.Context, digests []string, client *http.Cl
 }
 
 func checkOneDigest(ctx context.Context, digest string, client *http.Client) SigstoreResult {
-	url := fmt.Sprintf("%ssha256:%s", sigstoreSearchBase, digest)
+	url := fmt.Sprintf("%ssha256:%s", SigstoreSearchBase, digest)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, http.NoBody)
 	if err != nil {

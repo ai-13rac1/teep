@@ -110,9 +110,9 @@ func TestFetchRekorProvenance_FulcioCert(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := rekorAPIBase
-	defer restoreRekorBase(origBase)
-	overrideRekorBase(ts.URL)
+	origBase := RekorAPIBase
+	defer func() { RekorAPIBase = origBase }()
+	RekorAPIBase = ts.URL
 
 	prov := FetchRekorProvenance(context.Background(), testDigest, ts.Client())
 
@@ -182,9 +182,9 @@ func TestFetchRekorProvenance_RawPublicKey(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := rekorAPIBase
-	defer restoreRekorBase(origBase)
-	overrideRekorBase(ts.URL)
+	origBase := RekorAPIBase
+	defer func() { RekorAPIBase = origBase }()
+	RekorAPIBase = ts.URL
 
 	prov := FetchRekorProvenance(context.Background(), testDigest, ts.Client())
 
@@ -214,9 +214,9 @@ func TestFetchRekorProvenance_NoEntries(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := rekorAPIBase
-	defer restoreRekorBase(origBase)
-	overrideRekorBase(ts.URL)
+	origBase := RekorAPIBase
+	defer func() { RekorAPIBase = origBase }()
+	RekorAPIBase = ts.URL
 
 	prov := FetchRekorProvenance(context.Background(), testDigest, ts.Client())
 
@@ -279,9 +279,9 @@ func TestFetchRekorProvenance_IndexHTTPError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := rekorAPIBase
-	defer restoreRekorBase(origBase)
-	overrideRekorBase(ts.URL)
+	origBase := RekorAPIBase
+	defer func() { RekorAPIBase = origBase }()
+	RekorAPIBase = ts.URL
 
 	prov := FetchRekorProvenance(context.Background(), testDigest, ts.Client())
 	if prov.Err == nil {

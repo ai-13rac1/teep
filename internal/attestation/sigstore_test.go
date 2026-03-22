@@ -15,9 +15,9 @@ func TestCheckSigstoreDigests_AllOK(t *testing.T) {
 	defer ts.Close()
 
 	// Override the search base for testing.
-	origBase := sigstoreSearchBase
-	defer func() { restoreSigstoreBase(origBase) }()
-	overrideSigstoreBase(ts.URL + "/?hash=")
+	origBase := SigstoreSearchBase
+	defer func() { SigstoreSearchBase = origBase }()
+	SigstoreSearchBase = ts.URL + "/?hash="
 
 	digests := []string{
 		"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
@@ -46,9 +46,9 @@ func TestCheckSigstoreDigests_NotFound(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := sigstoreSearchBase
-	defer func() { restoreSigstoreBase(origBase) }()
-	overrideSigstoreBase(ts.URL + "/?hash=")
+	origBase := SigstoreSearchBase
+	defer func() { SigstoreSearchBase = origBase }()
+	SigstoreSearchBase = ts.URL + "/?hash="
 
 	digests := []string{"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"}
 	results := CheckSigstoreDigests(context.Background(), digests, ts.Client())
@@ -75,9 +75,9 @@ func TestCheckSigstoreDigests_HEADFallbackToGET(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	origBase := sigstoreSearchBase
-	defer func() { restoreSigstoreBase(origBase) }()
-	overrideSigstoreBase(ts.URL + "/?hash=")
+	origBase := SigstoreSearchBase
+	defer func() { SigstoreSearchBase = origBase }()
+	SigstoreSearchBase = ts.URL + "/?hash="
 
 	digests := []string{"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"}
 	results := CheckSigstoreDigests(context.Background(), digests, ts.Client())
