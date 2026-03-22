@@ -208,7 +208,7 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		if err != nil {
 			return nil, err
 		}
-		return rawFromModelAttestation(selected, ar.Verified, body), nil
+		return rawFromModelAttestation(selected, ar.Verified, body)
 	}
 
 	// If the response contains model_attestations, pick the entry matching
@@ -218,10 +218,15 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		if err != nil {
 			return nil, err
 		}
-		return rawFromModelAttestation(selected, ar.Verified, body), nil
+		return rawFromModelAttestation(selected, ar.Verified, body)
 	}
 
 	// Flat response form: use top-level fields directly.
+	eventLog, err := parseEventLog(ar.EventLog)
+	if err != nil {
+		return nil, fmt.Errorf("nearai: parse top-level event_log: %w", err)
+	}
+
 	raw := &attestation.RawAttestation{
 		Verified:       ar.Verified,
 		Nonce:          firstNonEmpty(ar.Nonce, ar.RequestNonce),
@@ -238,7 +243,7 @@ func parseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		ComposeHash:    ar.Info.ComposeHash,
 		OSImageHash:    ar.Info.OSImageHash,
 		DeviceID:       ar.Info.DeviceID,
-		EventLog:       parseEventLog(ar.EventLog),
+		EventLog:       eventLog,
 		EventLogCount:  len(ar.EventLog),
 		RawBody:        body,
 	}
@@ -257,7 +262,12 @@ func selectByModel(list []modelAttestation, model string) (*modelAttestation, er
 	return nil, fmt.Errorf("nearai: model %q not found in %d attestation entries", model, len(list))
 }
 
-func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) *attestation.RawAttestation {
+func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) (*attestation.RawAttestation, error) {
+	eventLog, err := parseEventLog(m.EventLog)
+	if err != nil {
+		return nil, fmt.Errorf("parse model event_log: %w", err)
+	}
+
 	raw := &attestation.RawAttestation{
 		Verified:       verified,
 		Nonce:          firstNonEmpty(m.Nonce, m.RequestNonce),
@@ -274,14 +284,14 @@ func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) *a
 		ComposeHash:    m.Info.ComposeHash,
 		OSImageHash:    m.Info.OSImageHash,
 		DeviceID:       m.Info.DeviceID,
-		EventLog:       parseEventLog(m.EventLog),
+		EventLog:       eventLog,
 		EventLogCount:  len(m.EventLog),
 		RawBody:        body,
 	}
 	if raw.IntelQuote != "" {
 		raw.TEEHardware = "intel-tdx"
 	}
-	return raw
+	return raw, nil
 }
 
 // extractAppCompose parses a tcb_info JSON payload and returns the app_compose
@@ -315,16 +325,16 @@ func normalizeUncompressedKey(key string) string {
 	return key
 }
 
-func parseEventLog(raw []json.RawMessage) []attestation.EventLogEntry {
+func parseEventLog(raw []json.RawMessage) ([]attestation.EventLogEntry, error) {
 	entries := make([]attestation.EventLogEntry, 0, len(raw))
-	for _, r := range raw {
+	for i, r := range raw {
 		var e attestation.EventLogEntry
 		if err := json.Unmarshal(r, &e); err != nil {
-			continue
+			return nil, fmt.Errorf("entry %d: %w", i, err)
 		}
 		entries = append(entries, e)
 	}
-	return entries
+	return entries, nil
 }
 
 func firstNonEmpty(vals ...string) string {

@@ -743,6 +743,72 @@ func TestBuildReportComposeBindingSkip(t *testing.T) {
 	}
 }
 
+func TestBuildReportTDXQuoteStructureFailsMRTDPolicy(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	tdxResult := &TDXVerifyResult{
+		MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
+		MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
+	}
+
+	report := BuildReport(&ReportInput{
+		Provider: "nearai",
+		Model:    "m",
+		Raw:      raw,
+		Nonce:    nonce,
+		TDX:      tdxResult,
+		Policy: MeasurementPolicy{
+			MRTDAllow: map[string]struct{}{strings.Repeat("aa", 48): {}},
+		},
+	})
+
+	f := findFactor(t, report, "tdx_quote_structure")
+	if f.Status != Fail {
+		t.Fatalf("tdx_quote_structure should fail on MRTD policy mismatch, got %s (%s)", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "MRTD") {
+		t.Fatalf("detail should mention MRTD policy mismatch, got: %s", f.Detail)
+	}
+}
+
+func TestBuildReportEventLogIntegrityFailsRTMRPolicy(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.EventLog = []EventLogEntry{{IMR: 0, Digest: strings.Repeat("ab", 48)}}
+
+	replayed, err := ReplayEventLog(raw.EventLog)
+	if err != nil {
+		t.Fatalf("ReplayEventLog: %v", err)
+	}
+
+	tdxResult := &TDXVerifyResult{}
+	tdxResult.RTMRs = replayed
+
+	report := BuildReport(&ReportInput{
+		Provider: "nearai",
+		Model:    "m",
+		Raw:      raw,
+		Nonce:    nonce,
+		TDX:      tdxResult,
+		Policy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{
+				{strings.Repeat("00", 48): {}},
+				nil,
+				nil,
+				nil,
+			},
+		},
+	})
+
+	f := findFactor(t, report, "event_log_integrity")
+	if f.Status != Fail {
+		t.Fatalf("event_log_integrity should fail on RTMR policy mismatch, got %s (%s)", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "RTMR[0]") {
+		t.Fatalf("detail should mention RTMR policy mismatch, got: %s", f.Detail)
+	}
+}
+
 // TestBuildReportSigstorePass verifies sigstore_verification passes when all digests are OK.
 func TestBuildReportSigstorePass(t *testing.T) {
 	nonce := NewNonce()
@@ -756,6 +822,15 @@ func TestBuildReportSigstorePass(t *testing.T) {
 	if f.Status != Pass {
 		t.Errorf("sigstore_verification all OK: got %s (%s), want PASS", f.Status, f.Detail)
 	}
+}
+
+func bytesFromHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q): %v", s, err)
+	}
+	return b
 }
 
 // TestBuildReportSigstoreFail verifies sigstore_verification fails when a digest is not found.

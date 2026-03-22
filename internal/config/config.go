@@ -11,11 +11,13 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -48,7 +50,13 @@ type ProviderConfig struct {
 
 // PolicyConfig holds the optional [policy] section from the TOML file.
 type PolicyConfig struct {
-	Enforce []string `toml:"enforce"`
+	Enforce     []string `toml:"enforce"`
+	MRTDAllow   []string `toml:"mrtd_allow"`
+	MRSEAMAllow []string `toml:"mrseam_allow"`
+	RTMR0Allow  []string `toml:"rtmr0_allow"`
+	RTMR1Allow  []string `toml:"rtmr1_allow"`
+	RTMR2Allow  []string `toml:"rtmr2_allow"`
+	RTMR3Allow  []string `toml:"rtmr3_allow"`
 }
 
 // tomlFile mirrors the top-level structure of the optional TOML config file.
@@ -77,6 +85,9 @@ type Config struct {
 	// Enforced is the list of attestation factor names that block the proxy
 	// when they fail. Defaults to DefaultEnforced.
 	Enforced []string
+
+	// MeasurementPolicy defines optional allowlists for TDX measurements.
+	MeasurementPolicy attestation.MeasurementPolicy
 
 	// Offline skips external verification calls (Intel PCS collateral,
 	// Proof of Cloud registry). Set via --offline flag at runtime.
@@ -137,7 +148,55 @@ func loadTOML(cfg *Config, path string) error {
 		cfg.Enforced = f.Policy.Enforce
 	}
 
+	policy, err := buildMeasurementPolicy(&f.Policy)
+	if err != nil {
+		return err
+	}
+	cfg.MeasurementPolicy = policy
+
 	return nil
+}
+
+func buildMeasurementPolicy(p *PolicyConfig) (attestation.MeasurementPolicy, error) {
+	var out attestation.MeasurementPolicy
+
+	var err error
+	out.MRTDAllow, err = normalizeAllowlist(p.MRTDAllow, 48, "policy.mrtd_allow")
+	if err != nil {
+		return out, err
+	}
+	out.MRSeamAllow, err = normalizeAllowlist(p.MRSEAMAllow, 48, "policy.mrseam_allow")
+	if err != nil {
+		return out, err
+	}
+
+	for i, list := range [4][]string{p.RTMR0Allow, p.RTMR1Allow, p.RTMR2Allow, p.RTMR3Allow} {
+		out.RTMRAllow[i], err = normalizeAllowlist(list, 48, fmt.Sprintf("policy.rtmr%d_allow", i))
+		if err != nil {
+			return out, err
+		}
+	}
+
+	return out, nil
+}
+
+func normalizeAllowlist(values []string, expectedBytes int, field string) (map[string]struct{}, error) {
+	if len(values) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	norm := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		s := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "0x")
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid hex %q: %w", field, v, err)
+		}
+		if len(b) != expectedBytes {
+			return nil, fmt.Errorf("%s entry %q decodes to %d bytes, want %d", field, v, len(b), expectedBytes)
+		}
+		norm[s] = struct{}{}
+	}
+	return norm, nil
 }
 
 // resolveProvider builds a Provider from a ProviderConfig, resolving the API

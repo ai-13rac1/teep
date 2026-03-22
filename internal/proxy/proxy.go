@@ -150,7 +150,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	for name, cp := range cfg.Providers {
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced)
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced, cfg.MeasurementPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -202,7 +202,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // fromConfig constructs a provider.Provider from a config.Provider, attaching
 // the correct Attester, Preparer, and PinnedHandler for the known provider names.
-func fromConfig(cp *config.Provider, spkiCache *attestation.SPKICache, offline bool, enforced []string) (*provider.Provider, error) {
+func fromConfig(
+	cp *config.Provider,
+	spkiCache *attestation.SPKICache,
+	offline bool,
+	enforced []string,
+	policy attestation.MeasurementPolicy,
+) (*provider.Provider, error) {
 	p := &provider.Provider{
 		Name:    cp.Name,
 		BaseURL: cp.BaseURL,
@@ -227,6 +233,7 @@ func fromConfig(cp *config.Provider, spkiCache *attestation.SPKICache, offline b
 			cp.APIKey,
 			offline,
 			enforced,
+			policy,
 			rdVerifier,
 		)
 	default:
@@ -384,6 +391,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Raw:        raw,
 		Nonce:      nonce,
 		Enforced:   s.cfg.Enforced,
+		Policy:     s.cfg.MeasurementPolicy,
 		TDX:        tdxResult,
 		Nvidia:     nvidiaResult,
 		NvidiaNRAS: nrasResult,

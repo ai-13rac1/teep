@@ -348,6 +348,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		Raw:        raw,
 		Nonce:      nonce,
 		Enforced:   cfg.Enforced,
+		Policy:     cfg.MeasurementPolicy,
 		TDX:        tdxResult,
 		Nvidia:     nvidiaResult,
 		NvidiaNRAS: nrasResult,

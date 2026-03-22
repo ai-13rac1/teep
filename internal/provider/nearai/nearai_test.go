@@ -353,6 +353,28 @@ func TestAttester_FetchAttestation_TooManyAttestations(t *testing.T) {
 	t.Logf("got expected error: %v", err)
 }
 
+func TestAttester_FetchAttestation_MalformedEventLogEntry(t *testing.T) {
+	body := `{
+		"verified": true,
+		"model": "test-model",
+		"intel_quote": "dGVzdA==",
+		"nvidia_payload": "jwt",
+		"signing_key": "04bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"event_log": [123]
+	}`
+	srv := makeServer(t, http.StatusOK, body)
+	defer srv.Close()
+
+	a := nearai.NewAttester(srv.URL, "key")
+	_, err := a.FetchAttestation(context.Background(), "test-model", attestation.NewNonce())
+	if err == nil {
+		t.Fatal("expected error for malformed event_log entry")
+	}
+	if !strings.Contains(err.Error(), "event_log") {
+		t.Fatalf("error should mention event_log, got: %v", err)
+	}
+}
+
 func TestAttester_FetchAttestation_NormalizesUnprefixedKey(t *testing.T) {
 	// NEAR AI may return signing_public_key without the "04" uncompressed prefix.
 	// The parser should normalize 128-char keys by prepending "04".

@@ -146,6 +146,13 @@ func (r *EndpointResolver) refresh(ctx context.Context) error {
 			continue
 		}
 		for _, m := range ep.Models {
+			if prior, exists := mapping[m]; exists && prior != ep.Domain {
+				slog.Warn("nearai: endpoint discovery: duplicate model mapping; last value wins",
+					"model", m,
+					"first_domain", prior,
+					"second_domain", ep.Domain,
+				)
+			}
 			mapping[m] = ep.Domain
 		}
 	}
@@ -164,6 +171,9 @@ func (r *EndpointResolver) refresh(ctx context.Context) error {
 func isValidDomain(d string) bool {
 	for _, r := range d {
 		if unicode.IsSpace(r) || r < 0x20 || r == 0x7f {
+			return false
+		}
+		if r > unicode.MaxASCII {
 			return false
 		}
 	}

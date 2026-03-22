@@ -130,6 +130,23 @@ func TestWriteHTTPRequest_MissingHost(t *testing.T) {
 	}
 }
 
+func TestWriteHTTPRequest_RejectsCRLFInHeaderValue(t *testing.T) {
+	var buf bytes.Buffer
+	bw := bufio.NewWriter(&buf)
+
+	headers := make(http.Header)
+	headers.Set("Host", "example.com")
+	headers.Set("Authorization", "Bearer good\r\nX-Injected: bad")
+
+	err := writeHTTPRequest(bw, "GET", "/path", headers, nil)
+	if err == nil {
+		t.Fatal("expected error for CRLF header injection")
+	}
+	if !strings.Contains(err.Error(), "CR/LF") {
+		t.Fatalf("error should mention CR/LF characters, got: %v", err)
+	}
+}
+
 func TestExtractSPKI(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -354,7 +371,7 @@ func TestNewPinnedHandler(t *testing.T) {
 	rdVerifier := ReportDataVerifier{}
 	enforced := []string{"nonce_match", "tdx_debug_disabled"}
 
-	h := NewPinnedHandler(resolver, spkiCache, "test-api-key", true, enforced, rdVerifier)
+	h := NewPinnedHandler(resolver, spkiCache, "test-api-key", true, enforced, attestation.MeasurementPolicy{}, rdVerifier)
 
 	if h.apiKey != "test-api-key" {
 		t.Errorf("apiKey = %q, want %q", h.apiKey, "test-api-key")
@@ -454,6 +471,7 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 		"test-key",
 		true, // offline — skip Sigstore/Rekor
 		[]string{},
+		attestation.MeasurementPolicy{},
 		ReportDataVerifier{},
 	)
 
@@ -525,6 +543,7 @@ func TestHandlePinned_CacheHitViaSetDialer(t *testing.T) {
 		"test-key",
 		true,
 		[]string{},
+		attestation.MeasurementPolicy{},
 		ReportDataVerifier{},
 	)
 	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
@@ -590,6 +609,7 @@ func TestHandlePinned_MismatchedFingerprint(t *testing.T) {
 		"test-key",
 		true,
 		[]string{},
+		attestation.MeasurementPolicy{},
 		ReportDataVerifier{},
 	)
 	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
@@ -642,6 +662,7 @@ func TestHandlePinned_BlockedReportDoesNotPopulateSPKICache(t *testing.T) {
 		"test-key",
 		true,
 		[]string{"nonce_match"},
+		attestation.MeasurementPolicy{},
 		ReportDataVerifier{},
 	)
 	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
@@ -690,6 +711,7 @@ func TestHandlePinned_DomainResolveError(t *testing.T) {
 		"test-key",
 		true,
 		[]string{},
+		attestation.MeasurementPolicy{},
 		ReportDataVerifier{},
 	)
 

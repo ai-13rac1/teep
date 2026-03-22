@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -42,6 +45,7 @@ type PinnedHandler struct {
 	apiKey     string
 	offline    bool
 	enforced   []string
+	policy     attestation.MeasurementPolicy
 	rdVerifier provider.ReportDataVerifier
 	ctChecker  *CTChecker
 	dialFn     func(ctx context.Context, domain string) (*tls.Conn, error) // nil → use default tlsDial
@@ -56,6 +60,7 @@ func NewPinnedHandler(
 	apiKey string,
 	offline bool,
 	enforced []string,
+	policy attestation.MeasurementPolicy,
 	rdVerifier provider.ReportDataVerifier,
 ) *PinnedHandler {
 	return &PinnedHandler{
@@ -64,6 +69,7 @@ func NewPinnedHandler(
 		apiKey:     apiKey,
 		offline:    offline,
 		enforced:   enforced,
+		policy:     policy,
 		rdVerifier: rdVerifier,
 		ctChecker:  NewCTChecker(),
 	}
@@ -311,8 +317,12 @@ func (h *PinnedHandler) attestOnConn(
 	if raw.TLSFingerprint == "" {
 		return nil, errors.New("attestation response missing tls_cert_fingerprint")
 	}
-	if liveSPKI != raw.TLSFingerprint {
-		return nil, fmt.Errorf("live SPKI %s != attested TLS fingerprint %s", liveSPKI[:16]+"...", raw.TLSFingerprint[:16]+"...")
+	match, err := constantTimeHexEqual(liveSPKI, raw.TLSFingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("compare live SPKI vs attested TLS fingerprint: %w", err)
+	}
+	if !match {
+		return nil, fmt.Errorf("live SPKI %s != attested TLS fingerprint %s", truncate(liveSPKI, 16)+"...", truncate(raw.TLSFingerprint, 16)+"...")
 	}
 
 	var composeResult *attestation.ComposeBindingResult
@@ -353,6 +363,7 @@ func (h *PinnedHandler) attestOnConn(
 		Raw:        raw,
 		Nonce:      nonce,
 		Enforced:   h.enforced,
+		Policy:     h.policy,
 		TDX:        tdxResult,
 		Nvidia:     nvidiaResult,
 		NvidiaNRAS: nrasResult,
@@ -380,6 +391,9 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 	if host == "" {
 		return errors.New("headers missing required Host field")
 	}
+	if strings.ContainsAny(host, "\r\n") {
+		return errors.New("host header contains invalid CR/LF characters")
+	}
 	if _, err := fmt.Fprintf(w, "Host: %s\r\n", host); err != nil {
 		return err
 	}
@@ -397,6 +411,9 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 			continue
 		}
 		for _, val := range vals {
+			if strings.ContainsAny(val, "\r\n") {
+				return fmt.Errorf("header %q contains invalid CR/LF characters", key)
+			}
 			if _, err := fmt.Fprintf(w, "%s: %s\r\n", key, val); err != nil {
 				return err
 			}
@@ -416,6 +433,21 @@ func writeHTTPRequest(w *bufio.Writer, method, path string, headers http.Header,
 	}
 
 	return w.Flush()
+}
+
+func constantTimeHexEqual(a, b string) (bool, error) {
+	aBytes, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(a)), "0x"))
+	if err != nil {
+		return false, fmt.Errorf("first value is not valid hex: %w", err)
+	}
+	bBytes, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(b)), "0x"))
+	if err != nil {
+		return false, fmt.Errorf("second value is not valid hex: %w", err)
+	}
+	if len(aBytes) != len(bBytes) {
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare(aBytes, bBytes) == 1, nil
 }
 
 // connClosingReader wraps an io.ReadCloser so that closing it also closes the
