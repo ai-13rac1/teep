@@ -53,10 +53,14 @@ type EndpointResolver struct {
 
 // NewEndpointResolver returns a resolver that discovers endpoints from
 // the default NEAR AI URL (https://completions.near.ai/endpoints).
-func NewEndpointResolver() *EndpointResolver {
+func NewEndpointResolver(offline ...bool) *EndpointResolver {
+	ctEnabled := true
+	if len(offline) > 0 && offline[0] {
+		ctEnabled = false
+	}
 	return &EndpointResolver{
 		endpointsURL: defaultEndpointsURL,
-		client:       tlsct.NewHTTPClient(30 * time.Second),
+		client:       tlsct.NewHTTPClient(30*time.Second, ctEnabled),
 		mapping:      make(map[string]string),
 	}
 }

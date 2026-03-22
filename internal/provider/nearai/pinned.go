@@ -63,6 +63,9 @@ func NewPinnedHandler(
 	policy attestation.MeasurementPolicy,
 	rdVerifier provider.ReportDataVerifier,
 ) *PinnedHandler {
+	checker := NewCTChecker()
+	checker.SetEnabled(!offline)
+
 	return &PinnedHandler{
 		resolver:   resolver,
 		spkiCache:  spkiCache,
@@ -71,7 +74,7 @@ func NewPinnedHandler(
 		enforced:   enforced,
 		policy:     policy,
 		rdVerifier: rdVerifier,
-		ctChecker:  NewCTChecker(),
+		ctChecker:  checker,
 	}
 }
 
