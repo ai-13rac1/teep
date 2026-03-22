@@ -2,6 +2,7 @@ package nearai
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -41,6 +42,7 @@ type PinnedHandler struct {
 	offline    bool
 	enforced   []string
 	rdVerifier provider.ReportDataVerifier
+	ctChecker  *CTChecker
 	dialFn     func(ctx context.Context, domain string) (*tls.Conn, error) // nil → use default tlsDial
 
 	verifySF singleflight.Group
@@ -62,6 +64,7 @@ func NewPinnedHandler(
 		offline:    offline,
 		enforced:   enforced,
 		rdVerifier: rdVerifier,
+		ctChecker:  NewCTChecker(),
 	}
 }
 
@@ -70,6 +73,12 @@ func NewPinnedHandler(
 // of resolving real domains.
 func (h *PinnedHandler) SetDialer(fn func(ctx context.Context, domain string) (*tls.Conn, error)) {
 	h.dialFn = fn
+}
+
+// SetCTChecker overrides the certificate transparency checker.
+// Intended for tests.
+func (h *PinnedHandler) SetCTChecker(checker *CTChecker) {
+	h.ctChecker = checker
 }
 
 // HandlePinned opens a TLS connection to the backend, verifies its certificate
@@ -104,6 +113,12 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 	if err != nil {
 		return nil, fmt.Errorf("extract SPKI: %w", err)
 	}
+	if h.ctChecker != nil {
+		state := conn.ConnectionState()
+		if err := h.ctChecker.CheckTLSState(domain, &state); err != nil {
+			return nil, fmt.Errorf("certificate transparency check failed: %w", err)
+		}
+	}
 
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
@@ -122,6 +137,13 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 			if err != nil {
 				return nil, err
 			}
+			if r.Blocked() {
+				slog.Warn("attestation blocked by policy, refusing to cache SPKI",
+					"domain", domain,
+					"model", req.Model,
+				)
+				return r, nil
+			}
 			h.spkiCache.Add(domain, liveSPKI)
 			slog.Info("SPKI verified and cached", "domain", domain, "spki", liveSPKI[:16]+"...")
 			return r, nil
@@ -134,6 +156,15 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 		}
 	} else {
 		slog.Debug("SPKI cache hit, skipping attestation", "domain", domain, "spki", liveSPKI[:16]+"...")
+	}
+
+	if report != nil && report.Blocked() {
+		return &provider.PinnedResponse{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Report:     report,
+		}, nil
 	}
 
 	// 5. Send the actual chat request on the same connection.
@@ -259,6 +290,22 @@ func (h *PinnedHandler) attestOnConn(
 		}
 	}
 
+	var nvidiaResult *attestation.NvidiaVerifyResult
+	if raw.NvidiaPayload != "" {
+		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+	}
+
+	var nrasResult *attestation.NvidiaVerifyResult
+	if !h.offline && raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
+		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, &http.Client{Timeout: 30 * time.Second})
+	}
+
+	var pocResult *attestation.PoCResult
+	if !h.offline && raw.IntelQuote != "" {
+		poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, &http.Client{Timeout: 30 * time.Second})
+		pocResult = poc.CheckQuote(ctx, raw.IntelQuote)
+	}
+
 	// Verify live SPKI matches the attested TLS fingerprint.
 	if raw.TLSFingerprint == "" {
 		return nil, errors.New("attestation response missing tls_cert_fingerprint")
@@ -300,15 +347,18 @@ func (h *PinnedHandler) attestOnConn(
 	}
 
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider: "nearai",
-		Model:    model,
-		Raw:      raw,
-		Nonce:    nonce,
-		Enforced: h.enforced,
-		TDX:      tdxResult,
-		Compose:  composeResult,
-		Sigstore: sigstoreResults,
-		Rekor:    rekorResults,
+		Provider:   "nearai",
+		Model:      model,
+		Raw:        raw,
+		Nonce:      nonce,
+		Enforced:   h.enforced,
+		TDX:        tdxResult,
+		Nvidia:     nvidiaResult,
+		NvidiaNRAS: nrasResult,
+		PoC:        pocResult,
+		Compose:    composeResult,
+		Sigstore:   sigstoreResults,
+		Rekor:      rekorResults,
 	})
 	return report, nil
 }

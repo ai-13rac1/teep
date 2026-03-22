@@ -206,7 +206,7 @@ func TestPinnedHandler_SPKICacheHit(t *testing.T) {
 		spkiCache:  spkiCache,
 		apiKey:     "test-key",
 		offline:    true,
-		enforced:   attestation.DefaultEnforced,
+		enforced:   []string{},
 		rdVerifier: ReportDataVerifier{},
 	}
 
@@ -453,7 +453,7 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 		attestation.NewSPKICache(),
 		"test-key",
 		true, // offline — skip Sigstore/Rekor
-		attestation.DefaultEnforced,
+		[]string{},
 		ReportDataVerifier{},
 	)
 
@@ -524,7 +524,7 @@ func TestHandlePinned_CacheHitViaSetDialer(t *testing.T) {
 		spkiCache,
 		"test-key",
 		true,
-		attestation.DefaultEnforced,
+		[]string{},
 		ReportDataVerifier{},
 	)
 	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
@@ -589,7 +589,7 @@ func TestHandlePinned_MismatchedFingerprint(t *testing.T) {
 		attestation.NewSPKICache(),
 		"test-key",
 		true,
-		attestation.DefaultEnforced,
+		[]string{},
 		ReportDataVerifier{},
 	)
 	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
@@ -613,6 +613,70 @@ func TestHandlePinned_MismatchedFingerprint(t *testing.T) {
 	}
 }
 
+func TestHandlePinned_BlockedReportDoesNotPopulateSPKICache(t *testing.T) {
+	attestCalls := 0
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			attestCalls++
+			w.Header().Set("Content-Type", "application/json")
+			// Force nonce mismatch so nonce_match fails when enforced.
+			_, _ = w.Write([]byte(nearaiAttestationJSON(spkiHash, "0000000000000000000000000000000000000000000000000000000000000000")))
+			return
+		}
+		http.Error(w, "chat should not be reached", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	domain := hostFromURL(t, srv.URL)
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"endpoints":[{"domain":"%s","models":["test-model"]}]}`, domain)
+	}))
+	defer endpointSrv.Close()
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		attestation.NewSPKICache(),
+		"test-key",
+		true,
+		[]string{"nonce_match"},
+		ReportDataVerifier{},
+	)
+	handler.SetDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+
+	for i := range 2 {
+		resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+			Method:  "POST",
+			Path:    "/v1/chat/completions",
+			Headers: http.Header{"Content-Type": {"application/json"}},
+			Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+			Model:   "test-model",
+		})
+		if err != nil {
+			t.Fatalf("HandlePinned call %d: %v", i+1, err)
+		}
+		if resp.Report == nil {
+			t.Fatalf("HandlePinned call %d: expected non-nil report", i+1)
+		}
+		if !resp.Report.Blocked() {
+			t.Fatalf("HandlePinned call %d: report should be blocked", i+1)
+		}
+		_ = resp.Body.Close()
+	}
+
+	if attestCalls != 2 {
+		t.Fatalf("attestation calls = %d, want 2", attestCalls)
+	}
+
+	if handler.spkiCache.Contains(domain, spkiHash) {
+		t.Fatal("SPKI cache should remain empty when report is blocked")
+	}
+}
+
 func TestHandlePinned_DomainResolveError(t *testing.T) {
 	// Endpoint server returns an error.
 	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -625,7 +689,7 @@ func TestHandlePinned_DomainResolveError(t *testing.T) {
 		attestation.NewSPKICache(),
 		"test-key",
 		true,
-		attestation.DefaultEnforced,
+		[]string{},
 		ReportDataVerifier{},
 	)
 

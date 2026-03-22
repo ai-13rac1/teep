@@ -624,15 +624,28 @@ func (s *Server) handlePinnedChat(
 
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(ctx, &pinnedReq)
 	if err != nil {
+		s.negCache.Record(prov.Name, upstreamModel)
 		slog.Error("pinned chat failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer pinnedResp.Body.Close()
 
-	// Cache the verification report if one was produced (SPKI cache miss).
-	if pinnedResp.Report != nil {
-		s.cache.Put(prov.Name, upstreamModel, pinnedResp.Report)
+	// Use the report from this request (SPKI miss) or cached report (SPKI hit)
+	// to enforce fail-closed policy before forwarding any upstream response.
+	report := pinnedResp.Report
+	if report != nil {
+		s.cache.Put(prov.Name, upstreamModel, report)
+	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		report = cached
+	}
+
+	if report != nil && report.Blocked() {
+		s.negCache.Record(prov.Name, upstreamModel)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(report) //nolint:errchkjson // response body already committed
+		return
 	}
 
 	// Copy response headers, excluding hop-by-hop headers that Go's

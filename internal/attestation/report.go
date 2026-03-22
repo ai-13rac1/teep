@@ -75,6 +75,8 @@ func (r *VerificationReport) Blocked() bool {
 // can substitute the enclave public key and intercept all E2EE traffic.
 var DefaultEnforced = []string{
 	"nonce_match",
+	"tdx_cert_chain",
+	"tdx_quote_signature",
 	"tdx_debug_disabled",
 	"signing_key_present",
 	"tdx_reportdata_binding",

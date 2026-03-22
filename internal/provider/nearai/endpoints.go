@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/13rac1/teep/internal/jsonstrict"
 	"golang.org/x/sync/singleflight"
@@ -41,6 +42,7 @@ type endpointEntry struct {
 type EndpointResolver struct {
 	endpointsURL string
 	client       *http.Client
+	ctChecker    *CTChecker
 
 	mu        sync.RWMutex
 	mapping   map[string]string // model → domain
@@ -55,6 +57,7 @@ func NewEndpointResolver() *EndpointResolver {
 	return &EndpointResolver{
 		endpointsURL: defaultEndpointsURL,
 		client:       &http.Client{Timeout: 30 * time.Second},
+		ctChecker:    NewCTChecker(),
 		mapping:      make(map[string]string),
 	}
 }
@@ -64,6 +67,7 @@ func newEndpointResolverForTest(url string) *EndpointResolver {
 	return &EndpointResolver{
 		endpointsURL: url,
 		client:       &http.Client{Timeout: 10 * time.Second},
+		ctChecker:    NewCTChecker(),
 		mapping:      make(map[string]string),
 	}
 }
@@ -88,6 +92,14 @@ func (r *EndpointResolver) Resolve(ctx context.Context, model string) (string, e
 		return nil, r.refresh(context.WithoutCancel(ctx))
 	})
 	if err != nil {
+		if ok {
+			slog.Warn("nearai endpoint discovery refresh failed, using stale mapping",
+				"model", model,
+				"domain", domain,
+				"err", err,
+			)
+			return domain, nil
+		}
 		return "", fmt.Errorf("endpoint discovery: %w", err)
 	}
 
@@ -114,6 +126,12 @@ func (r *EndpointResolver) refresh(ctx context.Context) error {
 		return fmt.Errorf("GET %s: %w", r.endpointsURL, err)
 	}
 	defer resp.Body.Close()
+
+	if req.URL.Scheme == "https" && r.ctChecker != nil {
+		if err := r.ctChecker.CheckTLSState(req.URL.Hostname(), resp.TLS); err != nil {
+			return fmt.Errorf("certificate transparency check failed: %w", err)
+		}
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -152,8 +170,13 @@ func (r *EndpointResolver) refresh(ctx context.Context) error {
 // spaces, or path separators, or lack a dot (not a qualified hostname).
 // Accepts host:port (e.g. "192.168.1.1:8080") but rejects URLs with "://".
 func isValidDomain(d string) bool {
+	for _, r := range d {
+		if unicode.IsSpace(r) || r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
 	return d != "" &&
-		!strings.ContainsAny(d, " /") &&
+		!strings.ContainsAny(d, "/\\") &&
 		!strings.Contains(d, "://") &&
 		strings.Contains(d, ".")
 }
