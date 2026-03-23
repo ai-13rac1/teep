@@ -379,6 +379,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		reportInput.GatewayTDX = gwTDX
 		reportInput.GatewayNonceHex = raw.GatewayNonceHex
 		reportInput.GatewayNonce = nonce
+		reportInput.GatewayEventLog = raw.GatewayEventLog
 
 		if raw.GatewayAppCompose != "" && gwTDX.ParseErr == nil {
 			gwCompose := &attestation.ComposeBindingResult{Checked: true}

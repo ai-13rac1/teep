@@ -386,6 +386,7 @@ func (h *PinnedHandler) attestOnConn(
 		GatewayNonceHex: gwRaw.NonceHex,
 		GatewayNonce:    modelNonce, // gateway echoes the same nonce
 		GatewayCompose:  gatewayCompose,
+		GatewayEventLog: gwRaw.EventLog,
 	})
 	return report, nil
 }

@@ -102,6 +102,7 @@ var DefaultEnforced = []string{
 	"gateway_tdx_debug_disabled",
 	"gateway_tdx_reportdata_binding",
 	"gateway_compose_binding",
+	"gateway_event_log_integrity",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
@@ -118,6 +119,7 @@ var KnownFactors = []string{
 	"gateway_nonce_match", "gateway_tdx_quote_present", "gateway_tdx_quote_structure",
 	"gateway_tdx_cert_chain", "gateway_tdx_quote_signature", "gateway_tdx_debug_disabled",
 	"gateway_tdx_reportdata_binding", "gateway_compose_binding",
+	"gateway_event_log_integrity",
 }
 
 // ComposeBindingResult holds the outcome of verifying the app_compose → MRConfigID binding.
@@ -154,12 +156,13 @@ type ReportInput struct {
 	GatewayNonceHex string // echoed request_nonce from gateway response
 	GatewayNonce    Nonce  // nonce we sent to the gateway
 	GatewayCompose  *ComposeBindingResult
+	GatewayEventLog []EventLogEntry
 }
 
 // BuildReport runs verification factors against the input and returns a
 // complete VerificationReport. The Enforced field controls which factor names
 // result in Enforced=true. Pass DefaultEnforced for production use.
-// Base factors: 24 (all providers). Gateway factors: +7 (nearcloud only).
+// Base factors: 24 (all providers). Gateway factors: +8 (nearcloud only).
 func BuildReport(in *ReportInput) *VerificationReport {
 	enforcedSet := make(map[string]bool, len(in.Enforced))
 	for _, name := range in.Enforced {
@@ -749,6 +752,36 @@ buildTransparencyDone:
 			addFactor(TierGateway, "gateway_compose_binding", Fail, fmt.Sprintf("gateway compose binding failed: %v", in.GatewayCompose.Err))
 		default:
 			addFactor(TierGateway, "gateway_compose_binding", Pass, "gateway sha256(app_compose) matches MRConfigID")
+		}
+
+		// Factor: gateway_event_log_integrity
+		if len(in.GatewayEventLog) == 0 { //nolint:gocritic // ifElseChain: conditions compare different fields
+			addFactor(TierGateway, "gateway_event_log_integrity", Skip, "no gateway event log entries in attestation response")
+		} else if in.GatewayTDX.ParseErr != nil {
+			addFactor(TierGateway, "gateway_event_log_integrity", Skip, "gateway TDX quote not parseable; cannot compare RTMRs")
+		} else {
+			replayed, err := ReplayEventLog(in.GatewayEventLog)
+			if err != nil {
+				addFactor(TierGateway, "gateway_event_log_integrity", Fail, fmt.Sprintf("gateway event log replay failed: %v", err))
+			} else {
+				mismatch := false
+				var detail string
+				for i := range 4 {
+					if replayed[i] != in.GatewayTDX.RTMRs[i] {
+						mismatch = true
+						detail = fmt.Sprintf("gateway RTMR[%d] mismatch: replayed %s, quote %s",
+							i, hex.EncodeToString(replayed[i][:])[:16]+"...",
+							hex.EncodeToString(in.GatewayTDX.RTMRs[i][:])[:16]+"...")
+						break
+					}
+				}
+				if mismatch {
+					addFactor(TierGateway, "gateway_event_log_integrity", Fail, detail)
+				} else {
+					addFactor(TierGateway, "gateway_event_log_integrity", Pass,
+						fmt.Sprintf("gateway event log replayed (%d entries), all 4 RTMRs match quote", len(in.GatewayEventLog)))
+				}
+			}
 		}
 	}
 

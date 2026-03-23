@@ -358,6 +358,15 @@ var factorRegistry = []factorInfo{
 			"manifest matches the MR_CONFIG_ID field in the gateway's TDX quote, " +
 			"binding the gateway's deployment manifest to its hardware attestation.",
 	},
+	{
+		Name:    "gateway_event_log_integrity",
+		Tier:    4,
+		Summary: "Gateway event log replayed, RTMRs match quote",
+		Description: "Replays the gateway's TDX event log entries to recompute " +
+			"the four RTMR values, then compares them against the RTMRs in the " +
+			"gateway's TDX quote. Ensures the gateway's runtime measurement " +
+			"history has not been tampered with.",
+	},
 }
 
 // tierRegistry describes the verification tiers.
@@ -400,7 +409,7 @@ var tierRegistry = []tierInfo{
 		Number: 4,
 		Name:   "Gateway Attestation",
 		Label:  "Tier 4: Gateway Attestation",
-		Description: "Factors 25-31. Only applies to the nearcloud provider " +
+		Description: "Factors 25-32. Only applies to the nearcloud provider " +
 			"(cloud-api.near.ai). Verifies the API gateway itself runs in " +
 			"an Intel TDX enclave with its own TDX quote, certificate chain, " +
 			"and compose binding. This proves all traffic is routed through " +
