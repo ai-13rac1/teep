@@ -334,3 +334,66 @@ func TestNegativeCacheRecordEviction(t *testing.T) {
 		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
 	}
 }
+
+// --------------------------------------------------------------------------
+// SigningKeyCache tests
+// --------------------------------------------------------------------------
+
+func TestSigningKeyCacheGetPutMiss(t *testing.T) {
+	c := NewSigningKeyCache(time.Minute)
+
+	// Miss on empty cache.
+	if _, ok := c.Get("venice", "test-model"); ok {
+		t.Error("Get on empty cache returned ok=true")
+	}
+
+	c.Put("venice", "test-model", "04abcdef...")
+	t.Logf("put signing key for venice/test-model")
+
+	// Hit after put.
+	got, ok := c.Get("venice", "test-model")
+	if !ok {
+		t.Fatal("Get after Put returned ok=false")
+	}
+	t.Logf("got signing key: %s", got)
+	if got != "04abcdef..." {
+		t.Errorf("Get returned %q, want %q", got, "04abcdef...")
+	}
+
+	// Different model must miss.
+	if _, ok := c.Get("venice", "other-model"); ok {
+		t.Error("Get for different model returned ok=true")
+	}
+
+	// Different provider must miss.
+	if _, ok := c.Get("nearai", "test-model"); ok {
+		t.Error("Get for different provider returned ok=true")
+	}
+}
+
+func TestSigningKeyCacheTTLExpiry(t *testing.T) {
+	c := NewSigningKeyCache(time.Nanosecond)
+	c.Put("p", "m", "04abcdef...")
+
+	// Any measurable time > 1ns passes between Put and Get.
+	if _, ok := c.Get("p", "m"); ok {
+		t.Error("Get after TTL expiry returned ok=true")
+	}
+	t.Log("signing key expired as expected")
+}
+
+func TestSigningKeyCachePutEviction(t *testing.T) {
+	c := NewSigningKeyCache(time.Nanosecond) // Everything expires instantly.
+	for i := range 1001 {
+		c.Put("p", fmt.Sprintf("m-%d", i), "key")
+	}
+	t.Logf("signing key cache Len before eviction trigger = %d", c.Len())
+
+	// Next Put triggers eviction of all expired entries.
+	c.Put("p", "final", "key")
+	t.Logf("signing key cache Len after eviction = %d", c.Len())
+
+	if c.Len() > 5 {
+		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
+	}
+}

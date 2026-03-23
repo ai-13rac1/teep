@@ -120,8 +120,8 @@ type cacheEntry struct {
 }
 
 // Cache stores expensive attestation verification results keyed by
-// provider+model. The signing key is intentionally NOT cached — each E2EE
-// session fetches a fresh signing key to prevent TOCTOU with key rotation.
+// provider+model. The signing key is cached separately in SigningKeyCache
+// with a shorter TTL to avoid re-fetching attestation on every E2EE request.
 type Cache struct {
 	mu      sync.RWMutex
 	entries map[cacheKey]*cacheEntry
@@ -244,6 +244,67 @@ func (c *NegativeCache) Record(provider, model string) {
 
 // Len returns the number of entries in the negative cache (including expired ones).
 func (c *NegativeCache) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.entries)
+}
+
+// signingKeyEntry stores a REPORTDATA-verified signing key and fetch time.
+type signingKeyEntry struct {
+	signingKey string
+	fetchedAt  time.Time
+}
+
+// SigningKeyCache caches REPORTDATA-verified signing keys by provider+model.
+// The signing key is bound to the TDX quote via REPORTDATA; it only changes
+// on VM restart (new TDX quote). A short TTL (e.g. 1 minute) avoids
+// re-fetching attestation on every E2EE request while remaining conservative.
+type SigningKeyCache struct {
+	mu      sync.RWMutex
+	entries map[cacheKey]*signingKeyEntry
+	ttl     time.Duration
+}
+
+// NewSigningKeyCache returns a SigningKeyCache with the specified TTL.
+func NewSigningKeyCache(ttl time.Duration) *SigningKeyCache {
+	return &SigningKeyCache{
+		entries: make(map[cacheKey]*signingKeyEntry),
+		ttl:     ttl,
+	}
+}
+
+// Get returns the cached signing key for the given provider and model,
+// or ("", false) if absent or expired.
+func (c *SigningKeyCache) Get(provider, model string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.entries[cacheKey{provider, model}]
+	if !ok || time.Since(e.fetchedAt) > c.ttl {
+		return "", false
+	}
+	return e.signingKey, true
+}
+
+// Put stores a signing key for the given provider and model.
+func (c *SigningKeyCache) Put(provider, model, signingKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) > maxCacheEntries {
+		now := time.Now()
+		for k, e := range c.entries {
+			if now.Sub(e.fetchedAt) > c.ttl {
+				delete(c.entries, k)
+			}
+		}
+	}
+	c.entries[cacheKey{provider, model}] = &signingKeyEntry{
+		signingKey: signingKey,
+		fetchedAt:  time.Now(),
+	}
+}
+
+// Len returns the number of entries in the signing key cache (including expired).
+func (c *SigningKeyCache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)

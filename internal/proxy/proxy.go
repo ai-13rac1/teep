@@ -48,6 +48,10 @@ const (
 	// negativeCacheTTL is how long a failed attestation blocks retries.
 	negativeCacheTTL = 30 * time.Second
 
+	// signingKeyCacheTTL is how long a REPORTDATA-verified signing key is
+	// reused for E2EE without re-fetching attestation.
+	signingKeyCacheTTL = 1 * time.Minute
+
 	// upstreamNonStreamTimeout is the context deadline for non-streaming
 	// upstream requests. Must be generous — attestation + E2EE setup can
 	// consume 20+ seconds before the upstream request even starts, and
@@ -122,15 +126,16 @@ type chatMessage struct {
 
 // Server is the teep proxy HTTP server.
 type Server struct {
-	cfg            *config.Config
-	providers      map[string]*provider.Provider // provider name → Provider
-	cache          *attestation.Cache
-	negCache       *attestation.NegativeCache
-	spkiCache      *attestation.SPKICache
-	mux            *http.ServeMux
-	attestClient   *http.Client // for attestation fetches
-	upstreamClient *http.Client // for chat completions forwards
-	stats          stats
+	cfg             *config.Config
+	providers       map[string]*provider.Provider // provider name → Provider
+	cache           *attestation.Cache
+	negCache        *attestation.NegativeCache
+	signingKeyCache *attestation.SigningKeyCache
+	spkiCache       *attestation.SPKICache
+	mux             *http.ServeMux
+	attestClient    *http.Client // for attestation fetches
+	upstreamClient  *http.Client // for chat completions forwards
+	stats           stats
 }
 
 // New builds a Server from cfg. Providers are wired with their Attester and
@@ -138,15 +143,19 @@ type Server struct {
 func New(cfg *config.Config) (*Server, error) {
 	spkiCache := attestation.NewSPKICache()
 	s := &Server{
-		cfg:            cfg,
-		providers:      make(map[string]*provider.Provider, len(cfg.Providers)),
-		cache:          attestation.NewCache(attestationCacheTTL),
-		negCache:       attestation.NewNegativeCache(negativeCacheTTL),
-		spkiCache:      spkiCache,
-		mux:            http.NewServeMux(),
-		attestClient:   config.NewAttestationClient(cfg.Offline),
-		upstreamClient: tlsct.NewHTTPClientWithTransport(0, &http.Transport{IdleConnTimeout: 90 * time.Second}, !cfg.Offline),
-		stats:          stats{startTime: time.Now()},
+		cfg:             cfg,
+		providers:       make(map[string]*provider.Provider, len(cfg.Providers)),
+		cache:           attestation.NewCache(attestationCacheTTL),
+		negCache:        attestation.NewNegativeCache(negativeCacheTTL),
+		signingKeyCache: attestation.NewSigningKeyCache(signingKeyCacheTTL),
+		spkiCache:       spkiCache,
+		mux:             http.NewServeMux(),
+		attestClient:    config.NewAttestationClient(cfg.Offline),
+		upstreamClient: tlsct.NewHTTPClientWithTransport(0, &http.Transport{
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		}, !cfg.Offline),
+		stats: stats{startTime: time.Now()},
 	}
 
 	for name, cp := range cfg.Providers {
@@ -403,6 +412,12 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Sigstore:   sigstoreResults,
 		Rekor:      rekorResults,
 	})
+	if raw.SigningKey != "" {
+		if prev, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok && prev != raw.SigningKey {
+			slog.Warn("signing key rotated (VM restart?)", "provider", prov.Name, "model", upstreamModel)
+		}
+		s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
+	}
 	return report, raw
 }
 
@@ -711,30 +726,37 @@ func (s *Server) buildUpstreamBody(
 
 	raw := freshRaw
 	if raw == nil {
-		// Cache hit path: fetch a fresh attestation to get the current signing key.
-		// CRITICAL: Re-verify REPORTDATA binding on this fresh response.
-		// Without this, a MITM could substitute the signing key in the second
-		// fetch while the cached report (from the first fetch) still shows
-		// tdx_reportdata_binding as Pass.
-		slog.Debug("E2EE key exchange: fetching fresh attestation (cache hit path)", "provider", prov.Name, "model", upstreamModel)
-		nonce := attestation.NewNonce()
-		var err error
-		raw, err = prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
-		if err != nil {
-			return nil, nil, fmt.Errorf("fetch signing key: %w", err)
-		}
-		if raw.IntelQuote == "" {
-			return nil, nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
-		}
-		tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, true)
-		if tdxResult.ParseErr != nil {
-			return nil, nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
-		}
-		if prov.ReportDataVerifier != nil {
-			_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+		// Cache hit path: try the signing key cache before re-fetching attestation.
+		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
+			slog.Debug("E2EE key exchange: using cached signing key", "provider", prov.Name, "model", upstreamModel)
+			raw = &attestation.RawAttestation{SigningKey: cachedKey}
+		} else {
+			// Signing key not cached: fetch fresh attestation and re-verify.
+			slog.Debug("E2EE key exchange: fetching fresh attestation (cache hit path)", "provider", prov.Name, "model", upstreamModel)
+			nonce := attestation.NewNonce()
+			var err error
+			raw, err = prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 			if err != nil {
-				return nil, nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+				return nil, nil, fmt.Errorf("fetch signing key: %w", err)
 			}
+			if raw.IntelQuote == "" {
+				return nil, nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
+			}
+			// offline=true: only REPORTDATA binding is needed here, not full
+			// online verification (Intel PCS collateral). The primary
+			// fetchAndVerify() path already did online verification for
+			// the cached report.
+			tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, true)
+			if tdxResult.ParseErr != nil {
+				return nil, nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
+			}
+			if prov.ReportDataVerifier != nil {
+				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+				if err != nil {
+					return nil, nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+				}
+			}
+			s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
 		}
 	} else {
 		slog.Debug("E2EE key exchange: reusing attestation from verification (cache miss path)", "provider", prov.Name, "model", upstreamModel)
