@@ -424,13 +424,13 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	if scPolicy != nil {
 		if len(in.ImageRepos) == 0 {
 			addFactor("build_transparency_log", Fail,
-				"NearAI policy: no attested image repositories extracted from compose")
+				"No attested image repositories extracted from compose")
 			goto buildTransparencyDone
 		}
 		for _, repo := range in.ImageRepos {
 			if !containsFold(repo, scPolicy.AllowedImageRepos) {
 				addFactor("build_transparency_log", Fail,
-					fmt.Sprintf("NearAI policy: image repository %q is not in allowlist (%s)",
+					fmt.Sprintf("Container allowlist policy: image repository %q is not in allowlist (%s)",
 						repo, strings.Join(scPolicy.AllowedImageRepos, ", ")))
 				goto buildTransparencyDone
 			}
@@ -440,7 +440,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	if len(in.Rekor) == 0 {
 		if scPolicy != nil {
 			addFactor("build_transparency_log", Fail,
-				"NearAI policy: no Rekor provenance fetched for attested image digests")
+				"Container check: no Rekor provenance fetched for attested image digests")
 			goto buildTransparencyDone
 		}
 		if in.Raw.ComposeHash != "" {
@@ -473,7 +473,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			if scPolicy != nil {
 				if !containsFold(r.OIDCIssuer, scPolicy.AllowedOIDCIssuers) {
 					failed = true
-					detail = "NearAI policy: unexpected OIDC issuer: " + r.OIDCIssuer
+					detail = "Container signer checks: unexpected OIDC issuer: " + r.OIDCIssuer
 					break
 				}
 
@@ -482,7 +482,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 				if !containsFold(repoID, scPolicy.AllowedSourceRepos) &&
 					!containsFold(repoURL, scPolicy.AllowedSourceRepos) {
 					failed = true
-					detail = fmt.Sprintf("NearAI policy: unexpected Sigstore signer identity (repo=%q repo_url=%q)", repoID, repoURL)
+					detail = fmt.Sprintf("Container signer check: unexpected Sigstore signer identity (repo=%q repo_url=%q)", repoID, repoURL)
 					break
 				}
 			} else if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
@@ -505,10 +505,10 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			addFactor("build_transparency_log", Fail, detail)
 		case scPolicy != nil && verified > 0 && fallbackOnly > 0:
 			addFactor("build_transparency_log", Pass,
-				fmt.Sprintf("NearAI policy: %d image(s) have acceptable Rekor signer provenance; %d image(s) rely on repository allowlist + Sigstore presence", verified, fallbackOnly))
+				fmt.Sprintf("Container policy check: %d image(s) have acceptable Rekor signer provenance; %d image(s) rely on repository allowlist + Sigstore presence", verified, fallbackOnly))
 		case scPolicy != nil && verified == 0 && fallbackOnly > 0:
 			addFactor("build_transparency_log", Pass,
-				fmt.Sprintf("NearAI policy: no Fulcio provenance for %d image(s); repository allowlist + Sigstore presence accepted", fallbackOnly))
+				fmt.Sprintf("Container policy check: no Fulcio provenance for %d image(s); repository allowlist + Sigstore presence accepted", fallbackOnly))
 		case verified > 0:
 			addFactor("build_transparency_log", Pass,
 				fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s)", verified, len(in.Rekor), detail))
