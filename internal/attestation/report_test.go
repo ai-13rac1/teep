@@ -873,8 +873,8 @@ func TestBuildReportNearAISupplyChainPolicyPass(t *testing.T) {
 		Digest:        sigResults[0].Digest,
 		HasCert:       true,
 		OIDCIssuer:    "https://token.actions.githubusercontent.com",
-		SourceRepo:    "nearai/router",
-		SourceRepoURL: "https://github.com/nearai/router",
+		SourceRepo:    "nearai/compose-manager",
+		SourceRepoURL: "https://github.com/nearai/compose-manager",
 		SourceCommit:  "0123456789abcdef",
 		RunnerEnv:     "github-hosted",
 	}}
@@ -884,7 +884,7 @@ func TestBuildReportNearAISupplyChainPolicyPass(t *testing.T) {
 		Model:      "m",
 		Raw:        raw,
 		Nonce:      nonce,
-		ImageRepos: []string{"ghcr.io/nearai/router"},
+		ImageRepos: []string{"nearaidev/compose-manager"},
 		Sigstore:   sigResults,
 		Rekor:      rekor,
 	})
@@ -937,7 +937,7 @@ func TestBuildReportNearAISupplyChainPolicyRejectsSigner(t *testing.T) {
 		Model:      "m",
 		Raw:        raw,
 		Nonce:      nonce,
-		ImageRepos: []string{"ghcr.io/nearai/router"},
+		ImageRepos: []string{"nearaidev/compose-manager"},
 		Sigstore:   sigResults,
 		Rekor:      rekor,
 	})

@@ -428,10 +428,10 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			goto buildTransparencyDone
 		}
 		for _, repo := range in.ImageRepos {
-			if !hasAnyPrefixFold(repo, scPolicy.AllowedImageRepoPrefixes) {
+			if !containsFold(repo, scPolicy.AllowedImageRepos) {
 				addFactor("build_transparency_log", Fail,
 					fmt.Sprintf("NearAI policy: image repository %q is not in allowlist (%s)",
-						repo, strings.Join(scPolicy.AllowedImageRepoPrefixes, ", ")))
+						repo, strings.Join(scPolicy.AllowedImageRepos, ", ")))
 				goto buildTransparencyDone
 			}
 		}
@@ -471,7 +471,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			}
 
 			if scPolicy != nil {
-				if !hasAnyPrefixFold(r.OIDCIssuer, scPolicy.AllowedOIDCIssuers) {
+				if !containsFold(r.OIDCIssuer, scPolicy.AllowedOIDCIssuers) {
 					failed = true
 					detail = "NearAI policy: unexpected OIDC issuer: " + r.OIDCIssuer
 					break
@@ -479,8 +479,8 @@ func BuildReport(in *ReportInput) *VerificationReport {
 
 				repoID := strings.TrimSpace(r.SourceRepo)
 				repoURL := strings.TrimSpace(r.SourceRepoURL)
-				if !hasAnyPrefixFold(repoID, scPolicy.AllowedSourceRepoPrefixes) &&
-					!hasAnyPrefixFold(repoURL, scPolicy.AllowedSourceRepoPrefixes) {
+				if !containsFold(repoID, scPolicy.AllowedSourceRepos) &&
+					!containsFold(repoURL, scPolicy.AllowedSourceRepos) {
 					failed = true
 					detail = fmt.Sprintf("NearAI policy: unexpected Sigstore signer identity (repo=%q repo_url=%q)", repoID, repoURL)
 					break
@@ -652,31 +652,26 @@ buildTransparencyDone:
 }
 
 type supplyChainPolicy struct {
-	AllowedImageRepoPrefixes  []string
-	AllowedOIDCIssuers        []string
-	AllowedSourceRepoPrefixes []string
+	AllowedImageRepos  []string
+	AllowedOIDCIssuers []string
+	AllowedSourceRepos []string
 }
 
 func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "nearai":
 		return &supplyChainPolicy{
-			AllowedImageRepoPrefixes: []string{
-				"ghcr.io/nearai/",
-				"nearaidev/",
-				"datadog/",
-				"certbot/",
+			// Exact image names currently attested in NearAI compose.
+			AllowedImageRepos: []string{
+				"datadog/agent",
+				"certbot/dns-cloudflare",
+				"nearaidev/compose-manager",
 			},
 			AllowedOIDCIssuers: []string{"https://token.actions.githubusercontent.com"},
-			AllowedSourceRepoPrefixes: []string{
-				"nearai/",
-				"https://github.com/nearai/",
-				"datadog/",
-				"https://github.com/datadog/",
-				"certbot/",
-				"https://github.com/certbot/",
-				"cloudflare/",
-				"https://github.com/cloudflare/",
+			// Exact Fulcio identities currently observed for NearAI-owned images.
+			AllowedSourceRepos: []string{
+				"nearai/compose-manager",
+				"https://github.com/nearai/compose-manager",
 			},
 		}
 	default:
@@ -684,13 +679,13 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 	}
 }
 
-func hasAnyPrefixFold(value string, prefixes []string) bool {
+func containsFold(value string, allowed []string) bool {
 	v := strings.ToLower(strings.TrimSpace(value))
 	if v == "" {
 		return false
 	}
-	for _, p := range prefixes {
-		if strings.HasPrefix(v, strings.ToLower(strings.TrimSpace(p))) {
+	for _, entry := range allowed {
+		if v == strings.ToLower(strings.TrimSpace(entry)) {
 			return true
 		}
 	}
