@@ -1,4 +1,4 @@
-# Section 03 — TDX Quote Structure & Signature Verification
+# Section 04 — TDX Quote Structure & Signature Verification
 
 ## Scope
 

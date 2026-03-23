@@ -1,4 +1,4 @@
-# Section 10 — Proof-of-Cloud Verification
+# Section 11 — Proof-of-Cloud Verification
 
 ## Scope
 

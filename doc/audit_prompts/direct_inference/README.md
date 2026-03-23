@@ -8,23 +8,43 @@ It is intended to be delegated to sub-agents in self-contained sections.
 
 For each delegated task, provide exactly:
 1. [`00_shared_preamble.md`](00_shared_preamble.md)
-2. one numbered section file (for example [`03_tdx_quote.md`](03_tdx_quote.md))
+2. one grouped bundle of numbered section files (recommended), or one numbered section file (fallback)
 
-Do not send multiple numbered sections to the same sub-agent unless intentionally combining scopes.
+Preferred mode is grouped handoff to reduce sub-agent count while keeping strongly coupled checks together.
 
-## Available Delegated Sections
+## Recommended Grouped Handoff (Fewer Sub-Agents)
 
-1. [`01_model_routing.md`](01_model_routing.md)
-2. [`02_attestation_fetch.md`](02_attestation_fetch.md)
-3. [`03_tdx_quote.md`](03_tdx_quote.md)
-4. [`04_tdx_measurements.md`](04_tdx_measurements.md)
-5. [`05_cvm_image.md`](05_cvm_image.md)
-6. [`06_nvidia_tee.md`](06_nvidia_tee.md)
-7. [`07_tls_binding.md`](07_tls_binding.md)
-8. [`08_event_log.md`](08_event_log.md)
-9. [`09_policy_caching.md`](09_policy_caching.md)
-10. [`10_proof_of_cloud.md`](10_proof_of_cloud.md)
-11. [`11_transport_safety.md`](11_transport_safety.md)
+Use 5 sub-agents with these bundles:
+
+1. Baseline Input Surface
+	- [`01_model_routing.md`](01_model_routing.md)
+	- [`02_attestation_fetch.md`](02_attestation_fetch.md)
+	- [`03_transport_safety.md`](03_transport_safety.md)
+	- Why grouped: endpoint/domain selection, attestation fetch/parse, and request-surface/resource bounds are evaluated on the same ingress path.
+
+2. TDX Core Integrity
+	- [`04_tdx_quote.md`](04_tdx_quote.md)
+	- [`05_tdx_measurements.md`](05_tdx_measurements.md)
+	- [`06_event_log.md`](06_event_log.md)
+	- Why grouped: quote parsing feeds measurement fields and RTMR replay checks; findings overlap on baseline integrity and fail-closed semantics.
+
+3. Binding & Runtime Enforcement
+	- [`07_tls_binding.md`](07_tls_binding.md)
+	- [`09_policy_caching.md`](09_policy_caching.md)
+	- Why grouped: REPORTDATA/TLS pinning outputs are enforced through factor gating, cache behavior, and offline-mode policy decisions.
+
+4. Supply-Chain Provenance
+	- [`08_cvm_image.md`](08_cvm_image.md)
+	- Why grouped: compose-to-MRCONFIGID binding and Sigstore/Rekor provenance form one supply-chain verification chain.
+
+5. Auxiliary Attestation Signals
+	- [`10_nvidia_tee.md`](10_nvidia_tee.md)
+	- [`11_proof_of_cloud.md`](11_proof_of_cloud.md)
+	- Why grouped: both are auxiliary/adjacent trust signals with weaker coupling to the core TDX+binding enforcement path.
+
+## Single-Section Fallback
+
+If finer parallelism is needed, dispatch any single numbered section with [`00_shared_preamble.md`](00_shared_preamble.md).
 
 ## Final Report Assembly Rules
 

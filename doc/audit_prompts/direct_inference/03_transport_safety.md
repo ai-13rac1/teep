@@ -1,4 +1,4 @@
-# Section 11 — HTTP Request Construction, Resource Limits & Sensitive Data
+# Section 03 — HTTP Request Construction, Resource Limits & Sensitive Data
 
 ## Scope
 

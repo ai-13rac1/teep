@@ -1,4 +1,4 @@
-# Section 08 — Event Log Integrity & RTMR Replay
+# Section 06 — Event Log Integrity & RTMR Replay
 
 ## Scope
 

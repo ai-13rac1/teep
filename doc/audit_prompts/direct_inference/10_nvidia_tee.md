@@ -1,4 +1,4 @@
-# Section 06 — NVIDIA TEE Verification Depth
+# Section 10 — NVIDIA TEE Verification Depth
 
 ## Scope
 

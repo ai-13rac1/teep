@@ -1,4 +1,4 @@
-# Section 04 — TDX Measurement Fields & Policy Expectations
+# Section 05 — TDX Measurement Fields & Policy Expectations
 
 ## Scope
 

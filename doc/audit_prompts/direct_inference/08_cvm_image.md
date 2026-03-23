@@ -1,4 +1,4 @@
-# Section 05 — CVM Image Binding & Component Provenance
+# Section 08 — CVM Image Binding & Component Provenance
 
 ## Scope
 
