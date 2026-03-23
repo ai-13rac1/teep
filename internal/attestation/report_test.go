@@ -515,7 +515,7 @@ func TestBuildReportTdxTcbCurrentUpToDate(t *testing.T) {
 	}
 }
 
-// TestBuildReportTdxTcbCurrentSWHardening verifies tdx_tcb_current Pass for SWHardeningNeeded.
+// TestBuildReportTdxTcbCurrentSWHardening verifies tdx_tcb_current Fail for SWHardeningNeeded (F-17).
 func TestBuildReportTdxTcbCurrentSWHardening(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
@@ -527,8 +527,8 @@ func TestBuildReportTdxTcbCurrentSWHardening(t *testing.T) {
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, TDX: tdxResult})
 
 	f := findFactor(t, report, "tdx_tcb_current")
-	if f.Status != Pass {
-		t.Errorf("tdx_tcb_current SWHardeningNeeded: got %s, want PASS; detail: %s", f.Status, f.Detail)
+	if f.Status != Fail {
+		t.Errorf("tdx_tcb_current SWHardeningNeeded: got %s, want FAIL; detail: %s", f.Status, f.Detail)
 	}
 }
 

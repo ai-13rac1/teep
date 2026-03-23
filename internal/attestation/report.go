@@ -289,11 +289,15 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		}
 		addFactor("tdx_tcb_current", Pass, detail)
 	} else if in.TDX.TcbStatus == pcs.TcbComponentStatusSwHardeningNeeded || in.TDX.TcbStatus == pcs.TcbComponentStatusConfigurationAndSWHardeningNeeded {
-		detail := fmt.Sprintf("TCB status: %s", in.TDX.TcbStatus)
+		// F-17: SWHardeningNeeded / ConfigurationAndSWHardeningNeeded indicate that known
+		// firmware vulnerabilities require software mitigations. Treat as Fail so operators
+		// see the advisory; tdx_tcb_current is not in DefaultEnforced so this does not
+		// block the proxy unless explicitly configured.
+		detail := fmt.Sprintf("TCB status: %s — software/config mitigations required for known advisories", in.TDX.TcbStatus)
 		if len(in.TDX.AdvisoryIDs) > 0 {
-			detail += fmt.Sprintf(" (advisories: %s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
+			detail += fmt.Sprintf(" (%s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
 		}
-		addFactor("tdx_tcb_current", Pass, detail)
+		addFactor("tdx_tcb_current", Fail, detail)
 	} else if in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDate || in.TDX.TcbStatus == pcs.TcbComponentStatusRevoked || in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDateConfigurationNeeded {
 		detail := fmt.Sprintf("TCB status: %s — firmware has known vulnerabilities", in.TDX.TcbStatus)
 		if len(in.TDX.AdvisoryIDs) > 0 {
