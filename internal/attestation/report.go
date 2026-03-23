@@ -117,7 +117,7 @@ var KnownFactors = []string{
 	// Gateway factors (nearcloud only).
 	"gateway_nonce_match", "gateway_tdx_quote_present", "gateway_tdx_quote_structure",
 	"gateway_tdx_cert_chain", "gateway_tdx_quote_signature", "gateway_tdx_debug_disabled",
-	"gateway_tdx_reportdata_binding", "gateway_compose_binding",
+	"gateway_tdx_reportdata_binding", "gateway_compose_binding", "gateway_cpu_id_registry",
 	"gateway_event_log_integrity",
 }
 
@@ -152,6 +152,7 @@ type ReportInput struct {
 
 	// Gateway fields — only populated for nearcloud provider.
 	GatewayTDX      *TDXVerifyResult
+	GatewayPoC      *PoCResult
 	GatewayNonceHex string // echoed request_nonce from gateway response
 	GatewayNonce    Nonce  // nonce we sent to the gateway
 	GatewayCompose  *ComposeBindingResult
@@ -751,6 +752,26 @@ buildTransparencyDone:
 			addFactor(TierGateway, "gateway_compose_binding", Fail, fmt.Sprintf("gateway compose binding failed: %v", in.GatewayCompose.Err))
 		default:
 			addFactor(TierGateway, "gateway_compose_binding", Pass, "gateway sha256(app_compose) matches MRConfigID")
+		}
+
+		// Factor: gateway_cpu_id_registry
+		switch {
+		case in.GatewayPoC != nil && in.GatewayPoC.Registered:
+			addFactor(TierGateway, "gateway_cpu_id_registry", Pass,
+				fmt.Sprintf("gateway Proof of Cloud: registered (%s)", in.GatewayPoC.Label))
+		case in.GatewayPoC != nil && in.GatewayPoC.Err != nil:
+			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
+				fmt.Sprintf("gateway Proof of Cloud query failed: %v", in.GatewayPoC.Err))
+		case in.GatewayPoC != nil && !in.GatewayPoC.Registered:
+			addFactor(TierGateway, "gateway_cpu_id_registry", Fail,
+				"gateway hardware not found in Proof of Cloud registry; paste gateway intel_quote from --save-dir at proofofcloud.org to verify")
+		case in.GatewayTDX != nil && in.GatewayTDX.PPID != "":
+			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
+				fmt.Sprintf("gateway PPID extracted (%s...) but offline; use default mode to check Proof of Cloud",
+					in.GatewayTDX.PPID[:min(8, len(in.GatewayTDX.PPID))]))
+		default:
+			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
+				"gateway CPU ID registry check not available")
 		}
 
 		// Factor: gateway_event_log_integrity
