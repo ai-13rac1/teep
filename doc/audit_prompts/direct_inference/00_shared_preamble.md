@@ -88,3 +88,6 @@ The following apply across all sections and should be evaluated wherever relevan
 - **Bounded resource consumption**: All external reads must be size-bounded to prevent memory exhaustion DoS. Caches must have maximum entry limits and bounded TTLs.
 - **Sensitive data handling**: API keys must not be logged in plaintext (redact to first-N characters). Config file permissions should be checked. Attestation nonces must not be reused.
 
+## Report Output
+
+Write your report to a *file*, and inform the orchestrator of the location of this file. Do *not* provide the full contents of your report to the orchestrator as text.
