@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 )
 
@@ -63,7 +64,7 @@ func (l *ModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("venice: models endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("venice: models endpoint returned HTTP %d: %s", resp.StatusCode, truncate(string(body), 256))
 	}
 
 	var mr modelsResponse
@@ -75,6 +76,7 @@ func (l *ModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error)
 	for _, raw := range mr.Data {
 		var f modelFilter
 		if err := json.Unmarshal(raw, &f); err != nil {
+			slog.Warn("venice: skipping model entry", "err", err)
 			continue
 		}
 		if f.ModelSpec.Capabilities.SupportsTeeAttestation || f.ModelSpec.Capabilities.SupportsE2EE {
@@ -82,4 +84,12 @@ func (l *ModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error)
 		}
 	}
 	return models, nil
+}
+
+// truncate returns s truncated to n characters with "..." appended if needed.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

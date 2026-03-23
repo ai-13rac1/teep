@@ -248,8 +248,7 @@ func fromConfig(
 			policy,
 			rdVerifier,
 		)
-		nearModelLister := neardirect.NewModelLister("https://cloud-api.near.ai", cp.APIKey, config.NewAttestationClient(offline))
-		p.ModelLister = nearModelLister
+		p.ModelLister = neardirect.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
 		rdVerifier := neardirect.ReportDataVerifier{}
@@ -264,7 +263,7 @@ func fromConfig(
 			policy,
 			rdVerifier,
 		)
-		p.ModelLister = nearcloud.NewModelLister(neardirect.NewModelLister("https://cloud-api.near.ai", cp.APIKey, config.NewAttestationClient(offline)))
+		p.ModelLister = neardirect.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud)", cp.Name)
 	}
@@ -976,31 +975,37 @@ func (s *Server) relayReassembledNonStream(w http.ResponseWriter, body io.Reader
 	_, _ = w.Write(result)
 }
 
+// modelsListResponse is the OpenAI-compatible response for GET /v1/models.
+type modelsListResponse struct {
+	Object string            `json:"object"`
+	Data   []json.RawMessage `json:"data"`
+}
+
+// modelsTimeout is the context deadline for upstream model listing calls.
+const modelsTimeout = 30 * time.Second
+
 // handleModels returns available models from all configured providers.
 // Each provider's model entries are relayed as raw JSON to preserve all
 // upstream fields (pricing, capabilities, constraints, etc.).
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	var all []json.RawMessage
+	ctx, cancel := context.WithTimeout(r.Context(), modelsTimeout)
+	defer cancel()
+
+	all := make([]json.RawMessage, 0)
 	for _, p := range s.providers {
 		if p.ModelLister == nil {
 			continue
 		}
-		models, err := p.ModelLister.ListModels(r.Context())
+		models, err := p.ModelLister.ListModels(ctx)
 		if err != nil {
 			slog.Warn("model listing failed", "provider", p.Name, "err", err)
 			continue
 		}
 		all = append(all, models...)
 	}
-	if all == nil {
-		all = []json.RawMessage{} // ensure JSON "data": [] not null
-	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(struct {
-		Object string            `json:"object"`
-		Data   []json.RawMessage `json:"data"`
-	}{Object: "list", Data: all}); err != nil {
+	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: all}); err != nil {
 		slog.Error("encoding models response", "err", err)
 	}
 }

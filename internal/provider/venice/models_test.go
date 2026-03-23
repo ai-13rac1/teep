@@ -1,11 +1,14 @@
-package venice
+package venice_test
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/13rac1/teep/internal/provider/venice"
 )
 
 const testModelsJSON = `{
@@ -63,7 +66,7 @@ func TestModelLister_ListModels(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	lister := NewModelLister(srv.URL, "test-key", srv.Client())
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
 	models, err := lister.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -121,7 +124,7 @@ func TestModelLister_EmptyResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	lister := NewModelLister(srv.URL, "test-key", srv.Client())
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
 	models, err := lister.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -132,16 +135,84 @@ func TestModelLister_EmptyResponse(t *testing.T) {
 	}
 }
 
-func TestModelLister_HTTPError(t *testing.T) {
+func TestModelLister_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not json`))
 	}))
 	defer srv.Close()
 
-	lister := NewModelLister(srv.URL, "test-key", srv.Client())
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
 	_, err := lister.ListModels(context.Background())
 	t.Logf("error: %v", err)
 	if err == nil {
-		t.Error("expected error for HTTP 500")
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("error %q does not mention unmarshal", err)
+	}
+}
+
+func TestModelLister_CancelledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := lister.ListModels(ctx)
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestModelLister_HTTPErrorLongBody(t *testing.T) {
+	longBody := strings.Repeat("x", 500)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(longBody))
+	}))
+	defer srv.Close()
+
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
+	_, err := lister.ListModels(context.Background())
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for HTTP 502")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("error %q does not mention status code", err)
+	}
+	// Body should be truncated to 256 chars + "..."
+	if !strings.Contains(err.Error(), "...") {
+		t.Errorf("error %q does not show truncation", err)
+	}
+	if strings.Contains(err.Error(), longBody) {
+		t.Errorf("error contains full 500-char body, should be truncated")
+	}
+}
+
+func TestModelLister_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"service unavailable"}`))
+	}))
+	defer srv.Close()
+
+	lister := venice.NewModelLister(srv.URL, "test-key", srv.Client())
+	_, err := lister.ListModels(context.Background())
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error %q does not mention status code", err)
+	}
+	if !strings.Contains(err.Error(), "service unavailable") {
+		t.Errorf("error %q does not include response body", err)
 	}
 }

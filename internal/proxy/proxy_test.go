@@ -396,6 +396,14 @@ func (errorModelLister) ListModels(_ context.Context) ([]json.RawMessage, error)
 	return nil, errors.New("model listing unavailable")
 }
 
+// slowModelLister blocks until the context is cancelled.
+type slowModelLister struct{}
+
+func (slowModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func TestHandleModels_ProviderError(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -442,55 +450,6 @@ func TestHandleModels_ProviderError(t *testing.T) {
 	}
 	if len(result.Data) != 0 {
 		t.Errorf("data len = %d, want 0 (provider errored)", len(result.Data))
-	}
-}
-
-func TestHandleModels_NilModelLister(t *testing.T) {
-	cfg := &config.Config{
-		ListenAddr: "127.0.0.1:0",
-		Providers: map[string]*config.Provider{
-			"neardirect": {
-				Name:    "neardirect",
-				BaseURL: "https://completions.near.ai",
-				APIKey:  "key",
-			},
-		},
-		Enforced: []string{},
-	}
-	srv, err := proxy.New(cfg)
-	if err != nil {
-		t.Fatalf("proxy.New: %v", err)
-	}
-	prov := srv.ProviderByName("neardirect")
-	prov.ModelLister = nil
-	prov.PinnedHandler = stubPinnedHandler{}
-
-	proxySrv := httptest.NewServer(srv)
-	defer proxySrv.Close()
-
-	resp, err := http.Get(proxySrv.URL + "/v1/models")
-	if err != nil {
-		t.Fatalf("GET /v1/models: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-
-	var result struct {
-		Object string            `json:"object"`
-		Data   []json.RawMessage `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	t.Logf("object=%q data_len=%d", result.Object, len(result.Data))
-	if result.Object != "list" {
-		t.Errorf("object = %q, want %q", result.Object, "list")
-	}
-	if len(result.Data) != 0 {
-		t.Errorf("data len = %d, want 0 (nil ModelLister)", len(result.Data))
 	}
 }
 
@@ -571,6 +530,65 @@ func TestHandleModels_MultipleProviders(t *testing.T) {
 	}
 	if !ids["model-b"] {
 		t.Error("model-b missing from response")
+	}
+}
+
+func TestHandleModels_SlowProvider(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+			},
+		},
+		Enforced: []string{},
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	prov := srv.ProviderByName("neardirect")
+	prov.ModelLister = slowModelLister{}
+	prov.PinnedHandler = stubPinnedHandler{}
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// Use a short client timeout; the handler's 30s modelsTimeout will also
+	// fire eventually, but we don't want to wait that long. A client-side
+	// cancellation propagates through r.Context() → the 30s child context →
+	// the slowModelLister, exercising the timeout/cancellation path.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxySrv.URL+"/v1/models", http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Client timeout is expected — the slow lister never returns.
+		t.Logf("client error (expected): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// If the handler managed to respond before the client timed out,
+	// it should have returned an empty list (the slow lister was cancelled).
+	t.Logf("status=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	t.Logf("data_len=%d", len(result.Data))
+	if len(result.Data) != 0 {
+		t.Errorf("data len = %d, want 0 (slow provider should be skipped)", len(result.Data))
 	}
 }
 

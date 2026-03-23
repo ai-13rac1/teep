@@ -53,7 +53,7 @@ func (l *ModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nearai: models endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("nearai: models endpoint returned HTTP %d: %s", resp.StatusCode, truncate(string(body), 256))
 	}
 
 	var mr modelsResponse
