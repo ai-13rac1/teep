@@ -1,4 +1,4 @@
-# Shared Preamble — Direct Inference Provider Audit
+# Direct Inference Provider Audit
 
 This repository implements a proxy for private LLM inference using attestation-bound TLS pinning. The goal is to verify the remote machine runs genuine TEE hardware with verifiable software, and to prevent MITM through cryptographic binding between TLS channel identity and attestation evidence.
 
