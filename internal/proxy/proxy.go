@@ -248,7 +248,8 @@ func fromConfig(
 			policy,
 			rdVerifier,
 		)
-		p.ModelLister = neardirect.NewModelLister(resolver, "neardirect")
+		nearModelLister := neardirect.NewModelLister("https://cloud-api.near.ai", cp.APIKey, config.NewAttestationClient(offline))
+		p.ModelLister = nearModelLister
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
 		rdVerifier := neardirect.ReportDataVerifier{}
@@ -263,7 +264,7 @@ func fromConfig(
 			policy,
 			rdVerifier,
 		)
-		p.ModelLister = nearcloud.NewModelLister(offline)
+		p.ModelLister = nearcloud.NewModelLister(neardirect.NewModelLister("https://cloud-api.near.ai", cp.APIKey, config.NewAttestationClient(offline)))
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud)", cp.Name)
 	}
