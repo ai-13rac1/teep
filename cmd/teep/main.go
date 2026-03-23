@@ -28,6 +28,7 @@ import (
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearai"
+	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/venice"
 	"github.com/13rac1/teep/internal/proxy"
 )
@@ -141,8 +142,9 @@ func filterProviders(cfg *config.Config, providerName string) error {
 
 // providerEnvVars maps provider names to their API key environment variables.
 var providerEnvVars = map[string]string{
-	"venice": "VENICE_API_KEY",
-	"nearai": "NEARAI_API_KEY",
+	"venice":    "VENICE_API_KEY",
+	"nearai":    "NEARAI_API_KEY",
+	"nearcloud": "NEARAI_API_KEY",
 }
 
 // providerNotFoundError returns a descriptive error when a provider is not configured.
@@ -346,7 +348,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		}
 	}
 
-	return attestation.BuildReport(&attestation.ReportInput{
+	reportInput := &attestation.ReportInput{
 		Provider:     providerName,
 		Model:        modelName,
 		Raw:          raw,
@@ -362,7 +364,32 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		DigestToRepo: digestToRepo,
 		Sigstore:     sigstoreResults,
 		Rekor:        rekorResults,
-	})
+	}
+
+	// Gateway TDX verification — any provider that populates GatewayIntelQuote.
+	if raw.GatewayIntelQuote != "" {
+		slog.Debug("gateway TDX verification starting", "quote_len", len(raw.GatewayIntelQuote))
+		gwTDX := attestation.VerifyTDXQuote(ctx, raw.GatewayIntelQuote, nonce, offline)
+		if gwTDX.ParseErr == nil {
+			detail, rdErr := nearcloud.GatewayReportDataVerifier{}.Verify(
+				gwTDX.ReportData, raw.GatewayTLSFingerprint, nonce)
+			gwTDX.ReportDataBindingErr = rdErr
+			gwTDX.ReportDataBindingDetail = detail
+		}
+		reportInput.GatewayTDX = gwTDX
+		reportInput.GatewayNonceHex = raw.GatewayNonceHex
+		reportInput.GatewayNonce = nonce
+		reportInput.GatewayEventLog = raw.GatewayEventLog
+
+		if raw.GatewayAppCompose != "" && gwTDX.ParseErr == nil {
+			gwCompose := &attestation.ComposeBindingResult{Checked: true}
+			gwCompose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, gwTDX.MRConfigID)
+			reportInput.GatewayCompose = gwCompose
+		}
+		slog.Debug("gateway TDX verification complete")
+	}
+
+	return attestation.BuildReport(reportInput)
 }
 
 // newAttester returns the appropriate Attester for the named provider.
@@ -376,8 +403,10 @@ func newAttester(name string, cp *config.Provider, offline ...bool) provider.Att
 		return venice.NewAttester(cp.BaseURL, cp.APIKey, off)
 	case "nearai":
 		return nearai.NewAttester(cp.BaseURL, cp.APIKey, off)
+	case "nearcloud":
+		return nearcloud.NewAttester(cp.APIKey, off)
 	default:
-		slog.Error("unknown provider", "provider", name, "supported", "venice, nearai")
+		slog.Error("unknown provider", "provider", name, "supported", "venice, nearai, nearcloud")
 		os.Exit(1)
 		return nil // unreachable
 	}
@@ -387,7 +416,7 @@ func newReportDataVerifier(name string) provider.ReportDataVerifier {
 	switch name {
 	case "venice":
 		return venice.ReportDataVerifier{}
-	case "nearai":
+	case "nearai", "nearcloud":
 		return nearai.ReportDataVerifier{}
 	default:
 		return nil
@@ -401,17 +430,6 @@ func knownProviders(cfg *config.Config) string {
 		names = append(names, name)
 	}
 	return strings.Join(names, ", ")
-}
-
-// tierBoundaries defines the exclusive upper index (0-based) for each tier.
-// Factors 0-6 = Tier 1, 7-15 = Tier 2, 16-22 = Tier 3.
-var tierBoundaries = [3]struct {
-	name string
-	end  int
-}{
-	{"Tier 1: Core Attestation", 7},
-	{"Tier 2: Binding & Crypto", 16},
-	{"Tier 3: Supply Chain & Channel Integrity", 23},
 }
 
 // formatReport renders a VerificationReport as a human-readable string,
@@ -432,29 +450,25 @@ func formatReport(r *attestation.VerificationReport) string {
 		b.WriteString("\n")
 	}
 
-	start := 0
-	for _, tb := range tierBoundaries {
-		end := min(tb.end, len(r.Factors))
-		if start >= len(r.Factors) {
-			break
-		}
-
-		b.WriteString(tb.name)
-		b.WriteString("\n")
-
-		for _, f := range r.Factors[start:end] {
-			icon := statusIcon(f.Status)
-			line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
-			if f.Enforced {
-				line += "  [ENFORCED]"
+	var currentTier string
+	for _, f := range r.Factors {
+		if f.Tier != currentTier {
+			if currentTier != "" {
+				b.WriteString("\n")
 			}
-			b.WriteString(line)
+			b.WriteString(f.Tier)
 			b.WriteString("\n")
+			currentTier = f.Tier
 		}
+		icon := statusIcon(f.Status)
+		line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
+		if f.Enforced {
+			line += "  [ENFORCED]"
+		}
+		b.WriteString(line)
 		b.WriteString("\n")
-
-		start = end
 	}
+	b.WriteString("\n")
 
 	fmt.Fprintf(&b, "Score: %d/%d passed, %d skipped, %d failed\n",
 		r.Passed, r.Passed+r.Failed+r.Skipped, r.Skipped, r.Failed)
