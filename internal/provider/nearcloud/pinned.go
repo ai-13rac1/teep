@@ -190,9 +190,8 @@ func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tls.Conn, 
 	d := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: dialTimeout},
 		Config: &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         domain,
-			MinVersion:         tls.VersionTLS12,
+			ServerName: domain,
+			MinVersion: tls.VersionTLS13,
 		},
 	}
 	conn, err := d.DialContext(ctx, "tcp", domain+":443")
