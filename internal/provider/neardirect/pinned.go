@@ -354,13 +354,13 @@ func (h *PinnedHandler) attestOnConn(
 		imageRepos = attestation.ExtractImageRepositories(source)
 		digestToRepo = attestation.ExtractImageDigestToRepoMap(source)
 		digests := attestation.ExtractImageDigests(source)
-		if len(digests) > 0 && !h.offline {
+		if len(digests) > 0 && !h.offline && h.rekorClient != nil {
 			sigstoreResults = h.rekorClient.CheckSigstoreDigests(ctx, digests)
 		}
 	}
 
 	var rekorResults []attestation.RekorProvenance
-	if len(sigstoreResults) > 0 && !h.offline {
+	if len(sigstoreResults) > 0 && !h.offline && h.rekorClient != nil {
 		for _, sr := range sigstoreResults {
 			if sr.OK {
 				rekorResults = append(rekorResults, h.rekorClient.FetchRekorProvenance(ctx, sr.Digest))
