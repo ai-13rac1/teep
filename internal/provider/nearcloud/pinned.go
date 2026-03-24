@@ -314,10 +314,12 @@ func (h *PinnedHandler) attestOnConn(
 	// Compose binding + supply-chain evidence for model and gateway compose manifests.
 	var composeResult *attestation.ComposeBindingResult
 	var sigstoreResults []attestation.SigstoreResult
-	var imageRepos []string
+	var modelImageRepos []string
+	var gatewayImageRepos []string
 	var allDigests []string
 	digestToRepo := make(map[string]string)
-	repoSeen := make(map[string]struct{})
+	modelRepoSeen := make(map[string]struct{})
+	gatewayRepoSeen := make(map[string]struct{})
 	digestSeen := make(map[string]struct{})
 	appendComposeEvidence := func(kind, appCompose string) {
 		dockerCompose, err := attestation.ExtractDockerCompose(appCompose)
@@ -332,11 +334,20 @@ func (h *PinnedHandler) attestOnConn(
 			source = appCompose
 		}
 		for _, repo := range attestation.ExtractImageRepositories(source) {
-			if _, ok := repoSeen[repo]; ok {
-				continue
+			switch kind {
+			case "gateway":
+				if _, ok := gatewayRepoSeen[repo]; ok {
+					continue
+				}
+				gatewayRepoSeen[repo] = struct{}{}
+				gatewayImageRepos = append(gatewayImageRepos, repo)
+			default:
+				if _, ok := modelRepoSeen[repo]; ok {
+					continue
+				}
+				modelRepoSeen[repo] = struct{}{}
+				modelImageRepos = append(modelImageRepos, repo)
 			}
-			repoSeen[repo] = struct{}{}
-			imageRepos = append(imageRepos, repo)
 		}
 		for digest, repo := range attestation.ExtractImageDigestToRepoMap(source) {
 			if _, ok := digestToRepo[digest]; !ok {
@@ -407,27 +418,28 @@ func (h *PinnedHandler) attestOnConn(
 	}
 
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:        "nearcloud",
-		Model:           model,
-		Raw:             raw,
-		Nonce:           modelNonce,
-		Enforced:        h.enforced,
-		Policy:          h.policy,
-		ImageRepos:      imageRepos,
-		DigestToRepo:    digestToRepo,
-		TDX:             tdxResult,
-		Nvidia:          nvidiaResult,
-		NvidiaNRAS:      nrasResult,
-		PoC:             pocResult,
-		Compose:         composeResult,
-		Sigstore:        sigstoreResults,
-		Rekor:           rekorResults,
-		GatewayTDX:      gatewayTDX,
-		GatewayPoC:      gatewayPoCResult,
-		GatewayNonceHex: gwRaw.NonceHex,
-		GatewayNonce:    modelNonce, // gateway echoes the same nonce
-		GatewayCompose:  gatewayCompose,
-		GatewayEventLog: gwRaw.EventLog,
+		Provider:          "nearcloud",
+		Model:             model,
+		Raw:               raw,
+		Nonce:             modelNonce,
+		Enforced:          h.enforced,
+		Policy:            h.policy,
+		ImageRepos:        modelImageRepos,
+		GatewayImageRepos: gatewayImageRepos,
+		DigestToRepo:      digestToRepo,
+		TDX:               tdxResult,
+		Nvidia:            nvidiaResult,
+		NvidiaNRAS:        nrasResult,
+		PoC:               pocResult,
+		Compose:           composeResult,
+		Sigstore:          sigstoreResults,
+		Rekor:             rekorResults,
+		GatewayTDX:        gatewayTDX,
+		GatewayPoC:        gatewayPoCResult,
+		GatewayNonceHex:   gwRaw.NonceHex,
+		GatewayNonce:      modelNonce, // gateway echoes the same nonce
+		GatewayCompose:    gatewayCompose,
+		GatewayEventLog:   gwRaw.EventLog,
 	})
 	return report, raw.SigningKey, nil
 }

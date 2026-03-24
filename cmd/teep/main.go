@@ -280,11 +280,13 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 	// Check compose binding and supply-chain evidence from both model and
 	// gateway app_compose manifests (nearcloud has two attested tiers).
 	var composeResult *attestation.ComposeBindingResult
-	var imageRepos []string
+	var modelImageRepos []string
+	var gatewayImageRepos []string
 	digestToRepo := make(map[string]string)
 	var sigstoreResults []attestation.SigstoreResult
 	var allDigests []string
-	repoSeen := make(map[string]struct{})
+	modelRepoSeen := make(map[string]struct{})
+	gatewayRepoSeen := make(map[string]struct{})
 	digestSeen := make(map[string]struct{})
 	appendComposeEvidence := func(kind, appCompose string) {
 		dockerCompose, err := attestation.ExtractDockerCompose(appCompose)
@@ -299,11 +301,20 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 			slog.Debug("attested docker compose manifest", "kind", kind, "content", dockerCompose)
 		}
 		for _, repo := range attestation.ExtractImageRepositories(source) {
-			if _, ok := repoSeen[repo]; ok {
-				continue
+			switch kind {
+			case "gateway":
+				if _, ok := gatewayRepoSeen[repo]; ok {
+					continue
+				}
+				gatewayRepoSeen[repo] = struct{}{}
+				gatewayImageRepos = append(gatewayImageRepos, repo)
+			default:
+				if _, ok := modelRepoSeen[repo]; ok {
+					continue
+				}
+				modelRepoSeen[repo] = struct{}{}
+				modelImageRepos = append(modelImageRepos, repo)
 			}
-			repoSeen[repo] = struct{}{}
-			imageRepos = append(imageRepos, repo)
 		}
 		for digest, repo := range attestation.ExtractImageDigestToRepoMap(source) {
 			if _, ok := digestToRepo[digest]; !ok {
@@ -396,27 +407,28 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 	}
 
 	reportInput := &attestation.ReportInput{
-		Provider:        providerName,
-		Model:           modelName,
-		Raw:             raw,
-		Nonce:           nonce,
-		Enforced:        cfg.Enforced,
-		Policy:          cfg.MeasurementPolicy,
-		TDX:             tdxResult,
-		Nvidia:          nvidiaResult,
-		NvidiaNRAS:      nrasResult,
-		PoC:             pocResult,
-		Compose:         composeResult,
-		ImageRepos:      imageRepos,
-		DigestToRepo:    digestToRepo,
-		Sigstore:        sigstoreResults,
-		Rekor:           rekorResults,
-		GatewayTDX:      gatewayTDX,
-		GatewayPoC:      gatewayPoCResult,
-		GatewayNonceHex: raw.GatewayNonceHex,
-		GatewayNonce:    nonce,
-		GatewayCompose:  gatewayCompose,
-		GatewayEventLog: raw.GatewayEventLog,
+		Provider:          providerName,
+		Model:             modelName,
+		Raw:               raw,
+		Nonce:             nonce,
+		Enforced:          cfg.Enforced,
+		Policy:            cfg.MeasurementPolicy,
+		TDX:               tdxResult,
+		Nvidia:            nvidiaResult,
+		NvidiaNRAS:        nrasResult,
+		PoC:               pocResult,
+		Compose:           composeResult,
+		ImageRepos:        modelImageRepos,
+		GatewayImageRepos: gatewayImageRepos,
+		DigestToRepo:      digestToRepo,
+		Sigstore:          sigstoreResults,
+		Rekor:             rekorResults,
+		GatewayTDX:        gatewayTDX,
+		GatewayPoC:        gatewayPoCResult,
+		GatewayNonceHex:   raw.GatewayNonceHex,
+		GatewayNonce:      nonce,
+		GatewayCompose:    gatewayCompose,
+		GatewayEventLog:   raw.GatewayEventLog,
 	}
 
 	return attestation.BuildReport(reportInput)
