@@ -100,7 +100,6 @@ var DefaultEnforced = []string{
 	"gateway_tdx_cert_chain",
 	"gateway_tdx_quote_signature",
 	"gateway_tdx_debug_disabled",
-	"gateway_tdx_reportdata_binding",
 	"gateway_compose_binding",
 	"gateway_event_log_integrity",
 }
