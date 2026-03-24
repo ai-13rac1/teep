@@ -312,12 +312,7 @@ func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, b
 // reportdataBindingPassed returns true if the tdx_reportdata_binding factor
 // passed in the report. If it is absent, Skipped, or Failed, E2EE is refused.
 func reportdataBindingPassed(report *attestation.VerificationReport) bool {
-	for _, f := range report.Factors {
-		if f.Name == "tdx_reportdata_binding" {
-			return f.Status == attestation.Pass
-		}
-	}
-	return false
+	return report.ReportDataBindingPassed()
 }
 
 // fetchAndVerify fetches attestation from the provider and runs all 23
@@ -534,7 +529,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// single TLS connection. No separate attestation cache or E2EE needed.
 	if prov.PinnedHandler != nil {
 		status = "pinned"
-		s.stats.plaintext.Add(1)
 		s.handlePinnedChat(w, r, prov, upstreamModel, body, req)
 		return
 	}
@@ -683,6 +677,19 @@ func (s *Server) handlePinnedChat(
 		headers.Set("Authorization", auth)
 	}
 
+	// E2EE providers must never send plaintext. On SPKI cache hit, verify
+	// that tdx_reportdata_binding passed in the cached report; refuse the
+	// request entirely if binding is unverified (cache miss is handled by
+	// the pinned handler itself, which will block internally).
+	if prov.E2EE {
+		if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok && !reportdataBindingPassed(cached) {
+			slog.Error("E2EE required but tdx_reportdata_binding not passed; refusing request",
+				"provider", prov.Name, "model", upstreamModel)
+			http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
+			return
+		}
+	}
+
 	pinnedReq := provider.PinnedRequest{
 		Method:  http.MethodPost,
 		Path:    prov.ChatPath,
@@ -760,6 +767,7 @@ func (s *Server) handlePinnedChat(
 	// is always SSE, matching the non-pinned E2EE path.
 	session := pinnedResp.Session
 	if session != nil {
+		s.stats.e2ee.Add(1)
 		defer session.Zero()
 		if req.Stream {
 			s.relayStream(w, pinnedResp.Body, session)
@@ -768,6 +776,7 @@ func (s *Server) handlePinnedChat(
 		}
 		return
 	}
+	s.stats.plaintext.Add(1)
 	if req.Stream {
 		s.relayStream(w, pinnedResp.Body, nil)
 		return
@@ -795,7 +804,7 @@ func (s *Server) buildUpstreamBody(
 ) ([]byte, *attestation.Session, error) {
 	if !e2eeActive {
 		if prov.E2EE {
-			slog.Warn("E2EE disabled — tdx_reportdata_binding not verified; forwarding plaintext over HTTPS", "provider", prov.Name, "model", upstreamModel)
+			return nil, nil, fmt.Errorf("E2EE required for %s but tdx_reportdata_binding not passed; refusing plaintext", prov.Name)
 		}
 		return rawBody, nil, nil
 	}

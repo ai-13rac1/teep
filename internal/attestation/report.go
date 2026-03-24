@@ -78,6 +78,19 @@ func (r *VerificationReport) Blocked() bool {
 	return false
 }
 
+// ReportDataBindingPassed returns true if the tdx_reportdata_binding factor
+// passed. Without this, a MITM can substitute the enclave public key and
+// E2EE becomes security theater. E2EE must never be activated unless this
+// returns true.
+func (r *VerificationReport) ReportDataBindingPassed() bool {
+	for _, f := range r.Factors {
+		if f.Name == "tdx_reportdata_binding" {
+			return f.Status == Pass
+		}
+	}
+	return false
+}
+
 // DefaultEnforced lists the factor names that block the proxy on failure.
 // These are the minimum checks required for E2EE security. See the plan for
 // rationale; notably tdx_reportdata_binding is critical — without it, a MITM

@@ -174,6 +174,13 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 	// E2EE v2: encrypt message contents for the model backend using
 	// Ed25519/X25519 + XChaCha20-Poly1305. The signing key from attestation
 	// is the model's Ed25519 public key (64 hex chars).
+	//
+	// E2EE providers must never downgrade to plaintext. On cache miss the
+	// fresh report must confirm tdx_reportdata_binding; on cache hit the
+	// proxy already verified the cached report before calling HandlePinned.
+	if req.E2EE && report != nil && !report.ReportDataBindingPassed() {
+		return nil, errors.New("E2EE required but tdx_reportdata_binding not passed; refusing plaintext")
+	}
 	chatBody := req.Body
 	var session *attestation.Session
 	if req.E2EE {
@@ -454,7 +461,7 @@ func (h *PinnedHandler) attestOnConn(
 		appendComposeEvidence("gateway", gwRaw.AppCompose)
 	}
 
-	if len(allDigests) > 0 && !h.offline {
+	if len(allDigests) > 0 && !h.offline && h.rekorClient != nil {
 		sigstoreResults = h.rekorClient.CheckSigstoreDigests(ctx, allDigests)
 		for _, sr := range sigstoreResults {
 			if sr.OK {
