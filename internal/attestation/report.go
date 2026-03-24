@@ -690,6 +690,8 @@ func classifyRekorEntry(r *RekorProvenance, img *ImageProvenance, imageRepo stri
 func rekorProvenanceResult(in *ReportInput, scPolicy *supplyChainPolicy) FactorResult {
 	var fulcioVerified int
 	var sigstorePresent int
+	var setVerified int
+	var inclusionVerified int
 	var detail string
 
 	for i := range in.Rekor {
@@ -705,16 +707,36 @@ func rekorProvenanceResult(in *ReportInput, scPolicy *supplyChainPolicy) FactorR
 		case rekorFailed:
 			return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail, Detail: failDetail}
 		case rekorFulcio:
+			if r.SETErr != nil {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor SET verification failed: %v", imageRepo, r.SETErr)}
+			}
+			if r.InclusionErr != nil {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor inclusion proof verification failed: %v", imageRepo, r.InclusionErr)}
+			}
+			if r.SETVerified {
+				setVerified++
+			}
+			if r.InclusionVerified {
+				inclusionVerified++
+			}
 			fulcioVerified++
 			if detail == "" {
 				detail = formatRekorCommitDetail(r)
 			}
 		case rekorSigstore:
+			if r.SETVerified {
+				setVerified++
+			}
+			if r.InclusionVerified {
+				inclusionVerified++
+			}
 			sigstorePresent++
 		}
 	}
 
-	return formatBuildTransparencyResult(scPolicy, fulcioVerified, sigstorePresent, len(in.Rekor), detail)
+	return formatBuildTransparencyResult(scPolicy, fulcioVerified, sigstorePresent, setVerified, inclusionVerified, len(in.Rekor), detail)
 }
 
 // verifyFulcioEntry checks a single Rekor entry against a FulcioSigned policy.
@@ -754,22 +776,29 @@ func formatRekorCommitDetail(r *RekorProvenance) string {
 
 // formatBuildTransparencyResult produces the final factor result for
 // build_transparency_log after processing all Rekor entries.
-func formatBuildTransparencyResult(scPolicy *supplyChainPolicy, fulcioVerified, sigstorePresent, rekorCount int, detail string) FactorResult {
+func formatBuildTransparencyResult(scPolicy *supplyChainPolicy, fulcioVerified, sigstorePresent, setVerified, inclusionVerified, rekorCount int, detail string) FactorResult {
 	f := FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log"}
+	logVerify := ""
+	if setVerified > 0 || inclusionVerified > 0 {
+		verifiedCount := fulcioVerified + sigstorePresent
+		logVerify = fmt.Sprintf("; log integrity: SET %d/%d, inclusion %d/%d",
+			setVerified, verifiedCount,
+			inclusionVerified, verifiedCount)
+	}
 	switch {
 	case scPolicy != nil && fulcioVerified > 0 && sigstorePresent > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance; %d present in Sigstore (%s)",
-			fulcioVerified, sigstorePresent, detail)
+		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance; %d present in Sigstore (%s%s)",
+			fulcioVerified, sigstorePresent, detail, logVerify)
 	case scPolicy != nil && fulcioVerified > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance (%s)", fulcioVerified, detail)
+		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance (%s%s)", fulcioVerified, detail, logVerify)
 	case scPolicy != nil && sigstorePresent > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d image(s) present in Sigstore (no Fulcio provenance)", sigstorePresent)
+		f.Detail = fmt.Sprintf("%d image(s) present in Sigstore (no Fulcio provenance%s)", sigstorePresent, logVerify)
 	case fulcioVerified > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s)", fulcioVerified, rekorCount, detail)
+		f.Detail = fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s%s)", fulcioVerified, rekorCount, detail, logVerify)
 	default:
 		f.Status = Skip
 		f.Detail = "all images signed with raw keys (no Fulcio build provenance)"
@@ -1205,6 +1234,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 				}},
 			// Gateway tier.
 			{Repo: "nearaidev/dstack-vpc-client", GatewayTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/dstack-vpc-client/.github/workflows/build.yml@refs/heads/main",
 				SourceRepos: []string{
@@ -1212,6 +1242,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 					"https://github.com/nearai/dstack-vpc-client",
 				}},
 			{Repo: "nearaidev/dstack-vpc", GatewayTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/dstack-vpc/.github/workflows/build.yml@refs/heads/main",
 				SourceRepos: []string{
@@ -1223,6 +1254,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 			// systems (GitHub Actions, Google Cloud Build) with unstable
 			// branch refs. Only transparency-log presence is verifiable.
 			{Repo: "nearaidev/cloud-api", GatewayTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/cloud-api/.github/workflows/build.yml@refs/heads/main",
 				SourceRepos: []string{
@@ -1230,6 +1262,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 					"https://github.com/nearai/cloud-api",
 				}},
 			{Repo: "nearaidev/cvm-ingress", GatewayTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/cvm-ingress/.github/workflows/build-push.yml@refs/heads/main",
 				SourceRepos: []string{
