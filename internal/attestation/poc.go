@@ -180,7 +180,10 @@ func verifyPoCJWTClaims(jwtStr, expectedMachineID string) error {
 		return fmt.Errorf("JWT has expired (exp=%d)", claims.ExpiresAt)
 	}
 
-	if expectedMachineID != "" && claims.MachineID != "" {
+	if expectedMachineID != "" {
+		if claims.MachineID == "" {
+			return fmt.Errorf("JWT missing machineId claim, expected %q", expectedMachineID)
+		}
 		if claims.MachineID != expectedMachineID {
 			return fmt.Errorf("JWT machineId %q does not match stage-1 machineId %q",
 				claims.MachineID, expectedMachineID)
@@ -393,14 +396,17 @@ func (c *PoCClient) verifyPoCJWT(jwtStr, expectedMachineID string) error {
 
 	// Cross-check machineId claim against stage-1 response.
 	if expectedMachineID != "" {
-		if mid, _ := token.Claims.GetSubject(); mid == "" {
-			// machineId is a custom claim — extract from map.
-			if mc, ok := token.Claims.(jwt.MapClaims); ok {
-				if mid, _ := mc["machineId"].(string); mid != "" && mid != expectedMachineID {
-					return fmt.Errorf("JWT machineId %q does not match stage-1 machineId %q",
-						mid, expectedMachineID)
-				}
-			}
+		var mid string
+		if sub, _ := token.Claims.GetSubject(); sub != "" {
+			mid = sub
+		} else if mc, ok := token.Claims.(jwt.MapClaims); ok {
+			mid, _ = mc["machineId"].(string)
+		}
+		if mid == "" {
+			return fmt.Errorf("JWT missing machineId claim, expected %q", expectedMachineID)
+		}
+		if mid != expectedMachineID {
+			return fmt.Errorf("JWT machineId %q != stage-1 %q", mid, expectedMachineID)
 		}
 	}
 
