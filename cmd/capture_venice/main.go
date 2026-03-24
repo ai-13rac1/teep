@@ -319,15 +319,16 @@ type pocStage1Response struct {
 	Nonce     string `json:"nonce"`
 }
 
-func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
-	peers := attestation.PoCPeers
+type nonceEntry struct {
+	peerURL string
+	moniker string
+	nonce   string
+}
 
-	type nonceEntry struct {
-		peerURL string
-		moniker string
-		nonce   string
-	}
-
+// fetchPoCStage1 sends nonce requests to each peer and returns the collected
+// nonce entries. Returns nil if a peer returns 403 (not whitelisted), after
+// writing stub fixtures for the remaining peers.
+func fetchPoCStage1(ctx context.Context, client *http.Client, peers []string, hexQuote string) []nonceEntry {
 	nonces := make([]nonceEntry, 0, len(peers))
 	for i, peer := range peers {
 		u := strings.TrimRight(peer, "/") + "/get_jwt"
@@ -344,7 +345,7 @@ func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
 			for j := range peers {
 				writeFile(fmt.Sprintf("venice_poc_stage2_%d.json", j), []byte(`{"error":"not whitelisted"}`))
 			}
-			return
+			return nil
 		}
 		if res.statusCode != http.StatusOK {
 			log.Fatalf("PoC stage1 peer %d HTTP %d: %s", i, res.statusCode, truncate(string(res.body)))
@@ -360,7 +361,12 @@ func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
 		fmt.Printf("  stage1 peer %d: moniker=%s\n", i, s1.Moniker)
 		nonces = append(nonces, nonceEntry{peerURL: peer, moniker: s1.Moniker, nonce: s1.Nonce})
 	}
+	return nonces
+}
 
+// fetchPoCStage2 sends partial-signature requests to each peer, accumulating
+// signatures until a final JWT is received.
+func fetchPoCStage2(ctx context.Context, client *http.Client, nonces []nonceEntry, hexQuote string) {
 	noncesMap := make(map[string]string, len(nonces))
 	for _, n := range nonces {
 		noncesMap[n.moniker] = n.nonce
@@ -391,7 +397,7 @@ func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
 		}
 		if err := json.Unmarshal(res.body, &s2); err == nil && s2.JWT != "" {
 			fmt.Printf("  stage2 peer %d: final JWT received (%d chars)\n", i, len(s2.JWT))
-			break
+			return
 		}
 
 		var sigs map[string]string
@@ -401,6 +407,15 @@ func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
 		partialSigs = sigs
 		fmt.Printf("  stage2 peer %d: partial sig collected\n", i)
 	}
+}
+
+func fetchPoC(ctx context.Context, client *http.Client, hexQuote string) {
+	peers := attestation.PoCPeers
+	nonces := fetchPoCStage1(ctx, client, peers, hexQuote)
+	if nonces == nil {
+		return
+	}
+	fetchPoCStage2(ctx, client, nonces, hexQuote)
 }
 
 // ---------------------------------------------------------------------------
