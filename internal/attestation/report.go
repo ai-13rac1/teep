@@ -551,7 +551,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			switch {
 			case img != nil && img.Provenance == FulcioSigned:
 				switch {
-				case r.SignatureErr != nil:
+				case r.SignatureErr != nil && !img.NoDSSE:
 					failed = true
 					detail = fmt.Sprintf("image %q: DSSE envelope signature verification failed: %v", imageRepo, r.SignatureErr)
 				case !r.HasCert && r.HasNonFulcioCert:
@@ -1005,6 +1005,7 @@ type ImageProvenance struct {
 	OIDCIssuer     string         // required when Provenance == FulcioSigned
 	OIDCIdentity   string         // SAN URI (workflow identity); checked for FulcioSigned
 	SourceRepos    []string       // required when Provenance == FulcioSigned (repo ID and/or URL)
+	NoDSSE         bool           // true = DSSE envelope lacks signatures; skip DSSE check
 }
 
 type supplyChainPolicy struct {
@@ -1076,6 +1077,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 				KeyFingerprint: "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b"},
 			{Repo: "certbot/dns-cloudflare", ModelTier: true, Provenance: ComposeBindingOnly},
 			{Repo: "nearaidev/compose-manager", ModelTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
 				SourceRepos: []string{
@@ -1090,6 +1092,7 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 				KeyFingerprint: "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b"},
 			{Repo: "certbot/dns-cloudflare", ModelTier: true, Provenance: ComposeBindingOnly},
 			{Repo: "nearaidev/compose-manager", ModelTier: true, Provenance: FulcioSigned,
+				NoDSSE:       true, // Rekor DSSE envelope has no signatures as of 2026-03
 				OIDCIssuer:   githubOIDC,
 				OIDCIdentity: "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
 				SourceRepos: []string{
