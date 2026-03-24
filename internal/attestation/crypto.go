@@ -324,66 +324,6 @@ func isHexRune(c rune) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
-// EncryptChatMessages creates a v1 ECDSA E2EE session, encrypts each message's
-// content in body for the model's signing key, and forces stream=true
-// (required for per-chunk decryption). Returns the rewritten body and
-// session, or an error. Callers must call session.Zero() when done.
-func EncryptChatMessages(body []byte, signingKey string) ([]byte, *Session, error) {
-	session, err := NewSession()
-	if err != nil {
-		return nil, nil, fmt.Errorf("create E2EE session: %w", err)
-	}
-	if err := session.SetModelKey(signingKey); err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("set model key: %w", err)
-	}
-
-	// Minimal parse: only extract messages for encryption, preserve all other fields.
-	var full map[string]json.RawMessage
-	if err := json.Unmarshal(body, &full); err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("parse body for E2EE: %w", err)
-	}
-
-	var messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(full["messages"], &messages); err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("parse messages for E2EE: %w", err)
-	}
-
-	type encMsg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	enc := make([]encMsg, len(messages))
-	for i, msg := range messages {
-		ct, encErr := Encrypt([]byte(msg.Content), session.ModelPubKey())
-		if encErr != nil {
-			session.Zero()
-			return nil, nil, fmt.Errorf("encrypt message %d: %w", i, encErr)
-		}
-		enc[i] = encMsg{Role: msg.Role, Content: ct}
-	}
-
-	messagesJSON, err := json.Marshal(enc)
-	if err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("marshal encrypted messages: %w", err)
-	}
-	full["messages"] = messagesJSON
-	full["stream"] = json.RawMessage("true")
-
-	out, err := json.Marshal(full)
-	if err != nil {
-		session.Zero()
-		return nil, nil, fmt.Errorf("marshal E2EE body: %w", err)
-	}
-	return out, session, nil
-}
-
 // EncryptChatMessagesV2 creates a v2 Ed25519/XChaCha20 E2EE session, encrypts
 // each message's content, and forces stream=true. The signingKey is the model's
 // Ed25519 public key (64 hex chars) from the attestation response.
