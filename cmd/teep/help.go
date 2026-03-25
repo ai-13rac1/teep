@@ -484,6 +484,7 @@ Environment variables:
   TEEP_LISTEN_ADDR   Override listen address (default: 127.0.0.1:8337).
   VENICE_API_KEY     Venice AI API key.
   NEARAI_API_KEY     NEAR AI API key (used by neardirect and nearcloud providers).
+  NANOGPT_API_KEY    NanoGPT API key.
 `)
 }
 
