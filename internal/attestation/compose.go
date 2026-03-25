@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
 	"regexp"
 	"strings"
 )
@@ -142,11 +144,85 @@ func ExtractImageDigestToRepoMap(text string) map[string]string {
 	for _, m := range matches {
 		repo := normalizeImageRepository(m[1])
 		digest := m[2]
-		if repo != "" {
-			if _, exists := result[digest]; !exists {
-				result[digest] = repo
-			}
+		if repo == "" {
+			continue
+		}
+		existing, ok := result[digest]
+		if !ok {
+			result[digest] = repo
+			continue
+		}
+		if existing != repo {
+			slog.Warn("digest maps to multiple repos within manifest; using first",
+				"digest", "sha256:"+digest[:min(16, len(digest))]+"...",
+				"kept", existing, "dropped", repo)
 		}
 	}
 	return result
+}
+
+// ComposeDigests holds extracted image repositories and digests from a compose manifest.
+type ComposeDigests struct {
+	Repos        []string
+	DigestToRepo map[string]string
+	Digests      []string
+}
+
+// ExtractComposeDigests extracts image repos, digest-to-repo mappings, and digests
+// from a compose manifest (app_compose or docker_compose_file within it).
+func ExtractComposeDigests(appCompose string) ComposeDigests {
+	dockerCompose, err := ExtractDockerCompose(appCompose)
+	if err != nil {
+		slog.Debug("extract docker_compose_file failed", "err", err)
+	}
+	if dockerCompose != "" {
+		slog.Debug("attested docker compose manifest", "content", dockerCompose)
+	}
+	source := dockerCompose
+	if source == "" {
+		source = appCompose
+	}
+	return ComposeDigests{
+		Repos:        ExtractImageRepositories(source),
+		DigestToRepo: ExtractImageDigestToRepoMap(source),
+		Digests:      ExtractImageDigests(source),
+	}
+}
+
+// MergeComposeDigests merges model and gateway compose digests with deduplication.
+// Model digests are inserted first; first-writer-wins for digestToRepo with conflict logging.
+func MergeComposeDigests(model, gateway ComposeDigests) (allDigests []string, digestToRepo map[string]string) {
+	digestToRepo = make(map[string]string)
+
+	// Model digests first.
+	maps.Copy(digestToRepo, model.DigestToRepo)
+	// Gateway digests — first-writer-wins with conflict logging.
+	for digest, repo := range gateway.DigestToRepo {
+		existing, ok := digestToRepo[digest]
+		if !ok {
+			digestToRepo[digest] = repo
+			continue
+		}
+		if existing != repo {
+			slog.Warn("digest maps to multiple repos; using first",
+				"digest", "sha256:"+digest[:min(16, len(digest))]+"...",
+				"kept", existing, "dropped", repo)
+		}
+	}
+
+	// Deduplicate digests.
+	seen := make(map[string]struct{})
+	for _, d := range model.Digests {
+		if _, ok := seen[d]; !ok {
+			seen[d] = struct{}{}
+			allDigests = append(allDigests, d)
+		}
+	}
+	for _, d := range gateway.Digests {
+		if _, ok := seen[d]; !ok {
+			seen[d] = struct{}{}
+			allDigests = append(allDigests, d)
+		}
+	}
+	return allDigests, digestToRepo
 }

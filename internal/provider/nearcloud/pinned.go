@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -378,14 +377,14 @@ func (h *PinnedHandler) attestOnConn(
 	// Collect image digests ONLY from TDX-verified compose manifests.
 	// Never extract digests from unverified manifests — that would create
 	// a false chain of trust (sigstore results for unattested images).
-	var modelCD, gatewayCD composeDigests
-	if composeResult != nil {
-		modelCD = extractComposeDigests(raw.AppCompose)
+	var modelCD, gatewayCD attestation.ComposeDigests
+	if composeResult != nil && composeResult.Err == nil {
+		modelCD = attestation.ExtractComposeDigests(raw.AppCompose)
 	}
-	if gatewayCompose != nil {
-		gatewayCD = extractComposeDigests(gwRaw.AppCompose)
+	if gatewayCompose != nil && gatewayCompose.Err == nil {
+		gatewayCD = attestation.ExtractComposeDigests(gwRaw.AppCompose)
 	}
-	allDigests, digestToRepo := mergeComposeDigests(modelCD, gatewayCD)
+	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
 
 	sigstoreResults, rekorResults := h.verifySigstore(ctx, allDigests)
 
@@ -396,8 +395,8 @@ func (h *PinnedHandler) attestOnConn(
 		Nonce:             modelNonce,
 		Enforced:          h.enforced,
 		Policy:            h.policy,
-		ImageRepos:        modelCD.repos,
-		GatewayImageRepos: gatewayCD.repos,
+		ImageRepos:        modelCD.Repos,
+		GatewayImageRepos: gatewayCD.Repos,
 		DigestToRepo:      digestToRepo,
 		TDX:               tdxResult,
 		Nvidia:            nvidiaResult,
@@ -521,69 +520,6 @@ func (h *PinnedHandler) checkPoC(ctx context.Context, quote string) *attestation
 	}
 	poc := attestation.NewPoCClientWithSigningKey(attestation.PoCPeers, attestation.PoCQuorum, tlsct.NewHTTPClient(30*time.Second), h.pocSigningKey)
 	return poc.CheckQuote(ctx, quote)
-}
-
-// composeDigests holds extracted image repositories and digests from a compose manifest.
-type composeDigests struct {
-	repos        []string
-	digestToRepo map[string]string
-	digests      []string
-}
-
-// extractComposeDigests extracts image repos, digest-to-repo mappings, and digests
-// from a compose manifest (app_compose or docker_compose_file within it).
-func extractComposeDigests(appCompose string) composeDigests {
-	dockerCompose, err := attestation.ExtractDockerCompose(appCompose)
-	if err != nil {
-		slog.Debug("extract docker_compose_file failed", "err", err)
-	}
-	if dockerCompose != "" {
-		slog.Debug("attested docker compose manifest", "content", dockerCompose)
-	}
-	source := dockerCompose
-	if source == "" {
-		source = appCompose
-	}
-	return composeDigests{
-		repos:        attestation.ExtractImageRepositories(source),
-		digestToRepo: attestation.ExtractImageDigestToRepoMap(source),
-		digests:      attestation.ExtractImageDigests(source),
-	}
-}
-
-// mergeComposeDigests merges model and gateway compose digests with deduplication.
-// Uses first-writer-wins for digestToRepo with conflict logging.
-func mergeComposeDigests(model, gateway composeDigests) (allDigests []string, digestToRepo map[string]string) {
-	digestToRepo = make(map[string]string)
-
-	// Model digests first.
-	maps.Copy(digestToRepo, model.digestToRepo)
-	// Gateway digests — first-writer-wins with conflict logging.
-	for digest, repo := range gateway.digestToRepo {
-		if existing, ok := digestToRepo[digest]; !ok {
-			digestToRepo[digest] = repo
-		} else if existing != repo {
-			slog.Warn("digest maps to multiple repos; using first",
-				"digest", "sha256:"+digest[:min(16, len(digest))]+"...",
-				"kept", existing, "dropped", repo)
-		}
-	}
-
-	// Deduplicate digests.
-	seen := make(map[string]struct{})
-	for _, d := range model.digests {
-		if _, ok := seen[d]; !ok {
-			seen[d] = struct{}{}
-			allDigests = append(allDigests, d)
-		}
-	}
-	for _, d := range gateway.digests {
-		if _, ok := seen[d]; !ok {
-			seen[d] = struct{}{}
-			allDigests = append(allDigests, d)
-		}
-	}
-	return allDigests, digestToRepo
 }
 
 // verifySigstore checks sigstore digests and fetches Rekor provenance for matches.

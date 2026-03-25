@@ -206,18 +206,7 @@ func runVerify(args []string) {
 // attestation, runs TDX and NVIDIA verification, and returns the report.
 // If saveDir is non-empty, raw attestation data is saved to files there.
 func runVerification(providerName, modelName, saveDir string, offline bool) *attestation.VerificationReport {
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("load config failed", "err", err)
-		os.Exit(1)
-	}
-
-	cp, ok := cfg.Providers[providerName]
-	if !ok {
-		slog.Error(providerNotFoundError(providerName, cfg).Error())
-		os.Exit(1)
-	}
-
+	cfg, cp := loadConfig(providerName)
 	attester := newAttester(providerName, cp, offline)
 	client := config.NewAttestationClient(offline)
 
@@ -225,115 +214,18 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 	slog.Debug("nonce generated", "provider", providerName, "model", modelName, "nonce", nonce.Hex()[:16]+"...")
 	ctx := context.Background()
 
-	slog.Debug("attestation fetch starting", "provider", providerName, "model", modelName)
-	fetchStart := time.Now()
-	raw, err := attester.FetchAttestation(ctx, modelName, nonce)
-	if err != nil {
-		slog.Error("fetch attestation failed", "provider", providerName, "model", modelName, "err", err)
-		os.Exit(1)
-	}
-	slog.Debug("attestation fetch complete", "provider", providerName, "elapsed", time.Since(fetchStart))
-
+	raw := fetchAttestation(ctx, attester, providerName, modelName, nonce)
 	if saveDir != "" {
 		saveAttestationData(saveDir, providerName, raw)
 	}
 
-	var tdxResult *attestation.TDXVerifyResult
-	if raw.IntelQuote != "" {
-		slog.Debug("TDX verification starting", "quote_len", len(raw.IntelQuote))
-		tdxStart := time.Now()
-		tdxResult = attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, offline)
-		if verifier := newReportDataVerifier(providerName); verifier != nil && tdxResult.ParseErr == nil {
-			detail, err := verifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-			tdxResult.ReportDataBindingErr = err
-			tdxResult.ReportDataBindingDetail = detail
-		}
-		slog.Debug("TDX verification complete", "elapsed", time.Since(tdxStart))
-	}
+	tdxResult := verifyTDX(ctx, raw, nonce, providerName, offline)
+	nvidiaResult, nrasResult := verifyNVIDIA(ctx, raw, nonce, client, offline)
+	pocResult := checkPoC(ctx, raw.IntelQuote, client, offline)
 
-	var nvidiaResult *attestation.NvidiaVerifyResult
-	if raw.NvidiaPayload != "" {
-		slog.Debug("NVIDIA verification starting", "payload_len", len(raw.NvidiaPayload))
-		nvidiaStart := time.Now()
-		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
-		slog.Debug("NVIDIA verification complete", "elapsed", time.Since(nvidiaStart))
-	}
-
-	var nrasResult *attestation.NvidiaVerifyResult
-	if !offline && raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
-		slog.Debug("NVIDIA NRAS verification starting")
-		nrasStart := time.Now()
-		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client)
-		slog.Debug("NVIDIA NRAS verification complete", "elapsed", time.Since(nrasStart))
-	}
-
-	var pocResult *attestation.PoCResult
-	if !offline && raw.IntelQuote != "" {
-		slog.Debug("Proof of Cloud check starting")
-		pocStart := time.Now()
-		poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
-		pocResult = poc.CheckQuote(ctx, raw.IntelQuote)
-		slog.Debug("Proof of Cloud check complete", "elapsed", time.Since(pocStart),
-			"registered", pocResult != nil && pocResult.Registered)
-	}
-
-	// Check compose binding and supply-chain evidence from both model and
-	// gateway app_compose manifests (nearcloud has two attested tiers).
+	// Model compose evidence (gated on TDX).
 	var composeResult *attestation.ComposeBindingResult
-	var modelImageRepos []string
-	var gatewayImageRepos []string
-	digestToRepo := make(map[string]string)
-	var sigstoreResults []attestation.SigstoreResult
-	var allDigests []string
-	modelRepoSeen := make(map[string]struct{})
-	gatewayRepoSeen := make(map[string]struct{})
-	digestSeen := make(map[string]struct{})
-	appendComposeEvidence := func(kind, appCompose string) {
-		dockerCompose, err := attestation.ExtractDockerCompose(appCompose)
-		if err != nil {
-			slog.Debug("extract docker_compose_file failed", "kind", kind, "err", err)
-		}
-		source := dockerCompose
-		if source == "" {
-			source = appCompose
-		}
-		if dockerCompose != "" {
-			slog.Debug("attested docker compose manifest", "kind", kind, "content", dockerCompose)
-		}
-		for _, repo := range attestation.ExtractImageRepositories(source) {
-			switch kind {
-			case "gateway":
-				if _, ok := gatewayRepoSeen[repo]; ok {
-					continue
-				}
-				gatewayRepoSeen[repo] = struct{}{}
-				gatewayImageRepos = append(gatewayImageRepos, repo)
-			default:
-				if _, ok := modelRepoSeen[repo]; ok {
-					continue
-				}
-				modelRepoSeen[repo] = struct{}{}
-				modelImageRepos = append(modelImageRepos, repo)
-			}
-		}
-		for digest, repo := range attestation.ExtractImageDigestToRepoMap(source) {
-			if existing, ok := digestToRepo[digest]; !ok {
-				digestToRepo[digest] = repo
-			} else if existing != repo {
-				slog.Warn("digest maps to multiple repos; using first",
-					"digest", "sha256:"+digest[:min(16, len(digest))]+"...",
-					"kept", existing, "dropped", repo)
-			}
-		}
-		for _, d := range attestation.ExtractImageDigests(source) {
-			if _, ok := digestSeen[d]; ok {
-				continue
-			}
-			digestSeen[d] = struct{}{}
-			allDigests = append(allDigests, d)
-			slog.Info("checking Sigstore for image digest", "kind", kind, "digest", "sha256:"+d[:min(16, len(d))]+"...")
-		}
-	}
+	var modelCD attestation.ComposeDigests
 	if raw.AppCompose != "" && tdxResult != nil && tdxResult.ParseErr == nil {
 		composeResult = &attestation.ComposeBindingResult{Checked: true}
 		composeResult.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
@@ -342,77 +234,22 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		} else {
 			slog.Warn("compose binding failed", "err", composeResult.Err)
 		}
-		appendComposeEvidence("model", raw.AppCompose)
-	}
-
-	// Gateway TDX verification — any provider that populates GatewayIntelQuote.
-	var gatewayTDX *attestation.TDXVerifyResult
-	var gatewayCompose *attestation.ComposeBindingResult
-	var gatewayPoCResult *attestation.PoCResult
-	if raw.GatewayIntelQuote != "" {
-		slog.Debug("gateway TDX verification starting", "quote_len", len(raw.GatewayIntelQuote))
-		gatewayTDX = attestation.VerifyTDXQuote(ctx, raw.GatewayIntelQuote, nonce, offline)
-		if gatewayTDX.ParseErr == nil {
-			detail, rdErr := nearcloud.GatewayReportDataVerifier{}.Verify(
-				gatewayTDX.ReportData, raw.GatewayTLSFingerprint, nonce)
-			gatewayTDX.ReportDataBindingErr = rdErr
-			gatewayTDX.ReportDataBindingDetail = detail
-		}
-
-		if raw.GatewayAppCompose != "" && gatewayTDX.ParseErr == nil {
-			gatewayCompose = &attestation.ComposeBindingResult{Checked: true}
-			gatewayCompose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, gatewayTDX.MRConfigID)
-			appendComposeEvidence("gateway", raw.GatewayAppCompose)
-		}
-		if !offline {
-			poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
-			gatewayPoCResult = poc.CheckQuote(ctx, raw.GatewayIntelQuote)
-		}
-		slog.Debug("gateway TDX verification complete")
-	}
-
-	var rc *attestation.RekorClient
-	if len(allDigests) > 0 && !offline {
-		rc = attestation.NewRekorClient(client)
-		sigstoreResults = rc.CheckSigstoreDigests(ctx, allDigests)
-		for _, r := range sigstoreResults {
-			switch {
-			case r.OK:
-				slog.Info("Sigstore check passed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "status", r.Status)
-			case r.Err != nil:
-				slog.Warn("Sigstore check failed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "err", r.Err)
-			default:
-				slog.Warn("Sigstore check failed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "status", r.Status)
-			}
+		if composeResult.Err == nil {
+			modelCD = attestation.ExtractComposeDigests(raw.AppCompose)
 		}
 	}
 
-	var rekorResults []attestation.RekorProvenance
-	if len(sigstoreResults) > 0 && rc != nil {
-		for _, sr := range sigstoreResults {
-			if sr.OK {
-				slog.Info("fetching Rekor provenance", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
-				prov := rc.FetchRekorProvenance(ctx, sr.Digest)
-				switch {
-				case prov.Err != nil:
-					slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...", "err", prov.Err)
-				case prov.HasCert:
-					slog.Info("Rekor provenance found",
-						"digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...",
-						"issuer", prov.OIDCIssuer,
-						"repo", prov.SourceRepo,
-						"commit", prov.SourceCommit[:min(7, len(prov.SourceCommit))],
-						"runner", prov.RunnerEnv,
-					)
-				default:
-					slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
-				}
-				rekorResults = append(rekorResults, prov)
-			}
-		}
+	// Gateway verification (nearcloud-specific fields).
+	gatewayTDX, gatewayCompose, gatewayPoCResult := verifyNearcloudGateway(ctx, raw, nonce, client, offline)
+	var gatewayCD attestation.ComposeDigests
+	if gatewayCompose != nil && gatewayCompose.Err == nil {
+		gatewayCD = attestation.ExtractComposeDigests(raw.GatewayAppCompose)
 	}
 
-	reportInput := &attestation.ReportInput{
+	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
+	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, client, offline)
+
+	return attestation.BuildReport(&attestation.ReportInput{
 		Provider:          providerName,
 		Model:             modelName,
 		Raw:               raw,
@@ -424,8 +261,8 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		NvidiaNRAS:        nrasResult,
 		PoC:               pocResult,
 		Compose:           composeResult,
-		ImageRepos:        modelImageRepos,
-		GatewayImageRepos: gatewayImageRepos,
+		ImageRepos:        modelCD.Repos,
+		GatewayImageRepos: gatewayCD.Repos,
 		DigestToRepo:      digestToRepo,
 		Sigstore:          sigstoreResults,
 		Rekor:             rekorResults,
@@ -435,9 +272,155 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		GatewayNonce:      nonce,
 		GatewayCompose:    gatewayCompose,
 		GatewayEventLog:   raw.GatewayEventLog,
-	}
+	})
+}
 
-	return attestation.BuildReport(reportInput)
+// loadConfig loads the TOML config and looks up the named provider.
+func loadConfig(providerName string) (*config.Config, *config.Provider) {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("load config failed", "err", err)
+		os.Exit(1)
+	}
+	cp, ok := cfg.Providers[providerName]
+	if !ok {
+		slog.Error(providerNotFoundError(providerName, cfg).Error())
+		os.Exit(1)
+	}
+	return cfg, cp
+}
+
+// fetchAttestation fetches raw attestation data from the provider with timing log.
+func fetchAttestation(ctx context.Context, attester provider.Attester, providerName, modelName string, nonce attestation.Nonce) *attestation.RawAttestation {
+	slog.Debug("attestation fetch starting", "provider", providerName, "model", modelName)
+	fetchStart := time.Now()
+	raw, err := attester.FetchAttestation(ctx, modelName, nonce)
+	if err != nil {
+		slog.Error("fetch attestation failed", "provider", providerName, "model", modelName, "err", err)
+		os.Exit(1)
+	}
+	slog.Debug("attestation fetch complete", "provider", providerName, "elapsed", time.Since(fetchStart))
+	return raw
+}
+
+// verifyTDX runs TDX quote verification and report data binding.
+// Returns nil if no intel_quote is present.
+func verifyTDX(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, providerName string, offline bool) *attestation.TDXVerifyResult {
+	if raw.IntelQuote == "" {
+		return nil
+	}
+	slog.Debug("TDX verification starting", "quote_len", len(raw.IntelQuote))
+	tdxStart := time.Now()
+	tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, offline)
+	if verifier := newReportDataVerifier(providerName); verifier != nil && tdxResult.ParseErr == nil {
+		detail, err := verifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+		tdxResult.ReportDataBindingErr = err
+		tdxResult.ReportDataBindingDetail = detail
+	}
+	slog.Debug("TDX verification complete", "elapsed", time.Since(tdxStart))
+	return tdxResult
+}
+
+// verifyNVIDIA runs NVIDIA EAT and NRAS verification.
+// Returns nil for either if not applicable.
+func verifyNVIDIA(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, client *http.Client, offline bool) (eat, nras *attestation.NvidiaVerifyResult) {
+	if raw.NvidiaPayload != "" {
+		slog.Debug("NVIDIA verification starting", "payload_len", len(raw.NvidiaPayload))
+		nvidiaStart := time.Now()
+		eat = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+		slog.Debug("NVIDIA verification complete", "elapsed", time.Since(nvidiaStart))
+	}
+	if !offline && raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
+		slog.Debug("NVIDIA NRAS verification starting")
+		nrasStart := time.Now()
+		nras = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client)
+		slog.Debug("NVIDIA NRAS verification complete", "elapsed", time.Since(nrasStart))
+	}
+	return eat, nras
+}
+
+// checkPoC runs a Proof of Cloud check for the given intel_quote.
+// Returns nil if offline or quote is empty.
+func checkPoC(ctx context.Context, quote string, client *http.Client, offline bool) *attestation.PoCResult {
+	if offline || quote == "" {
+		return nil
+	}
+	slog.Debug("Proof of Cloud check starting")
+	pocStart := time.Now()
+	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
+	result := poc.CheckQuote(ctx, quote)
+	slog.Debug("Proof of Cloud check complete", "elapsed", time.Since(pocStart),
+		"registered", result != nil && result.Registered)
+	return result
+}
+
+// verifyNearcloudGateway verifies gateway TDX, compose binding, and PoC for
+// providers that populate GatewayIntelQuote (nearcloud).
+func verifyNearcloudGateway(
+	ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce,
+	client *http.Client, offline bool,
+) (tdx *attestation.TDXVerifyResult, compose *attestation.ComposeBindingResult, poc *attestation.PoCResult) {
+	if raw.GatewayIntelQuote == "" {
+		return nil, nil, nil
+	}
+	slog.Debug("gateway TDX verification starting", "quote_len", len(raw.GatewayIntelQuote))
+	tdx = attestation.VerifyTDXQuote(ctx, raw.GatewayIntelQuote, nonce, offline)
+	if tdx.ParseErr == nil {
+		detail, rdErr := nearcloud.GatewayReportDataVerifier{}.Verify(
+			tdx.ReportData, raw.GatewayTLSFingerprint, nonce)
+		tdx.ReportDataBindingErr = rdErr
+		tdx.ReportDataBindingDetail = detail
+	}
+	if raw.GatewayAppCompose != "" && tdx.ParseErr == nil {
+		compose = &attestation.ComposeBindingResult{Checked: true}
+		compose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, tdx.MRConfigID)
+	}
+	poc = checkPoC(ctx, raw.GatewayIntelQuote, client, offline)
+	slog.Debug("gateway TDX verification complete")
+	return tdx, compose, poc
+}
+
+// checkSigstore checks sigstore digests and fetches Rekor provenance for matches.
+func checkSigstore(ctx context.Context, digests []string, client *http.Client, offline bool) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
+	if len(digests) == 0 || offline {
+		return nil, nil
+	}
+	rc := attestation.NewRekorClient(client)
+	sigstoreResults := rc.CheckSigstoreDigests(ctx, digests)
+	for _, r := range sigstoreResults {
+		switch {
+		case r.OK:
+			slog.Info("Sigstore check passed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "status", r.Status)
+		case r.Err != nil:
+			slog.Warn("Sigstore check failed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "err", r.Err)
+		default:
+			slog.Warn("Sigstore check failed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "status", r.Status)
+		}
+	}
+	var rekorResults []attestation.RekorProvenance
+	for _, sr := range sigstoreResults {
+		if !sr.OK {
+			continue
+		}
+		slog.Info("fetching Rekor provenance", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+		prov := rc.FetchRekorProvenance(ctx, sr.Digest)
+		switch {
+		case prov.Err != nil:
+			slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...", "err", prov.Err)
+		case prov.HasCert:
+			slog.Info("Rekor provenance found",
+				"digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...",
+				"issuer", prov.OIDCIssuer,
+				"repo", prov.SourceRepo,
+				"commit", prov.SourceCommit[:min(7, len(prov.SourceCommit))],
+				"runner", prov.RunnerEnv,
+			)
+		default:
+			slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+		}
+		rekorResults = append(rekorResults, prov)
+	}
+	return sigstoreResults, rekorResults
 }
 
 // newAttester returns the appropriate Attester for the named provider.
