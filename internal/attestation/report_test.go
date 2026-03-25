@@ -1233,7 +1233,7 @@ func TestNvidiaNonceDetail(t *testing.T) {
 		{
 			"EAT format",
 			&NvidiaVerifyResult{Format: "EAT", GPUCount: 8},
-			"EAT nonce + 8 GPU SPDM requester nonces match submitted nonce",
+			"EAT nonce matches submitted nonce (8 GPUs)",
 		},
 		{
 			"JWT format",

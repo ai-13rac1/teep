@@ -1359,7 +1359,7 @@ func nvidiaClaimsDetail(r *NvidiaVerifyResult) string {
 func nvidiaNonceDetail(r *NvidiaVerifyResult) string {
 	switch r.Format {
 	case "EAT":
-		return fmt.Sprintf("EAT nonce + %d GPU SPDM requester nonces match submitted nonce", r.GPUCount)
+		return fmt.Sprintf("EAT nonce matches submitted nonce (%d GPUs)", r.GPUCount)
 	default:
 		return "nonce in NVIDIA payload matches submitted nonce"
 	}
