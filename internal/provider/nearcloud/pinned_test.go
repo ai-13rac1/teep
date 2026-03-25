@@ -1033,18 +1033,18 @@ func TestExtractComposeDigests(t *testing.T) {
 		// app_compose wrapping a docker_compose_file with image references.
 		appCompose := `{"docker_compose_file":"services:\n  web:\n    image: ghcr.io/example/web@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\n  api:\n    image: ghcr.io/example/api@sha256:1111111111111111111111111111111111111111111111111111111111111111\n"}`
 
-		cd := extractComposeDigests(appCompose)
-		t.Logf("repos: %v", cd.repos)
-		t.Logf("digests: %v", cd.digests)
-		t.Logf("digestToRepo: %v", cd.digestToRepo)
+		cd := attestation.ExtractComposeDigests(appCompose)
+		t.Logf("repos: %v", cd.Repos)
+		t.Logf("digests: %v", cd.Digests)
+		t.Logf("digestToRepo: %v", cd.DigestToRepo)
 
-		if len(cd.repos) == 0 {
+		if len(cd.Repos) == 0 {
 			t.Error("expected non-empty repos")
 		}
-		if len(cd.digests) == 0 {
+		if len(cd.Digests) == 0 {
 			t.Error("expected non-empty digests")
 		}
-		if len(cd.digestToRepo) == 0 {
+		if len(cd.DigestToRepo) == 0 {
 			t.Error("expected non-empty digestToRepo")
 		}
 	})
@@ -1053,22 +1053,22 @@ func TestExtractComposeDigests(t *testing.T) {
 		// app_compose that is itself a compose file (no docker_compose_file wrapper).
 		appCompose := "services:\n  web:\n    image: ghcr.io/example/web@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\n"
 
-		cd := extractComposeDigests(appCompose)
-		t.Logf("repos: %v", cd.repos)
-		t.Logf("digests: %v", cd.digests)
+		cd := attestation.ExtractComposeDigests(appCompose)
+		t.Logf("repos: %v", cd.Repos)
+		t.Logf("digests: %v", cd.Digests)
 
-		if len(cd.repos) == 0 {
+		if len(cd.Repos) == 0 {
 			t.Error("expected non-empty repos")
 		}
-		if len(cd.digests) == 0 {
+		if len(cd.Digests) == 0 {
 			t.Error("expected non-empty digests")
 		}
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		cd := extractComposeDigests("")
-		t.Logf("repos: %v, digests: %v", cd.repos, cd.digests)
-		if len(cd.repos) != 0 || len(cd.digests) != 0 {
+		cd := attestation.ExtractComposeDigests("")
+		t.Logf("repos: %v, digests: %v", cd.Repos, cd.Digests)
+		if len(cd.Repos) != 0 || len(cd.Digests) != 0 {
 			t.Error("expected empty results for empty input")
 		}
 	})
@@ -1076,18 +1076,18 @@ func TestExtractComposeDigests(t *testing.T) {
 
 func TestMergeComposeDigests(t *testing.T) {
 	t.Run("no_overlap", func(t *testing.T) {
-		model := composeDigests{
-			repos:        []string{"ghcr.io/a/web"},
-			digestToRepo: map[string]string{"aaa": "ghcr.io/a/web"},
-			digests:      []string{"aaa"},
+		model := attestation.ComposeDigests{
+			Repos:        []string{"ghcr.io/a/web"},
+			DigestToRepo: map[string]string{"aaa": "ghcr.io/a/web"},
+			Digests:      []string{"aaa"},
 		}
-		gateway := composeDigests{
-			repos:        []string{"ghcr.io/b/gw"},
-			digestToRepo: map[string]string{"bbb": "ghcr.io/b/gw"},
-			digests:      []string{"bbb"},
+		gateway := attestation.ComposeDigests{
+			Repos:        []string{"ghcr.io/b/gw"},
+			DigestToRepo: map[string]string{"bbb": "ghcr.io/b/gw"},
+			Digests:      []string{"bbb"},
 		}
 
-		allDigests, dtr := mergeComposeDigests(model, gateway)
+		allDigests, dtr := attestation.MergeComposeDigests(model, gateway)
 		t.Logf("allDigests: %v", allDigests)
 		t.Logf("digestToRepo: %v", dtr)
 
@@ -1100,18 +1100,18 @@ func TestMergeComposeDigests(t *testing.T) {
 	})
 
 	t.Run("duplicate_digests_deduped", func(t *testing.T) {
-		model := composeDigests{
-			repos:        []string{"ghcr.io/a/web"},
-			digestToRepo: map[string]string{"same": "ghcr.io/a/web"},
-			digests:      []string{"same"},
+		model := attestation.ComposeDigests{
+			Repos:        []string{"ghcr.io/a/web"},
+			DigestToRepo: map[string]string{"same": "ghcr.io/a/web"},
+			Digests:      []string{"same"},
 		}
-		gateway := composeDigests{
-			repos:        []string{"ghcr.io/a/web"},
-			digestToRepo: map[string]string{"same": "ghcr.io/a/web"},
-			digests:      []string{"same"},
+		gateway := attestation.ComposeDigests{
+			Repos:        []string{"ghcr.io/a/web"},
+			DigestToRepo: map[string]string{"same": "ghcr.io/a/web"},
+			Digests:      []string{"same"},
 		}
 
-		allDigests, dtr := mergeComposeDigests(model, gateway)
+		allDigests, dtr := attestation.MergeComposeDigests(model, gateway)
 		t.Logf("allDigests: %v", allDigests)
 
 		if len(allDigests) != 1 {
@@ -1123,16 +1123,16 @@ func TestMergeComposeDigests(t *testing.T) {
 	})
 
 	t.Run("conflict_first_writer_wins", func(t *testing.T) {
-		model := composeDigests{
-			digestToRepo: map[string]string{"conflict_digest": "ghcr.io/model/img"},
-			digests:      []string{"conflict_digest"},
+		model := attestation.ComposeDigests{
+			DigestToRepo: map[string]string{"conflict_digest": "ghcr.io/model/img"},
+			Digests:      []string{"conflict_digest"},
 		}
-		gateway := composeDigests{
-			digestToRepo: map[string]string{"conflict_digest": "ghcr.io/gateway/img"},
-			digests:      []string{"conflict_digest"},
+		gateway := attestation.ComposeDigests{
+			DigestToRepo: map[string]string{"conflict_digest": "ghcr.io/gateway/img"},
+			Digests:      []string{"conflict_digest"},
 		}
 
-		allDigests, dtr := mergeComposeDigests(model, gateway)
+		allDigests, dtr := attestation.MergeComposeDigests(model, gateway)
 		t.Logf("allDigests: %v", allDigests)
 		t.Logf("digestToRepo: %v", dtr)
 
@@ -1147,7 +1147,7 @@ func TestMergeComposeDigests(t *testing.T) {
 	})
 
 	t.Run("empty_inputs", func(t *testing.T) {
-		allDigests, dtr := mergeComposeDigests(composeDigests{}, composeDigests{})
+		allDigests, dtr := attestation.MergeComposeDigests(attestation.ComposeDigests{}, attestation.ComposeDigests{})
 		t.Logf("allDigests: %v, digestToRepo: %v", allDigests, dtr)
 
 		if len(allDigests) != 0 {
