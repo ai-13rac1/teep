@@ -38,6 +38,7 @@ import (
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/provider/venice"
@@ -293,8 +294,12 @@ func fromConfig(
 			pocSigningKey,
 		)
 		p.ModelLister = neardirect.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
+	case "nanogpt":
+		p.ChatPath = "/v1/chat/completions"
+		p.Attester = nanogpt.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.ReportDataVerifier = venice.ReportDataVerifier{}
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud)", cp.Name)
+		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt)", cp.Name)
 	}
 	return p, nil
 }
