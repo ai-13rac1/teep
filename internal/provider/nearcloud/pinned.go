@@ -266,7 +266,23 @@ func (h *PinnedHandler) attestIfNeeded(
 			return nil, err
 		}
 		if r.Blocked() {
-			slog.Warn("attestation blocked by policy", "domain", domain, "model", model)
+			blocked := r.BlockedFactors()
+			names := make([]string, len(blocked))
+			for i, f := range blocked {
+				names[i] = f.Name
+			}
+			slog.Warn("attestation blocked by policy",
+				"domain", domain,
+				"model", model,
+				"blocked_factors", names,
+			)
+			for _, f := range blocked {
+				slog.Info("blocked factor detail",
+					"factor", f.Name,
+					"detail", f.Detail,
+					"tier", f.Tier,
+				)
+			}
 			return attestResult{report: r, signingKey: key}, nil
 		}
 		h.spkiCache.Add(domain, liveSPKI)

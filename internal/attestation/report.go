@@ -78,6 +78,18 @@ func (r *VerificationReport) Blocked() bool {
 	return false
 }
 
+// BlockedFactors returns the names and details of every enforced factor that
+// has failed. The slice is nil when Blocked() would return false.
+func (r *VerificationReport) BlockedFactors() []FactorResult {
+	var out []FactorResult
+	for _, f := range r.Factors {
+		if f.Status == Fail && f.Enforced {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ReportDataBindingPassed returns true if the tdx_reportdata_binding factor
 // passed. Without this, a MITM can substitute the enclave public key and
 // E2EE becomes security theater. E2EE must never be activated unless this

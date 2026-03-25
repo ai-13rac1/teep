@@ -173,6 +173,48 @@ func TestBlockedReturnsTrue(t *testing.T) {
 	}
 }
 
+// TestBlockedFactorsReturnsFailingEnforced verifies BlockedFactors lists all
+// enforced factors that failed.
+func TestBlockedFactorsReturnsFailingEnforced(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.Nonce = "" // force nonce_match to fail
+
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+
+	blocked := report.BlockedFactors()
+	if len(blocked) == 0 {
+		t.Fatal("BlockedFactors() returned empty slice when Blocked() is true")
+	}
+	found := false
+	for _, f := range blocked {
+		if f.Name == "nonce_match" {
+			found = true
+		}
+		if f.Status != Fail {
+			t.Errorf("BlockedFactors() returned non-Fail factor %q (status=%v)", f.Name, f.Status)
+		}
+		if !f.Enforced {
+			t.Errorf("BlockedFactors() returned non-enforced factor %q", f.Name)
+		}
+	}
+	if !found {
+		t.Error("BlockedFactors() did not include nonce_match")
+	}
+}
+
+// TestBlockedFactorsReturnsNilWhenNotBlocked verifies BlockedFactors is nil
+// when no enforced factor fails.
+func TestBlockedFactorsReturnsNilWhenNotBlocked(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: []string{}})
+
+	if blocked := report.BlockedFactors(); blocked != nil {
+		t.Errorf("BlockedFactors() returned %v, want nil", blocked)
+	}
+}
+
 // TestBlockedReturnsFalse verifies Blocked is false when no enforced factor fails.
 func TestBlockedReturnsFalse(t *testing.T) {
 	nonce := NewNonce()
