@@ -1,6 +1,7 @@
 package nearcloud
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -1025,6 +1026,216 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.URL.Scheme = "http"
 	req.URL.Host = strings.TrimPrefix(t.target, "http://")
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestExtractComposeDigests(t *testing.T) {
+	t.Run("with_docker_compose", func(t *testing.T) {
+		// app_compose wrapping a docker_compose_file with image references.
+		appCompose := `{"docker_compose_file":"services:\n  web:\n    image: ghcr.io/example/web@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\n  api:\n    image: ghcr.io/example/api@sha256:1111111111111111111111111111111111111111111111111111111111111111\n"}`
+
+		cd := extractComposeDigests(appCompose)
+		t.Logf("repos: %v", cd.repos)
+		t.Logf("digests: %v", cd.digests)
+		t.Logf("digestToRepo: %v", cd.digestToRepo)
+
+		if len(cd.repos) == 0 {
+			t.Error("expected non-empty repos")
+		}
+		if len(cd.digests) == 0 {
+			t.Error("expected non-empty digests")
+		}
+		if len(cd.digestToRepo) == 0 {
+			t.Error("expected non-empty digestToRepo")
+		}
+	})
+
+	t.Run("plain_compose", func(t *testing.T) {
+		// app_compose that is itself a compose file (no docker_compose_file wrapper).
+		appCompose := "services:\n  web:\n    image: ghcr.io/example/web@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890\n"
+
+		cd := extractComposeDigests(appCompose)
+		t.Logf("repos: %v", cd.repos)
+		t.Logf("digests: %v", cd.digests)
+
+		if len(cd.repos) == 0 {
+			t.Error("expected non-empty repos")
+		}
+		if len(cd.digests) == 0 {
+			t.Error("expected non-empty digests")
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		cd := extractComposeDigests("")
+		t.Logf("repos: %v, digests: %v", cd.repos, cd.digests)
+		if len(cd.repos) != 0 || len(cd.digests) != 0 {
+			t.Error("expected empty results for empty input")
+		}
+	})
+}
+
+func TestMergeComposeDigests(t *testing.T) {
+	t.Run("no_overlap", func(t *testing.T) {
+		model := composeDigests{
+			repos:        []string{"ghcr.io/a/web"},
+			digestToRepo: map[string]string{"aaa": "ghcr.io/a/web"},
+			digests:      []string{"aaa"},
+		}
+		gateway := composeDigests{
+			repos:        []string{"ghcr.io/b/gw"},
+			digestToRepo: map[string]string{"bbb": "ghcr.io/b/gw"},
+			digests:      []string{"bbb"},
+		}
+
+		allDigests, dtr := mergeComposeDigests(model, gateway)
+		t.Logf("allDigests: %v", allDigests)
+		t.Logf("digestToRepo: %v", dtr)
+
+		if len(allDigests) != 2 {
+			t.Errorf("allDigests len = %d, want 2", len(allDigests))
+		}
+		if len(dtr) != 2 {
+			t.Errorf("digestToRepo len = %d, want 2", len(dtr))
+		}
+	})
+
+	t.Run("duplicate_digests_deduped", func(t *testing.T) {
+		model := composeDigests{
+			repos:        []string{"ghcr.io/a/web"},
+			digestToRepo: map[string]string{"same": "ghcr.io/a/web"},
+			digests:      []string{"same"},
+		}
+		gateway := composeDigests{
+			repos:        []string{"ghcr.io/a/web"},
+			digestToRepo: map[string]string{"same": "ghcr.io/a/web"},
+			digests:      []string{"same"},
+		}
+
+		allDigests, dtr := mergeComposeDigests(model, gateway)
+		t.Logf("allDigests: %v", allDigests)
+
+		if len(allDigests) != 1 {
+			t.Errorf("allDigests len = %d, want 1 (deduplicated)", len(allDigests))
+		}
+		if len(dtr) != 1 {
+			t.Errorf("digestToRepo len = %d, want 1", len(dtr))
+		}
+	})
+
+	t.Run("conflict_first_writer_wins", func(t *testing.T) {
+		model := composeDigests{
+			digestToRepo: map[string]string{"conflict_digest": "ghcr.io/model/img"},
+			digests:      []string{"conflict_digest"},
+		}
+		gateway := composeDigests{
+			digestToRepo: map[string]string{"conflict_digest": "ghcr.io/gateway/img"},
+			digests:      []string{"conflict_digest"},
+		}
+
+		allDigests, dtr := mergeComposeDigests(model, gateway)
+		t.Logf("allDigests: %v", allDigests)
+		t.Logf("digestToRepo: %v", dtr)
+
+		// Model was first, so model's repo wins.
+		if dtr["conflict_digest"] != "ghcr.io/model/img" {
+			t.Errorf("digestToRepo[conflict_digest] = %q, want %q (first-writer-wins)",
+				dtr["conflict_digest"], "ghcr.io/model/img")
+		}
+		if len(allDigests) != 1 {
+			t.Errorf("allDigests len = %d, want 1", len(allDigests))
+		}
+	})
+
+	t.Run("empty_inputs", func(t *testing.T) {
+		allDigests, dtr := mergeComposeDigests(composeDigests{}, composeDigests{})
+		t.Logf("allDigests: %v, digestToRepo: %v", allDigests, dtr)
+
+		if len(allDigests) != 0 {
+			t.Error("expected empty allDigests")
+		}
+		if len(dtr) != 0 {
+			t.Error("expected empty digestToRepo")
+		}
+	})
+}
+
+func TestEncryptChat_NoE2EE(t *testing.T) {
+	h := &PinnedHandler{}
+	body := []byte(`{"messages":[]}`)
+	chatBody, session, headers, err := h.encryptChat(
+		&provider.PinnedRequest{Body: body},
+		nil, "",
+	)
+	if err != nil {
+		t.Fatalf("encryptChat: %v", err)
+	}
+	t.Logf("chatBody len: %d, session: %v, headers: %v", len(chatBody), session, headers)
+
+	if !bytes.Equal(chatBody, body) {
+		t.Errorf("chatBody = %q, want %q", chatBody, body)
+	}
+	if session != nil {
+		t.Error("session should be nil when E2EE is off")
+	}
+	if headers != nil {
+		t.Error("headers should be nil when E2EE is off")
+	}
+}
+
+func TestEncryptChat_NoSigningKey(t *testing.T) {
+	h := &PinnedHandler{}
+	_, _, _, err := h.encryptChat(
+		&provider.PinnedRequest{E2EE: true, Body: []byte(`{}`)},
+		nil, "",
+	)
+	t.Logf("error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when E2EE requested but no signing key")
+	}
+	if !strings.Contains(err.Error(), "no signing key") {
+		t.Errorf("error should mention signing key: %v", err)
+	}
+}
+
+func TestEncryptChat_UsesRequestSigningKey(t *testing.T) {
+	// Generate a valid Ed25519 key pair (64 hex chars = 32 bytes public key).
+	h := &PinnedHandler{}
+
+	// A valid 64-hex-char Ed25519 public key (from test fixtures).
+	sigKey := "04aaaa0000000000000000000000000000000000000000000000000000000000"
+
+	chatBody, session, headers, err := h.encryptChat(
+		&provider.PinnedRequest{
+			E2EE:       true,
+			SigningKey: sigKey,
+			Body:       []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		},
+		nil, "", // no report, no attestation signing key — uses req.SigningKey
+	)
+	t.Logf("err: %v", err)
+	t.Logf("chatBody len: %d", len(chatBody))
+	if session != nil {
+		t.Logf("session: Ed25519PubHex=%s", session.Ed25519PubHex[:16]+"...")
+	}
+	if headers != nil {
+		t.Logf("headers: %v", headers)
+	}
+
+	if err != nil {
+		t.Fatalf("encryptChat: %v", err)
+	}
+	if session == nil {
+		t.Fatal("session should be non-nil with E2EE")
+	}
+	if headers == nil {
+		t.Fatal("headers should be non-nil with E2EE")
+	}
+	if headers.Get("X-Signing-Algo") != "ed25519" {
+		t.Errorf("X-Signing-Algo = %q, want ed25519", headers.Get("X-Signing-Algo"))
+	}
+	if headers.Get("X-Encryption-Version") != "2" {
+		t.Errorf("X-Encryption-Version = %q, want 2", headers.Get("X-Encryption-Version"))
+	}
 }
 
 // Suppress unused import warning for neardirect package.
