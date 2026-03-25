@@ -379,9 +379,8 @@ func setupMocks(t *testing.T, fdir, prefix string, raw *attestation.RawAttestati
 		t.Fatalf("marshal test Rekor public key: %v", err)
 	}
 	testPubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
-	origRekorKey := attestation.RekorPublicKeyOverride
-	attestation.RekorPublicKeyOverride = string(testPubPEM)
-	t.Cleanup(func() { attestation.RekorPublicKeyOverride = origRekorKey })
+	attestation.SetRekorPublicKeyOverride(string(testPubPEM))
+	t.Cleanup(func() { attestation.SetRekorPublicKeyOverride("") })
 
 	// Build a digest→repo map from the docker-compose manifest so we can
 	// route each index query to the right mock entry.
