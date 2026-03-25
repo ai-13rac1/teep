@@ -190,6 +190,7 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 					HasCert:        false,
 					KeyFingerprint: hex.EncodeToString(h[:]),
 				}
+				verifyRekorEntry(entry, &p)
 				rawKeyFallback = &p
 			}
 			continue
@@ -220,6 +221,7 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 					HasNonFulcioCert: true,
 					KeyFingerprint:   prov.KeyFingerprint,
 				}
+				verifyRekorEntry(entry, &p)
 				rawKeyFallback = &p
 			}
 			continue
