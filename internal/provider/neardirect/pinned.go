@@ -259,7 +259,7 @@ func (h *PinnedHandler) attestOnConn(
 ) (*attestation.VerificationReport, error) {
 	nonce := attestation.NewNonce()
 	slog.Debug("neardirect attestation nonce generated",
-		"nonce", nonce.Hex(),
+		"nonce_prefix", nonce.HexPrefix(),
 		"domain", domain,
 		"model", model,
 	)
@@ -325,7 +325,7 @@ func (h *PinnedHandler) attestOnConn(
 	var nvidiaResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" {
 		slog.Debug("verifying NVIDIA payload with nonce",
-			"nonce", nonce.Hex(),
+			"nonce_prefix", nonce.HexPrefix(),
 			"domain", domain,
 			"model", model,
 		)

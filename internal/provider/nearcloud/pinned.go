@@ -311,7 +311,7 @@ func (h *PinnedHandler) attestOnConn(
 ) (*attestation.VerificationReport, string, error) {
 	modelNonce := attestation.NewNonce()
 	slog.Debug("nearcloud attestation nonce generated",
-		"nonce", modelNonce.Hex(),
+		"nonce_prefix", modelNonce.HexPrefix(),
 		"domain", domain,
 		"model", model,
 	)
@@ -324,7 +324,7 @@ func (h *PinnedHandler) attestOnConn(
 	tdxResult := h.verifyModelTDX(ctx, raw, modelNonce)
 	if raw.NvidiaPayload != "" {
 		slog.Debug("verifying NVIDIA payload with nonce",
-			"nonce", modelNonce.Hex(),
+			"nonce_prefix", modelNonce.HexPrefix(),
 			"domain", domain,
 			"model", model,
 		)

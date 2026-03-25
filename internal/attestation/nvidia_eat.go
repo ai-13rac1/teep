@@ -75,8 +75,8 @@ func verifyNVIDIAEAT(payload string, expectedNonce Nonce) *NvidiaVerifyResult {
 	slog.Debug("NVIDIA EAT parsed",
 		"arch", eat.Arch,
 		"gpu_count", len(eat.EvidenceList),
-		"eat_nonce", eat.Nonce,
-		"expected_nonce", expectedNonce.Hex(),
+		"eat_nonce_prefix", NoncePrefix(eat.Nonce),
+		"expected_nonce_prefix", expectedNonce.HexPrefix(),
 		"eat_nonce_matches", subtle.ConstantTimeCompare([]byte(eat.Nonce), []byte(expectedNonce.Hex())) == 1,
 	)
 
@@ -259,8 +259,8 @@ func verifySPDMEvidence(evidence []byte, expectedNonce Nonce, leafKey *ecdsa.Pub
 	gotHex := hex.EncodeToString(requestNonce[:])
 	wantHex := expectedNonce.Hex()
 	slog.Debug("SPDM requester nonce extracted",
-		"spdm_nonce", gotHex,
-		"expected_nonce", wantHex,
+		"spdm_nonce_prefix", NoncePrefix(gotHex),
+		"expected_nonce_prefix", NoncePrefix(wantHex),
 		"match", subtle.ConstantTimeCompare(requestNonce[:], expectedNonce[:]) == 1,
 	)
 	if subtle.ConstantTimeCompare(requestNonce[:], expectedNonce[:]) != 1 {
