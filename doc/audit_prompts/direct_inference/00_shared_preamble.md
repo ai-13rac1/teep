@@ -29,6 +29,39 @@ The primary threats this system defends against:
 
 The trust boundary is the TEE itself: the proxy trusts nothing outside cryptographically verified attestation evidence.
 
+## Repository Security Rules
+
+This is **critical infrastructure security software**. Protecting confidential traffic is more important than providing service. Failing closed is a feature, not a bug.
+
+The auditor MUST evaluate every code path against these rules. Any violation is a finding.
+
+### Fail-Closed Policy (highest priority)
+
+Every validation check MUST block the request on failure. Flag any code that:
+
+- Returns a nil error, default value, or falls through on a validation failure.
+- Catches an error and continues instead of aborting (error fallback).
+- Uses a fallback, default, or degraded mode when a security check fails.
+- Introduces a "best-effort", "soft-fail", or "skip-on-error" code path.
+- Adds backwards-compatible shims that weaken validation.
+- Silently drops malformed elements instead of rejecting the whole input.
+- Allows an unattested or partially-attested request to be forwarded.
+- Serves stale or cached data when re-validation fails, without blocking.
+
+If an error path does anything other than return/propagate an error, it is a defect.
+
+There are **NO** acceptable workarounds, fallbacks, or error recoveries for security validation.
+
+### Additional Mandatory Rules
+
+- Encryption MUST be authenticated (AES-GCM, not AES-CTR/CBC alone).
+- Encryption keys MUST be bound to TEE attestation.
+- Nonce generation MUST use `crypto/rand`. If randomness fails, the code MUST panic or return an error — never use a weak source.
+- NEVER log or print API keys, inference request bodies, or response bodies.
+- Unknown or misspelled config values MUST be rejected at startup (not silently ignored).
+- JSON unmarshalling SHOULD use strict mode (reject unknown fields).
+- All reads from untrusted sources (HTTP bodies, JSON arrays) MUST be bounded.
+
 ## Quality Bar and Deliverables
 
 Future direct-provider audits MUST meet the following quality bar:
