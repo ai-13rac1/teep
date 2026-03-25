@@ -691,9 +691,18 @@ func verifyInclusionProof(entry *rekorEntry) error {
 	return nil
 }
 
+// RekorPublicKeyOverride when non-empty replaces the embedded Rekor
+// transparency log public key for SET verification. Tests use this to
+// inject a key matching mock-signed entry timestamps.
+var RekorPublicKeyOverride string
+
 // parseRekorPublicKey parses the embedded Rekor transparency log public key.
 func parseRekorPublicKey() (*ecdsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(rekorLogPublicKeyPEM))
+	keyPEM := rekorLogPublicKeyPEM
+	if RekorPublicKeyOverride != "" {
+		keyPEM = RekorPublicKeyOverride
+	}
+	block, _ := pem.Decode([]byte(keyPEM))
 	if block == nil {
 		return nil, errors.New("no PEM block in Rekor public key")
 	}

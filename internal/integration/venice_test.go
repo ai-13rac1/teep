@@ -215,6 +215,7 @@ func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
 		{"e2ee_capable", attestation.Pass},
 		{"compose_binding", attestation.Pass},
 		{"sigstore_verification", attestation.Pass},
+		{"build_transparency_log", attestation.Pass},
 		{"event_log_integrity", attestation.Pass},
 	}
 	for _, exp := range expectations {
@@ -236,15 +237,6 @@ func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
 		if f.Status == attestation.Fail {
 			t.Logf("WARNING: %s failed (likely PCK cert expiry, recapture fixtures): %s", name, f.Detail)
 		}
-	}
-
-	// build_transparency_log — the mock Rekor cannot produce valid Signed
-	// Entry Timestamps (SET) for Fulcio entries so this factor is expected
-	// to fail with an SET verification error. Key fingerprint and OIDC
-	// identity checks pass with the per-image mock entries.
-	btlF := findFactor(t, report, "build_transparency_log")
-	if btlF.Status == attestation.Fail {
-		t.Logf("WARNING: build_transparency_log failed (mock Rekor lacks SET signatures): %s", btlF.Detail)
 	}
 
 	// Intel PCS collateral — expect pass with fixture data.
