@@ -738,12 +738,24 @@ func rekorProvenanceResult(in *ReportInput, scPolicy *supplyChainPolicy) FactorR
 				detail = formatRekorCommitDetail(r)
 			}
 		case rekorSigstore:
-			if r.SETVerified {
-				setVerified++
+			if r.SETErr != nil {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor SET verification failed for Sigstore entry: %v", imageRepo, r.SETErr)}
 			}
-			if r.InclusionVerified {
-				inclusionVerified++
+			if !r.SETVerified {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor SET verification did not succeed for Sigstore entry", imageRepo)}
 			}
+			if r.InclusionErr != nil {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor inclusion proof verification failed for Sigstore entry: %v", imageRepo, r.InclusionErr)}
+			}
+			if !r.InclusionVerified {
+				return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+					Detail: fmt.Sprintf("image %q: Rekor inclusion proof verification did not succeed for Sigstore entry", imageRepo)}
+			}
+			setVerified++
+			inclusionVerified++
 			sigstorePresent++
 		}
 	}
