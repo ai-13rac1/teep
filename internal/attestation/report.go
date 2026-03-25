@@ -174,783 +174,45 @@ type ReportInput struct {
 	GatewayPolicy   MeasurementPolicy // separate measurement allowlists for gateway CVM (GW-M-04)
 }
 
+// ---------------------------------------------------------------------------
+// evaluatorFunc — each verification factor is a function of this type.
+// ---------------------------------------------------------------------------
+
+// evaluatorFunc evaluates one or more verification factors against the input.
+type evaluatorFunc func(in *ReportInput) []FactorResult
+
+// factor is a convenience constructor for a single-element []FactorResult.
+func factor(tier, name string, status Status, detail string) []FactorResult {
+	return []FactorResult{{Tier: tier, Name: name, Status: status, Detail: detail}}
+}
+
 // BuildReport runs verification factors against the input and returns a
 // complete VerificationReport. The Enforced field controls which factor names
 // result in Enforced=true. Pass DefaultEnforced for production use.
-// Base factors: 24 (all providers). Gateway factors: +8 (nearcloud only).
+// Gateway factors are included only for nearcloud.
 func BuildReport(in *ReportInput) *VerificationReport {
 	enforcedSet := make(map[string]bool, len(in.Enforced))
 	for _, name := range in.Enforced {
 		enforcedSet[name] = true
 	}
 
-	factors := make([]FactorResult, 0, 31)
-
-	addFactor := func(tier, name string, status Status, detail string) {
-		factors = append(factors, FactorResult{
-			Name:     name,
-			Status:   status,
-			Detail:   detail,
-			Enforced: enforcedSet[name],
-			Tier:     tier,
-		})
-	}
-
-	// --- Tier 1: Core Attestation ---
-
-	// Factor 1: nonce_match
-	if in.Raw.Nonce == "" { //nolint:gocritic // ifElseChain: conditions compare different fields
-		addFactor(TierCore, "nonce_match", Fail, "nonce field absent from attestation response")
-	} else if subtle.ConstantTimeCompare([]byte(in.Raw.Nonce), []byte(in.Nonce.Hex())) == 1 {
-		detail := fmt.Sprintf("nonce matches (%d hex chars)", len(in.Raw.Nonce))
-		if in.Raw.NonceSource != "" {
-			detail += fmt.Sprintf(" (%s-supplied)", in.Raw.NonceSource)
-		}
-		addFactor(TierCore, "nonce_match", Pass, detail)
-	} else {
-		addFactor(TierCore, "nonce_match", Fail, fmt.Sprintf("nonce mismatch: got %q, want %q", truncHex(in.Raw.Nonce), truncHex(in.Nonce.Hex())))
-	}
-
-	// Factor 2: tdx_quote_present
-	if in.Raw.IntelQuote == "" {
-		addFactor(TierCore, "tdx_quote_present", Fail, "intel_quote field is absent from attestation response")
-	} else {
-		// Base64 length → approximate raw bytes
-		addFactor(TierCore, "tdx_quote_present", Pass, fmt.Sprintf("TDX quote present (%d hex chars)", len(in.Raw.IntelQuote)))
-	}
-
-	// Factors 3–6, 8, 10 come from TDX quote parsing.
-	// in.TDX is nil when the quote is absent or could not be decoded for
-	// a network/decode reason prior to parsing.
-	if in.TDX == nil {
-		// All TDX parse/verify factors are Fail because we have no quote to check.
-		addFactor(TierCore, "tdx_quote_structure", Fail, "no TDX quote available to parse")
-		addFactor(TierCore, "tdx_cert_chain", Fail, "no TDX quote available; cannot verify cert chain")
-		addFactor(TierCore, "tdx_quote_signature", Fail, "no TDX quote available; cannot verify signature")
-		addFactor(TierCore, "tdx_debug_disabled", Fail, "no TDX quote available; cannot check debug flag")
-	} else {
-		// Factor 3: tdx_quote_structure
-		if in.TDX.ParseErr != nil {
-			addFactor(TierCore, "tdx_quote_structure", Fail, fmt.Sprintf("TDX quote parse failed: %v", in.TDX.ParseErr))
-		} else {
-			mrtdHex := hex.EncodeToString(in.TDX.MRTD)
-			mrSeamHex := hex.EncodeToString(in.TDX.MRSeam)
-
-			detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(in.TDX))
-			if len(mrtdHex) >= 16 {
-				detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.TDX), mrtdHex[:16])
-			}
-
-			switch {
-			case in.Policy.HasMRTDPolicy() && !containsAllowlist(in.Policy.MRTDAllow, mrtdHex):
-				addFactor(TierCore, "tdx_quote_structure", Fail, fmt.Sprintf("MRTD not in policy allowlist: %s...", prefixHex(mrtdHex)))
-			case in.Policy.HasMRSeamPolicy() && !containsAllowlist(in.Policy.MRSeamAllow, mrSeamHex):
-				addFactor(TierCore, "tdx_quote_structure", Fail, fmt.Sprintf("MRSEAM not in policy allowlist: %s...", prefixHex(mrSeamHex)))
-			case in.Policy.HasMRTDPolicy() && in.Policy.HasMRSeamPolicy():
-				addFactor(TierCore, "tdx_quote_structure", Pass, detail+" (MRTD/MRSEAM policy matched)")
-			case in.Policy.HasMRTDPolicy():
-				addFactor(TierCore, "tdx_quote_structure", Pass, detail+" (MRTD policy matched)")
-			case in.Policy.HasMRSeamPolicy():
-				addFactor(TierCore, "tdx_quote_structure", Pass, detail+" (MRSEAM policy matched)")
-			default:
-				addFactor(TierCore, "tdx_quote_structure", Pass, detail)
-			}
-		}
-
-		// Factor 4: tdx_cert_chain
-		if in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-			addFactor(TierCore, "tdx_cert_chain", Skip, "quote parse failed; cert chain not extracted")
-		} else if in.TDX.CertChainErr != nil {
-			addFactor(TierCore, "tdx_cert_chain", Fail, fmt.Sprintf("cert chain verification failed: %v", in.TDX.CertChainErr))
-		} else {
-			addFactor(TierCore, "tdx_cert_chain", Pass, "certificate chain valid (Intel root CA)")
-		}
-
-		// Factor 5: tdx_quote_signature
-		if in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-			addFactor(TierCore, "tdx_quote_signature", Skip, "quote parse failed; signature not verified")
-		} else if in.TDX.SignatureErr != nil {
-			addFactor(TierCore, "tdx_quote_signature", Fail, fmt.Sprintf("quote signature invalid: %v", in.TDX.SignatureErr))
-		} else {
-			addFactor(TierCore, "tdx_quote_signature", Pass, "quote signature verified")
-		}
-
-		// Factor 6: tdx_debug_disabled
-		if in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-			addFactor(TierCore, "tdx_debug_disabled", Skip, "quote parse failed; debug flag not checked")
-		} else if in.TDX.DebugEnabled {
-			addFactor(TierCore, "tdx_debug_disabled", Fail, "TD_ATTRIBUTES debug bit is set — this is a debug enclave; do not trust for production")
-		} else {
-			addFactor(TierCore, "tdx_debug_disabled", Pass, "debug bit is 0 (production enclave)")
+	evaluators := buildEvaluators(in.GatewayTDX != nil)
+	var factors []FactorResult
+	for _, eval := range evaluators {
+		for _, f := range eval(in) {
+			f.Enforced = enforcedSet[f.Name]
+			factors = append(factors, f)
 		}
 	}
 
-	// Factor 7: signing_key_present
-	// The API field is called "signing_key" but it's an ECDH public key used
-	// for key exchange, not for signing.
-	if in.Raw.SigningKey == "" {
-		addFactor(TierCore, "signing_key_present", Fail, "signing_key field absent from attestation response")
-	} else {
-		addFactor(TierCore, "signing_key_present", Pass, fmt.Sprintf("enclave pubkey present (%s...)", in.Raw.SigningKey[:min(10, len(in.Raw.SigningKey))]))
-	}
-
-	// --- Tier 2: Binding & Crypto ---
-
-	// Factor 8: tdx_reportdata_binding
-	// REPORTDATA (64 bytes) must bind the enclave public key to the nonce so a
-	// MITM cannot swap the key while leaving the quote intact. Without this
-	// check, E2EE is security theater.
-	if in.TDX == nil || in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		addFactor(TierBinding, "tdx_reportdata_binding", Fail, "no parseable TDX quote; REPORTDATA binding cannot be verified")
-	} else if in.Raw.SigningKey == "" {
-		addFactor(TierBinding, "tdx_reportdata_binding", Fail, "enclave public key absent; REPORTDATA binding cannot be verified")
-	} else if in.TDX.ReportDataBindingErr != nil {
-		addFactor(TierBinding, "tdx_reportdata_binding", Fail, fmt.Sprintf("REPORTDATA does not bind enclave public key: %v", in.TDX.ReportDataBindingErr))
-	} else if in.TDX.ReportDataBindingDetail != "" {
-		addFactor(TierBinding, "tdx_reportdata_binding", Pass, in.TDX.ReportDataBindingDetail)
-	} else {
-		addFactor(TierBinding, "tdx_reportdata_binding", Skip, "no REPORTDATA verifier configured for this provider")
-	}
-
-	// Factor 9: intel_pcs_collateral
-	if in.TDX == nil || in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		addFactor(TierBinding, "intel_pcs_collateral", Skip, "no parseable TDX quote")
-	} else if in.TDX.TcbStatus != "" {
-		addFactor(TierBinding, "intel_pcs_collateral", Pass,
-			fmt.Sprintf("Intel PCS collateral fetched (TCB status: %s)", in.TDX.TcbStatus))
-	} else if in.TDX.CollateralErr != nil {
-		addFactor(TierBinding, "intel_pcs_collateral", Skip,
-			fmt.Sprintf("Intel PCS collateral fetch failed: %v", in.TDX.CollateralErr))
-	} else {
-		addFactor(TierBinding, "intel_pcs_collateral", Skip,
-			"offline mode; Intel PCS collateral not fetched")
-	}
-
-	// Factor 10: tdx_tcb_current
-	if in.TDX == nil || in.TDX.ParseErr != nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		addFactor(TierBinding, "tdx_tcb_current", Skip, "no parseable TDX quote; TCB SVN not extracted")
-	} else if in.TDX.TcbStatus == pcs.TcbComponentStatusUpToDate {
-		detail := "TCB is UpToDate per Intel PCS"
-		if len(in.TDX.AdvisoryIDs) > 0 {
-			detail += fmt.Sprintf(" (advisories: %s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
-		}
-		addFactor(TierBinding, "tdx_tcb_current", Pass, detail)
-	} else if in.TDX.TcbStatus == pcs.TcbComponentStatusSwHardeningNeeded || in.TDX.TcbStatus == pcs.TcbComponentStatusConfigurationAndSWHardeningNeeded {
-		// F-17: SWHardeningNeeded / ConfigurationAndSWHardeningNeeded indicate that known
-		// firmware vulnerabilities require software mitigations. Treat as Fail so operators
-		// see the advisory; tdx_tcb_current is not in DefaultEnforced so this does not
-		// block the proxy unless explicitly configured.
-		detail := fmt.Sprintf("TCB status: %s — software/config mitigations required for known advisories", in.TDX.TcbStatus)
-		if len(in.TDX.AdvisoryIDs) > 0 {
-			detail += fmt.Sprintf(" (%s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
-		}
-		addFactor(TierBinding, "tdx_tcb_current", Fail, detail)
-	} else if in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDate || in.TDX.TcbStatus == pcs.TcbComponentStatusRevoked || in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDateConfigurationNeeded {
-		detail := fmt.Sprintf("TCB status: %s — firmware has known vulnerabilities", in.TDX.TcbStatus)
-		if len(in.TDX.AdvisoryIDs) > 0 {
-			detail += fmt.Sprintf(" (%s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
-		}
-		addFactor(TierBinding, "tdx_tcb_current", Fail, detail)
-	} else if in.TDX.CollateralErr != nil {
-		svnHex := hex.EncodeToString(in.TDX.TeeTCBSVN)
-		addFactor(TierBinding, "tdx_tcb_current", Skip,
-			fmt.Sprintf("TEE_TCB_SVN: %s (Intel PCS collateral fetch failed: %v)", svnHex, in.TDX.CollateralErr))
-	} else {
-		svnHex := hex.EncodeToString(in.TDX.TeeTCBSVN)
-		addFactor(TierBinding, "tdx_tcb_current", Skip,
-			fmt.Sprintf("TEE_TCB_SVN: %s (offline; full check requires Intel PCS)", svnHex))
-	}
-
-	// Factor 11: nvidia_payload_present
-	if in.Raw.NvidiaPayload == "" {
-		addFactor(TierBinding, "nvidia_payload_present", Fail, "nvidia_payload field is absent from attestation response")
-	} else {
-		addFactor(TierBinding, "nvidia_payload_present", Pass, fmt.Sprintf("NVIDIA payload present (%d chars)", len(in.Raw.NvidiaPayload)))
-	}
-
-	// Factor 12: nvidia_signature
-	if in.Nvidia == nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		if in.Raw.NvidiaPayload == "" {
-			addFactor(TierBinding, "nvidia_signature", Skip, "no NVIDIA payload to verify")
-		} else {
-			addFactor(TierBinding, "nvidia_signature", Fail, "NVIDIA verification was not attempted")
-		}
-	} else if in.Nvidia.SignatureErr != nil {
-		addFactor(TierBinding, "nvidia_signature", Fail, fmt.Sprintf("signature invalid: %v", in.Nvidia.SignatureErr))
-	} else {
-		addFactor(TierBinding, "nvidia_signature", Pass, nvidiaSignatureDetail(in.Nvidia))
-	}
-
-	// Factor 13: nvidia_claims
-	if in.Nvidia == nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		if in.Raw.NvidiaPayload == "" {
-			addFactor(TierBinding, "nvidia_claims", Skip, "no NVIDIA payload to check")
-		} else {
-			addFactor(TierBinding, "nvidia_claims", Fail, "NVIDIA verification was not attempted")
-		}
-	} else if in.Nvidia.ClaimsErr != nil {
-		addFactor(TierBinding, "nvidia_claims", Fail, fmt.Sprintf("claims invalid: %v", in.Nvidia.ClaimsErr))
-	} else {
-		addFactor(TierBinding, "nvidia_claims", Pass, nvidiaClaimsDetail(in.Nvidia))
-	}
-
-	// Factor 14: nvidia_nonce_match
-	if in.Nvidia == nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		if in.Raw.NvidiaPayload == "" {
-			addFactor(TierBinding, "nvidia_nonce_match", Skip, "no NVIDIA payload; nonce not checked")
-		} else {
-			addFactor(TierBinding, "nvidia_nonce_match", Skip, "NVIDIA verification not attempted")
-		}
-	} else if in.Nvidia.Nonce == "" {
-		addFactor(TierBinding, "nvidia_nonce_match", Skip, "nonce field not found in NVIDIA payload")
-	} else if subtle.ConstantTimeCompare([]byte(in.Nvidia.Nonce), []byte(in.Nonce.Hex())) == 1 {
-		addFactor(TierBinding, "nvidia_nonce_match", Pass, nvidiaNonceDetail(in.Nvidia))
-	} else {
-		addFactor(TierBinding, "nvidia_nonce_match", Fail, fmt.Sprintf("nonce mismatch in NVIDIA payload: got %q, want %q", truncHex(in.Nvidia.Nonce), truncHex(in.Nonce.Hex())))
-	}
-
-	// Factor 15: nvidia_nras_verified
-	if in.NvidiaNRAS == nil { //nolint:gocritic // ifElseChain: conditions compare different fields
-		if in.Raw.NvidiaPayload == "" || in.Raw.NvidiaPayload[0] != '{' {
-			addFactor(TierBinding, "nvidia_nras_verified", Skip, "no EAT payload; NRAS not applicable")
-		} else {
-			addFactor(TierBinding, "nvidia_nras_verified", Skip, "offline mode; NRAS verification skipped")
-		}
-	} else if in.NvidiaNRAS.SignatureErr != nil {
-		addFactor(TierBinding, "nvidia_nras_verified", Fail,
-			fmt.Sprintf("NRAS JWT signature invalid: %v", in.NvidiaNRAS.SignatureErr))
-	} else if in.NvidiaNRAS.ClaimsErr != nil {
-		addFactor(TierBinding, "nvidia_nras_verified", Fail,
-			fmt.Sprintf("NRAS JWT claims invalid: %v", in.NvidiaNRAS.ClaimsErr))
-	} else if !in.NvidiaNRAS.OverallResult {
-		addFactor(TierBinding, "nvidia_nras_verified", Fail, "NRAS result: false")
-	} else {
-		addFactor(TierBinding, "nvidia_nras_verified", Pass, "NRAS: true (JWT verified)")
-	}
-
-	// Factor 16: e2ee_capable
-	switch {
-	case in.Raw.SigningKey == "":
-		addFactor(TierBinding, "e2ee_capable", Fail, "enclave public key absent; E2EE key exchange not possible")
-	case in.Raw.SigningAlgo == "ed25519" || len(in.Raw.SigningKey) == 64:
-		// V2: Ed25519 key (64 hex chars).
-		if err := ValidateModelKeyV2(in.Raw.SigningKey); err != nil {
-			addFactor(TierBinding, "e2ee_capable", Fail, fmt.Sprintf("enclave ed25519 public key invalid: %v", err))
-		} else {
-			addFactor(TierBinding, "e2ee_capable", Pass, "enclave ed25519 public key valid; v2 E2EE key exchange possible (ed25519)")
-		}
-	default:
-		// V1: secp256k1 key (130 hex chars).
-		s := &Session{}
-		if err := s.SetModelKey(in.Raw.SigningKey); err != nil {
-			addFactor(TierBinding, "e2ee_capable", Fail, fmt.Sprintf("enclave public key is not a valid secp256k1 point: %v", err))
-		} else {
-			detail := "enclave public key is valid secp256k1 uncompressed point; E2EE key exchange possible"
-			if in.Raw.SigningAlgo != "" {
-				detail += fmt.Sprintf(" (%s)", in.Raw.SigningAlgo)
-			}
-			addFactor(TierBinding, "e2ee_capable", Pass, detail)
+	// Promote Skip → Fail for enforced factors.
+	for i := range factors {
+		if factors[i].Status == Skip && factors[i].Enforced {
+			factors[i].Status = Fail
+			factors[i].Detail += " (enforced)"
 		}
 	}
 
-	// --- Tier 3: Supply Chain & Channel Integrity ---
-	// These represent the Tinfoil gold standard. Both Venice and NEAR are
-	// expected to fail all of these today. The detail strings explain what is
-	// missing and why it matters for users evaluating vendor security posture.
-
-	switch {
-	case in.Raw.TLSFingerprint != "":
-		fpPreview := in.Raw.TLSFingerprint
-		if len(fpPreview) > 16 {
-			fpPreview = fpPreview[:16] + "..."
-		}
-		addFactor(TierSupplyChain, "tls_key_binding", Pass,
-			fmt.Sprintf("TLS certificate SPKI bound to attestation (%s)", fpPreview))
-	case in.Raw.SigningKey != "":
-		addFactor(TierSupplyChain, "tls_key_binding", Skip,
-			"provider uses E2EE key exchange; TLS binding not applicable")
-	default:
-		addFactor(TierSupplyChain, "tls_key_binding", Fail,
-			"no TLS certificate binding in attestation")
-	}
-
-	addFactor(TierSupplyChain, "cpu_gpu_chain", Fail,
-		"CPU-GPU attestation not bound")
-
-	addFactor(TierSupplyChain, "measured_model_weights", Fail,
-		"no model weight hashes")
-
-	scPolicy := supplyChainPolicyForProvider(in.Provider)
-	if scPolicy != nil {
-		if len(in.ImageRepos) == 0 {
-			addFactor(TierSupplyChain, "build_transparency_log", Fail,
-				"no attested model image repositories extracted from compose")
-			goto buildTransparencyDone
-		}
-		for _, repo := range in.ImageRepos {
-			if !scPolicy.allowedInModel(repo) {
-				addFactor(TierSupplyChain, "build_transparency_log", Fail,
-					fmt.Sprintf("model container policy: image %q not in supply chain policy (%s)",
-						repo, strings.Join(scPolicy.modelRepoNames(), ", ")))
-				goto buildTransparencyDone
-			}
-		}
-		if scPolicy.hasGatewayImages() {
-			if len(in.GatewayImageRepos) == 0 {
-				addFactor(TierSupplyChain, "build_transparency_log", Fail,
-					"no attested gateway image repositories extracted from compose")
-				goto buildTransparencyDone
-			}
-			for _, repo := range in.GatewayImageRepos {
-				if !scPolicy.allowedInGateway(repo) {
-					addFactor(TierSupplyChain, "build_transparency_log", Fail,
-						fmt.Sprintf("gateway container policy: image %q not in supply chain policy (%s)",
-							repo, strings.Join(scPolicy.gatewayRepoNames(), ", ")))
-					goto buildTransparencyDone
-				}
-			}
-		} else if len(in.GatewayImageRepos) > 0 {
-			addFactor(TierSupplyChain, "build_transparency_log", Fail,
-				fmt.Sprintf("provider %q has no gateway images in supply chain policy but %d gateway image repos were extracted",
-					in.Provider, len(in.GatewayImageRepos)))
-			goto buildTransparencyDone
-		}
-	}
-
-	if len(in.Rekor) == 0 {
-		if scPolicy != nil {
-			addFactor(TierSupplyChain, "build_transparency_log", Fail,
-				"no Rekor provenance fetched for attested image digests")
-			goto buildTransparencyDone
-		}
-		if in.Raw.ComposeHash != "" {
-			hashPreview := in.Raw.ComposeHash
-			if len(hashPreview) > 8 {
-				hashPreview = hashPreview[:8] + "..."
-			}
-			addFactor(TierSupplyChain, "build_transparency_log", Skip,
-				fmt.Sprintf("compose hash present (%s) but no Rekor provenance fetched", hashPreview))
-		} else {
-			addFactor(TierSupplyChain, "build_transparency_log", Fail,
-				"no build transparency log")
-		}
-	} else {
-		var fulcioVerified int
-		var sigstorePresent int
-		var detail string
-		var failed bool
-	rekorLoop:
-		for i := range in.Rekor {
-			r := &in.Rekor[i]
-			imageRepo := in.DigestToRepo[r.Digest]
-			var img *ImageProvenance
-			if scPolicy != nil {
-				img = scPolicy.lookup(imageRepo)
-			}
-
-			if r.Err != nil {
-				if img != nil && img.Provenance == FulcioSigned {
-					failed = true
-					detail = fmt.Sprintf("image %q: Rekor provenance fetch failed: %v", imageRepo, r.Err)
-				} else {
-					sigstorePresent++
-				}
-				if failed {
-					break rekorLoop
-				}
-				continue
-			}
-
-			switch {
-			case img != nil && img.Provenance == FulcioSigned:
-				switch {
-				case r.SignatureErr != nil && !img.NoDSSE:
-					failed = true
-					detail = fmt.Sprintf("image %q: DSSE envelope signature verification failed: %v", imageRepo, r.SignatureErr)
-				case !r.HasCert && r.HasNonFulcioCert:
-					failed = true
-					detail = fmt.Sprintf("image %q: expected Fulcio certificate but entry has non-Fulcio X.509 cert (no OIDC issuer OID)", imageRepo)
-				case !r.HasCert:
-					failed = true
-					detail = fmt.Sprintf("image %q: expected Fulcio certificate but entry has raw key", imageRepo)
-				case !strings.EqualFold(strings.TrimSpace(r.OIDCIssuer), strings.TrimSpace(img.OIDCIssuer)):
-					failed = true
-					detail = fmt.Sprintf("image %q: unexpected OIDC issuer %q (expected %q)", imageRepo, r.OIDCIssuer, img.OIDCIssuer)
-				case img.OIDCIdentity != "" && !strings.EqualFold(strings.TrimSpace(r.SubjectURI), strings.TrimSpace(img.OIDCIdentity)):
-					failed = true
-					detail = fmt.Sprintf("image %q: unexpected OIDC identity %q (expected %q)", imageRepo, r.SubjectURI, img.OIDCIdentity)
-				default:
-					repoID := strings.TrimSpace(r.SourceRepo)
-					repoURL := strings.TrimSpace(r.SourceRepoURL)
-					if !containsFold(repoID, img.SourceRepos) && !containsFold(repoURL, img.SourceRepos) {
-						failed = true
-						detail = fmt.Sprintf("image %q: unexpected source repo %q (expected %v)", imageRepo, repoID, img.SourceRepos)
-					}
-				}
-				if failed {
-					break rekorLoop
-				}
-				fulcioVerified++
-				if detail == "" {
-					commit := r.SourceCommit
-					if len(commit) > 7 {
-						commit = commit[:7]
-					}
-					detail = fmt.Sprintf("%s@%s, %s", r.SourceRepo, commit, r.RunnerEnv)
-				}
-			case img != nil:
-				// SigstorePresent or ComposeBindingOnly — presence in Rekor suffices.
-				// If policy declares a key fingerprint, verify it matches.
-				if img.Provenance == SigstorePresent && img.KeyFingerprint != "" && r.KeyFingerprint != "" {
-					if !strings.EqualFold(r.KeyFingerprint, img.KeyFingerprint) {
-						failed = true
-						detail = fmt.Sprintf("image %q: unexpected signing key fingerprint %s (expected %s)",
-							imageRepo, truncHex(r.KeyFingerprint), truncHex(img.KeyFingerprint))
-						break rekorLoop
-					}
-				}
-				sigstorePresent++
-			case scPolicy == nil:
-				// No provider policy: fall back to generic GitHub Actions check.
-				if !r.HasCert {
-					sigstorePresent++
-					continue
-				}
-				if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
-					failed = true
-					detail = "unexpected OIDC issuer: " + r.OIDCIssuer
-					break rekorLoop
-				}
-				fulcioVerified++
-				if detail == "" {
-					commit := r.SourceCommit
-					if len(commit) > 7 {
-						commit = commit[:7]
-					}
-					detail = fmt.Sprintf("%s@%s, %s", r.SourceRepo, commit, r.RunnerEnv)
-				}
-			default:
-				// Policy exists but image not in policy — should have been
-				// caught by the tier check above.
-				failed = true
-				detail = fmt.Sprintf("image %q: not in supply chain policy", imageRepo)
-				break rekorLoop
-			}
-		}
-		switch {
-		case failed:
-			addFactor(TierSupplyChain, "build_transparency_log", Fail, detail)
-		case scPolicy != nil && fulcioVerified > 0 && sigstorePresent > 0:
-			addFactor(TierSupplyChain, "build_transparency_log", Pass,
-				fmt.Sprintf("%d image(s) verified by Fulcio provenance; %d present in Sigstore (%s)",
-					fulcioVerified, sigstorePresent, detail))
-		case scPolicy != nil && fulcioVerified > 0:
-			addFactor(TierSupplyChain, "build_transparency_log", Pass,
-				fmt.Sprintf("%d image(s) verified by Fulcio provenance (%s)", fulcioVerified, detail))
-		case scPolicy != nil && sigstorePresent > 0:
-			addFactor(TierSupplyChain, "build_transparency_log", Pass,
-				fmt.Sprintf("%d image(s) present in Sigstore (no Fulcio provenance)", sigstorePresent))
-		case fulcioVerified > 0:
-			addFactor(TierSupplyChain, "build_transparency_log", Pass,
-				fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s)", fulcioVerified, len(in.Rekor), detail))
-		default:
-			addFactor(TierSupplyChain, "build_transparency_log", Skip,
-				"all images signed with raw keys (no Fulcio build provenance)")
-		}
-	}
-buildTransparencyDone:
-
-	if in.PoC != nil && in.PoC.Registered { //nolint:gocritic // ifElseChain: conditions compare different fields
-		addFactor(TierSupplyChain, "cpu_id_registry", Pass,
-			fmt.Sprintf("Proof of Cloud: registered (%s)", in.PoC.Label))
-	} else if in.PoC != nil && in.PoC.Err != nil {
-		addFactor(TierSupplyChain, "cpu_id_registry", Skip,
-			fmt.Sprintf("Proof of Cloud query failed: %v", in.PoC.Err))
-	} else if in.PoC != nil && !in.PoC.Registered {
-		addFactor(TierSupplyChain, "cpu_id_registry", Fail,
-			"hardware not found in Proof of Cloud registry; paste intel_quote from --save-dir at proofofcloud.org to verify")
-	} else if in.TDX != nil && in.TDX.PPID != "" {
-		addFactor(TierSupplyChain, "cpu_id_registry", Skip,
-			fmt.Sprintf("PPID extracted (%s...) but offline; use default mode to check Proof of Cloud",
-				in.TDX.PPID[:min(8, len(in.TDX.PPID))]))
-	} else if in.Raw.DeviceID != "" {
-		idPreview := in.Raw.DeviceID
-		if len(idPreview) > 8 {
-			idPreview = idPreview[:8] + "..."
-		}
-		addFactor(TierSupplyChain, "cpu_id_registry", Skip,
-			fmt.Sprintf("device ID present (%s) but no registry to verify against", idPreview))
-	} else {
-		addFactor(TierSupplyChain, "cpu_id_registry", Fail,
-			"no CPU ID registry check")
-	}
-
-	// Factor 22: compose_binding
-	switch {
-	case in.Compose == nil || !in.Compose.Checked:
-		addFactor(TierSupplyChain, "compose_binding", Skip, "no app_compose in attestation response")
-	case in.Compose.Err != nil:
-		addFactor(TierSupplyChain, "compose_binding", Fail, fmt.Sprintf("compose binding failed: %v", in.Compose.Err))
-	default:
-		addFactor(TierSupplyChain, "compose_binding", Pass, "sha256(app_compose) matches MRConfigID")
-	}
-
-	// Factor 23: sigstore_verification
-	if len(in.Sigstore) == 0 {
-		addFactor(TierSupplyChain, "sigstore_verification", Skip, "no image digests to verify")
-	} else {
-		allOK := true
-		var failDigest string
-		var failDetail string
-		var composeOnly int
-		for _, r := range in.Sigstore {
-			if r.OK {
-				continue
-			}
-			// Images declared ComposeBindingOnly are expected to be absent
-			// from Sigstore; their security relies on the pinned digest in
-			// the attested compose manifest.
-			if scPolicy != nil && len(in.DigestToRepo) > 0 {
-				repo := in.DigestToRepo[r.Digest]
-				img := scPolicy.lookup(repo)
-				if img != nil && img.Provenance == ComposeBindingOnly {
-					composeOnly++
-					continue
-				}
-			}
-			allOK = false
-			failDigest = r.Digest
-			if r.Err != nil {
-				failDetail = r.Err.Error()
-			} else {
-				failDetail = fmt.Sprintf("HTTP %d", r.Status)
-			}
-			break
-		}
-		inSigstore := len(in.Sigstore) - composeOnly
-		switch {
-		case !allOK:
-			addFactor(TierSupplyChain, "sigstore_verification", Fail,
-				fmt.Sprintf("Sigstore check failed for sha256:%s (%s)", failDigest[:min(16, len(failDigest))], failDetail))
-		case composeOnly > 0:
-			addFactor(TierSupplyChain, "sigstore_verification", Pass,
-				fmt.Sprintf("%d image digest(s) found in Sigstore transparency log; %d not Sigstore-signed (compose-pinned)", inSigstore, composeOnly))
-		default:
-			addFactor(TierSupplyChain, "sigstore_verification", Pass,
-				fmt.Sprintf("%d image digest(s) found in Sigstore transparency log", len(in.Sigstore)))
-		}
-	}
-
-	// Factor 24: event_log_integrity
-	// GW-M-05: Absent event log yields Fail (not Skip) when the factor is enforced.
-	if len(in.Raw.EventLog) == 0 { //nolint:gocritic // ifElseChain: conditions compare different fields
-		if enforcedSet["event_log_integrity"] {
-			addFactor(TierSupplyChain, "event_log_integrity", Fail, "no event log entries in attestation response (enforced)")
-		} else {
-			addFactor(TierSupplyChain, "event_log_integrity", Skip, "no event log entries in attestation response")
-		}
-	} else if in.TDX == nil || in.TDX.ParseErr != nil {
-		addFactor(TierSupplyChain, "event_log_integrity", Skip, "no parseable TDX quote; cannot compare RTMRs")
-	} else {
-		replayed, err := ReplayEventLog(in.Raw.EventLog)
-		if err != nil {
-			addFactor(TierSupplyChain, "event_log_integrity", Fail, fmt.Sprintf("event log replay failed: %v", err))
-		} else {
-			mismatch := false
-			var detail string
-			for i := range 4 {
-				if replayed[i] != in.TDX.RTMRs[i] {
-					mismatch = true
-					detail = fmt.Sprintf("RTMR[%d] mismatch: replayed %s, quote %s",
-						i, hex.EncodeToString(replayed[i][:])[:16]+"...",
-						hex.EncodeToString(in.TDX.RTMRs[i][:])[:16]+"...")
-					break
-				}
-			}
-			if mismatch {
-				addFactor(TierSupplyChain, "event_log_integrity", Fail, detail)
-			} else {
-				for i := range 4 {
-					if !in.Policy.HasRTMRPolicy(i) {
-						continue
-					}
-					rtmrHex := hex.EncodeToString(in.TDX.RTMRs[i][:])
-					if _, ok := in.Policy.RTMRAllow[i][rtmrHex]; !ok {
-						addFactor(TierSupplyChain, "event_log_integrity", Fail,
-							fmt.Sprintf("RTMR[%d] not in policy allowlist: %s...", i, prefixHex(rtmrHex)))
-						goto eventLogDone
-					}
-				}
-				addFactor(TierSupplyChain, "event_log_integrity", Pass,
-					fmt.Sprintf("event log replayed (%d entries), all 4 RTMRs match quote", len(in.Raw.EventLog)))
-			}
-		}
-	eventLogDone:
-	}
-
-	// --- Tier 4: Gateway Attestation (nearcloud only) ---
-
-	if in.GatewayTDX != nil {
-		// Factor 25: gateway_nonce_match
-		switch {
-		case in.GatewayNonceHex == "":
-			addFactor(TierGateway, "gateway_nonce_match", Fail, "gateway request_nonce absent")
-		case subtle.ConstantTimeCompare([]byte(in.GatewayNonceHex), []byte(in.GatewayNonce.Hex())) == 1:
-			addFactor(TierGateway, "gateway_nonce_match", Pass, fmt.Sprintf("gateway nonce matches (%d hex chars)", len(in.GatewayNonceHex)))
-		default:
-			addFactor(TierGateway, "gateway_nonce_match", Fail, fmt.Sprintf("gateway nonce mismatch: got %q, want %q", truncHex(in.GatewayNonceHex), truncHex(in.GatewayNonce.Hex())))
-		}
-
-		// Factor 26: gateway_tdx_quote_present
-		addFactor(TierGateway, "gateway_tdx_quote_present", Pass, "gateway TDX quote present and parsed")
-
-		// Factors 27–29 from TDX verification result.
-		if in.GatewayTDX.ParseErr != nil {
-			addFactor(TierGateway, "gateway_tdx_quote_structure", Fail, fmt.Sprintf("gateway TDX quote parse failed: %v", in.GatewayTDX.ParseErr))
-			addFactor(TierGateway, "gateway_tdx_cert_chain", Skip, "gateway quote parse failed; cert chain not extracted")
-			addFactor(TierGateway, "gateway_tdx_quote_signature", Skip, "gateway quote parse failed; signature not verified")
-			addFactor(TierGateway, "gateway_tdx_debug_disabled", Skip, "gateway quote parse failed; debug flag not checked")
-		} else {
-			mrtdHex := hex.EncodeToString(in.GatewayTDX.MRTD)
-			mrSeamHex := hex.EncodeToString(in.GatewayTDX.MRSeam)
-			detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(in.GatewayTDX))
-			if len(mrtdHex) >= 16 {
-				detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.GatewayTDX), mrtdHex[:16])
-			}
-
-			// GW-M-04: Apply gateway measurement policy allowlists.
-			gp := in.GatewayPolicy
-			switch {
-			case gp.HasMRTDPolicy() && !containsAllowlist(gp.MRTDAllow, mrtdHex):
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Fail, fmt.Sprintf("gateway MRTD not in policy allowlist: %s...", prefixHex(mrtdHex)))
-			case gp.HasMRSeamPolicy() && !containsAllowlist(gp.MRSeamAllow, mrSeamHex):
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Fail, fmt.Sprintf("gateway MRSEAM not in policy allowlist: %s...", prefixHex(mrSeamHex)))
-			case gp.HasMRTDPolicy() && gp.HasMRSeamPolicy():
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Pass, detail+" (gateway MRTD/MRSEAM policy matched)")
-			case gp.HasMRTDPolicy():
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Pass, detail+" (gateway MRTD policy matched)")
-			case gp.HasMRSeamPolicy():
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Pass, detail+" (gateway MRSEAM policy matched)")
-			default:
-				addFactor(TierGateway, "gateway_tdx_quote_structure", Pass, detail)
-			}
-
-			if in.GatewayTDX.CertChainErr != nil {
-				addFactor(TierGateway, "gateway_tdx_cert_chain", Fail, fmt.Sprintf("gateway cert chain verification failed: %v", in.GatewayTDX.CertChainErr))
-			} else {
-				addFactor(TierGateway, "gateway_tdx_cert_chain", Pass, "gateway certificate chain valid (Intel root CA)")
-			}
-
-			if in.GatewayTDX.SignatureErr != nil {
-				addFactor(TierGateway, "gateway_tdx_quote_signature", Fail, fmt.Sprintf("gateway quote signature invalid: %v", in.GatewayTDX.SignatureErr))
-			} else {
-				addFactor(TierGateway, "gateway_tdx_quote_signature", Pass, "gateway quote signature verified")
-			}
-
-			if in.GatewayTDX.DebugEnabled {
-				addFactor(TierGateway, "gateway_tdx_debug_disabled", Fail, "gateway TD_ATTRIBUTES debug bit is set — debug enclave")
-			} else {
-				addFactor(TierGateway, "gateway_tdx_debug_disabled", Pass, "gateway debug bit is 0 (production enclave)")
-			}
-		}
-
-		// Factor: gateway_tdx_reportdata_binding
-		switch {
-		case in.GatewayTDX.ParseErr != nil:
-			addFactor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
-				"gateway TDX quote parse failed; REPORTDATA binding cannot be verified")
-		case in.GatewayTDX.ReportDataBindingErr != nil:
-			addFactor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
-				fmt.Sprintf("gateway REPORTDATA binding failed: %v", in.GatewayTDX.ReportDataBindingErr))
-		case in.GatewayTDX.ReportDataBindingDetail != "":
-			addFactor(TierGateway, "gateway_tdx_reportdata_binding", Pass,
-				in.GatewayTDX.ReportDataBindingDetail)
-		default:
-			addFactor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
-				"no gateway REPORTDATA verifier ran")
-		}
-
-		// Factor: gateway_compose_binding
-		switch {
-		case in.GatewayCompose == nil || !in.GatewayCompose.Checked:
-			addFactor(TierGateway, "gateway_compose_binding", Skip, "no gateway app_compose in attestation response")
-		case in.GatewayCompose.Err != nil:
-			addFactor(TierGateway, "gateway_compose_binding", Fail, fmt.Sprintf("gateway compose binding failed: %v", in.GatewayCompose.Err))
-		default:
-			addFactor(TierGateway, "gateway_compose_binding", Pass, "gateway sha256(app_compose) matches MRConfigID")
-		}
-
-		// Factor: gateway_cpu_id_registry
-		switch {
-		case in.GatewayPoC != nil && in.GatewayPoC.Registered:
-			addFactor(TierGateway, "gateway_cpu_id_registry", Pass,
-				fmt.Sprintf("gateway Proof of Cloud: registered (%s)", in.GatewayPoC.Label))
-		case in.GatewayPoC != nil && in.GatewayPoC.Err != nil:
-			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
-				fmt.Sprintf("gateway Proof of Cloud query failed: %v", in.GatewayPoC.Err))
-		case in.GatewayPoC != nil && !in.GatewayPoC.Registered:
-			addFactor(TierGateway, "gateway_cpu_id_registry", Fail,
-				"gateway hardware not found in Proof of Cloud registry; paste gateway intel_quote from --save-dir at proofofcloud.org to verify")
-		case in.GatewayTDX != nil && in.GatewayTDX.PPID != "":
-			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
-				fmt.Sprintf("gateway PPID extracted (%s...) but offline; use default mode to check Proof of Cloud",
-					in.GatewayTDX.PPID[:min(8, len(in.GatewayTDX.PPID))]))
-		default:
-			addFactor(TierGateway, "gateway_cpu_id_registry", Skip,
-				"gateway CPU ID registry check not available")
-		}
-
-		// Factor: gateway_event_log_integrity
-		// GW-M-05: Absent event log yields Fail (not Skip) when the factor is enforced.
-		if len(in.GatewayEventLog) == 0 { //nolint:gocritic // ifElseChain: conditions compare different fields
-			if enforcedSet["gateway_event_log_integrity"] {
-				addFactor(TierGateway, "gateway_event_log_integrity", Fail, "no gateway event log entries in attestation response (enforced)")
-			} else {
-				addFactor(TierGateway, "gateway_event_log_integrity", Skip, "no gateway event log entries in attestation response")
-			}
-		} else if in.GatewayTDX.ParseErr != nil {
-			addFactor(TierGateway, "gateway_event_log_integrity", Skip, "gateway TDX quote not parseable; cannot compare RTMRs")
-		} else {
-			replayed, err := ReplayEventLog(in.GatewayEventLog)
-			if err != nil {
-				addFactor(TierGateway, "gateway_event_log_integrity", Fail, fmt.Sprintf("gateway event log replay failed: %v", err))
-			} else {
-				mismatch := false
-				var detail string
-				for i := range 4 {
-					if replayed[i] != in.GatewayTDX.RTMRs[i] {
-						mismatch = true
-						detail = fmt.Sprintf("gateway RTMR[%d] mismatch: replayed %s, quote %s",
-							i, hex.EncodeToString(replayed[i][:])[:16]+"...",
-							hex.EncodeToString(in.GatewayTDX.RTMRs[i][:])[:16]+"...")
-						break
-					}
-				}
-				if mismatch {
-					addFactor(TierGateway, "gateway_event_log_integrity", Fail, detail)
-				} else {
-					// GW-M-06: Check RTMR policy allowlists using gateway-specific policy.
-					gp := in.GatewayPolicy
-					for i := range 4 {
-						if !gp.HasRTMRPolicy(i) {
-							continue
-						}
-						rtmrHex := hex.EncodeToString(in.GatewayTDX.RTMRs[i][:])
-						if _, ok := gp.RTMRAllow[i][rtmrHex]; !ok {
-							addFactor(TierGateway, "gateway_event_log_integrity", Fail,
-								fmt.Sprintf("gateway RTMR[%d] not in gateway policy allowlist: %s...", i, prefixHex(rtmrHex)))
-							goto gatewayEventLogDone
-						}
-					}
-					addFactor(TierGateway, "gateway_event_log_integrity", Pass,
-						fmt.Sprintf("gateway event log replayed (%d entries), all 4 RTMRs match quote", len(in.GatewayEventLog)))
-				}
-			}
-		gatewayEventLogDone:
-		}
-	}
-
-	// Tally results.
 	passed, failed, skipped := 0, 0, 0
 	for _, f := range factors {
 		switch f.Status {
@@ -963,8 +225,6 @@ buildTransparencyDone:
 		}
 	}
 
-	metadata := buildMetadata(in)
-
 	return &VerificationReport{
 		Provider:  in.Provider,
 		Model:     in.Model,
@@ -973,9 +233,840 @@ buildTransparencyDone:
 		Passed:    passed,
 		Failed:    failed,
 		Skipped:   skipped,
-		Metadata:  metadata,
+		Metadata:  buildMetadata(in),
 	}
 }
+
+// buildEvaluators returns the ordered list of factor evaluators. Gateway
+// evaluators are appended only when includeGateway is true.
+func buildEvaluators(includeGateway bool) []evaluatorFunc {
+	evals := []evaluatorFunc{
+		// Tier 1: Core Attestation
+		evalNonceMatch,
+		evalTDXQuotePresent,
+		evalTDXParseDependent,
+		evalSigningKeyPresent,
+		// Tier 2: Binding & Crypto
+		evalTDXReportDataBinding,
+		evalIntelPCSCollateral,
+		evalTDXTCBCurrent,
+		evalNvidiaPayloadPresent,
+		evalNvidiaSignature,
+		evalNvidiaClaims,
+		evalNvidiaNonceMatch,
+		evalNvidiaNRASVerified,
+		evalE2EECapable,
+		// Tier 3: Supply Chain & Channel Integrity
+		evalTLSKeyBinding,
+		evalCPUGPUChain,
+		evalMeasuredModelWeights,
+		evalBuildTransparencyLog,
+		evalCPUIDRegistry,
+		evalComposeBinding,
+		evalSigstoreVerification,
+		evalEventLogIntegrity,
+	}
+	if includeGateway {
+		evals = append(evals,
+			evalGatewayNonceMatch,
+			evalGatewayTDXQuotePresent,
+			evalGatewayTDXParseDependent,
+			evalGatewayTDXReportDataBinding,
+			evalGatewayComposeBinding,
+			evalGatewayCPUIDRegistry,
+			evalGatewayEventLogIntegrity,
+		)
+	}
+	return evals
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1: Core Attestation evaluators
+// ---------------------------------------------------------------------------
+
+func evalNonceMatch(in *ReportInput) []FactorResult {
+	if in.Raw.Nonce == "" {
+		return factor(TierCore, "nonce_match", Fail, "nonce field absent from attestation response")
+	}
+	if subtle.ConstantTimeCompare([]byte(in.Raw.Nonce), []byte(in.Nonce.Hex())) != 1 {
+		return factor(TierCore, "nonce_match", Fail, fmt.Sprintf("nonce mismatch: got %q, want %q", truncHex(in.Raw.Nonce), truncHex(in.Nonce.Hex())))
+	}
+	detail := fmt.Sprintf("nonce matches (%d hex chars)", len(in.Raw.Nonce))
+	if in.Raw.NonceSource != "" {
+		detail += fmt.Sprintf(" (%s-supplied)", in.Raw.NonceSource)
+	}
+	return factor(TierCore, "nonce_match", Pass, detail)
+}
+func evalTDXQuotePresent(in *ReportInput) []FactorResult {
+	if in.Raw.IntelQuote == "" {
+		return factor(TierCore, "tdx_quote_present", Fail, "intel_quote field is absent from attestation response")
+	}
+	return factor(TierCore, "tdx_quote_present", Pass, fmt.Sprintf("TDX quote present (%d hex chars)", len(in.Raw.IntelQuote)))
+}
+func evalTDXParseDependent(in *ReportInput) []FactorResult {
+	if in.TDX == nil {
+		return []FactorResult{
+			{Tier: TierCore, Name: "tdx_quote_structure", Status: Fail, Detail: "no TDX quote available to parse"},
+			{Tier: TierCore, Name: "tdx_cert_chain", Status: Fail, Detail: "no TDX quote available; cannot verify cert chain"},
+			{Tier: TierCore, Name: "tdx_quote_signature", Status: Fail, Detail: "no TDX quote available; cannot verify signature"},
+			{Tier: TierCore, Name: "tdx_debug_disabled", Status: Fail, Detail: "no TDX quote available; cannot check debug flag"},
+		}
+	}
+
+	if in.TDX.ParseErr != nil {
+		return []FactorResult{
+			{Tier: TierCore, Name: "tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("TDX quote parse failed: %v", in.TDX.ParseErr)},
+			{Tier: TierCore, Name: "tdx_cert_chain", Status: Skip, Detail: "quote parse failed; cert chain not extracted"},
+			{Tier: TierCore, Name: "tdx_quote_signature", Status: Skip, Detail: "quote parse failed; signature not verified"},
+			{Tier: TierCore, Name: "tdx_debug_disabled", Status: Skip, Detail: "quote parse failed; debug flag not checked"},
+		}
+	}
+
+	// ParseErr is nil — evaluate each sub-factor directly.
+	results := []FactorResult{tdxQuoteStructure(in)}
+
+	if in.TDX.CertChainErr != nil {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_cert_chain", Status: Fail, Detail: fmt.Sprintf("cert chain verification failed: %v", in.TDX.CertChainErr)})
+	} else {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_cert_chain", Status: Pass, Detail: "certificate chain valid (Intel root CA)"})
+	}
+
+	if in.TDX.SignatureErr != nil {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_quote_signature", Status: Fail, Detail: fmt.Sprintf("quote signature invalid: %v", in.TDX.SignatureErr)})
+	} else {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_quote_signature", Status: Pass, Detail: "quote signature verified"})
+	}
+
+	if in.TDX.DebugEnabled {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_debug_disabled", Status: Fail, Detail: "TD_ATTRIBUTES debug bit is set — this is a debug enclave; do not trust for production"})
+	} else {
+		results = append(results, FactorResult{Tier: TierCore, Name: "tdx_debug_disabled", Status: Pass, Detail: "debug bit is 0 (production enclave)"})
+	}
+
+	return results
+}
+
+// tdxQuoteStructure evaluates the tdx_quote_structure factor including
+// MRTD/MRSEAM policy checks. Precondition: in.TDX.ParseErr == nil.
+func tdxQuoteStructure(in *ReportInput) FactorResult {
+	mrtdHex := hex.EncodeToString(in.TDX.MRTD)
+	mrSeamHex := hex.EncodeToString(in.TDX.MRSeam)
+
+	detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(in.TDX))
+	if len(mrtdHex) >= 16 {
+		detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.TDX), mrtdHex[:16])
+	}
+
+	switch {
+	case in.Policy.HasMRTDPolicy() && !containsAllowlist(in.Policy.MRTDAllow, mrtdHex):
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("MRTD not in policy allowlist: %s...", prefixHex(mrtdHex))}
+	case in.Policy.HasMRSeamPolicy() && !containsAllowlist(in.Policy.MRSeamAllow, mrSeamHex):
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("MRSEAM not in policy allowlist: %s...", prefixHex(mrSeamHex))}
+	case in.Policy.HasMRTDPolicy() && in.Policy.HasMRSeamPolicy():
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Pass, Detail: detail + " (MRTD/MRSEAM policy matched)"}
+	case in.Policy.HasMRTDPolicy():
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Pass, Detail: detail + " (MRTD policy matched)"}
+	case in.Policy.HasMRSeamPolicy():
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Pass, Detail: detail + " (MRSEAM policy matched)"}
+	default:
+		return FactorResult{Tier: TierCore, Name: "tdx_quote_structure", Status: Pass, Detail: detail}
+	}
+}
+func evalSigningKeyPresent(in *ReportInput) []FactorResult {
+	if in.Raw.SigningKey == "" {
+		return factor(TierCore, "signing_key_present", Fail, "signing_key field absent from attestation response")
+	}
+	return factor(TierCore, "signing_key_present", Pass, fmt.Sprintf("enclave pubkey present (%s...)", in.Raw.SigningKey[:min(10, len(in.Raw.SigningKey))]))
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2: Binding & Crypto evaluators
+// ---------------------------------------------------------------------------
+
+func evalTDXReportDataBinding(in *ReportInput) []FactorResult {
+	if in.TDX == nil || in.TDX.ParseErr != nil {
+		return factor(TierBinding, "tdx_reportdata_binding", Fail, "no parseable TDX quote; REPORTDATA binding cannot be verified")
+	}
+	if in.Raw.SigningKey == "" {
+		return factor(TierBinding, "tdx_reportdata_binding", Fail, "enclave public key absent; REPORTDATA binding cannot be verified")
+	}
+	if in.TDX.ReportDataBindingErr != nil {
+		return factor(TierBinding, "tdx_reportdata_binding", Fail, fmt.Sprintf("REPORTDATA does not bind enclave public key: %v", in.TDX.ReportDataBindingErr))
+	}
+	if in.TDX.ReportDataBindingDetail != "" {
+		return factor(TierBinding, "tdx_reportdata_binding", Pass, in.TDX.ReportDataBindingDetail)
+	}
+	return factor(TierBinding, "tdx_reportdata_binding", Skip, "no REPORTDATA verifier configured for this provider")
+}
+func evalIntelPCSCollateral(in *ReportInput) []FactorResult {
+	if in.TDX == nil || in.TDX.ParseErr != nil {
+		return factor(TierBinding, "intel_pcs_collateral", Skip, "no parseable TDX quote")
+	}
+	if in.TDX.TcbStatus != "" {
+		return factor(TierBinding, "intel_pcs_collateral", Pass,
+			fmt.Sprintf("Intel PCS collateral fetched (TCB status: %s)", in.TDX.TcbStatus))
+	}
+	if in.TDX.CollateralErr != nil {
+		return factor(TierBinding, "intel_pcs_collateral", Skip,
+			fmt.Sprintf("Intel PCS collateral fetch failed: %v", in.TDX.CollateralErr))
+	}
+	return factor(TierBinding, "intel_pcs_collateral", Skip, "offline mode; Intel PCS collateral not fetched")
+}
+func evalTDXTCBCurrent(in *ReportInput) []FactorResult {
+	if in.TDX == nil || in.TDX.ParseErr != nil {
+		return factor(TierBinding, "tdx_tcb_current", Skip, "no parseable TDX quote; TCB SVN not extracted")
+	}
+	if in.TDX.TcbStatus == pcs.TcbComponentStatusUpToDate {
+		detail := "TCB is UpToDate per Intel PCS"
+		if len(in.TDX.AdvisoryIDs) > 0 {
+			detail += fmt.Sprintf(" (advisories: %s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
+		}
+		return factor(TierBinding, "tdx_tcb_current", Pass, detail)
+	}
+	if in.TDX.TcbStatus == pcs.TcbComponentStatusSwHardeningNeeded || in.TDX.TcbStatus == pcs.TcbComponentStatusConfigurationAndSWHardeningNeeded {
+		detail := fmt.Sprintf("TCB status: %s — software/config mitigations required for known advisories", in.TDX.TcbStatus)
+		if len(in.TDX.AdvisoryIDs) > 0 {
+			detail += fmt.Sprintf(" (%s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
+		}
+		return factor(TierBinding, "tdx_tcb_current", Fail, detail)
+	}
+	if in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDate || in.TDX.TcbStatus == pcs.TcbComponentStatusRevoked || in.TDX.TcbStatus == pcs.TcbComponentStatusOutOfDateConfigurationNeeded {
+		detail := fmt.Sprintf("TCB status: %s — firmware has known vulnerabilities", in.TDX.TcbStatus)
+		if len(in.TDX.AdvisoryIDs) > 0 {
+			detail += fmt.Sprintf(" (%s)", strings.Join(in.TDX.AdvisoryIDs, ", "))
+		}
+		return factor(TierBinding, "tdx_tcb_current", Fail, detail)
+	}
+	if in.TDX.CollateralErr != nil {
+		svnHex := hex.EncodeToString(in.TDX.TeeTCBSVN)
+		return factor(TierBinding, "tdx_tcb_current", Skip,
+			fmt.Sprintf("TEE_TCB_SVN: %s (Intel PCS collateral fetch failed: %v)", svnHex, in.TDX.CollateralErr))
+	}
+	svnHex := hex.EncodeToString(in.TDX.TeeTCBSVN)
+	return factor(TierBinding, "tdx_tcb_current", Skip,
+		fmt.Sprintf("TEE_TCB_SVN: %s (offline; full check requires Intel PCS)", svnHex))
+}
+func evalNvidiaPayloadPresent(in *ReportInput) []FactorResult {
+	if in.Raw.NvidiaPayload == "" {
+		return factor(TierBinding, "nvidia_payload_present", Fail, "nvidia_payload field is absent from attestation response")
+	}
+	return factor(TierBinding, "nvidia_payload_present", Pass, fmt.Sprintf("NVIDIA payload present (%d chars)", len(in.Raw.NvidiaPayload)))
+}
+func evalNvidiaSignature(in *ReportInput) []FactorResult {
+	if in.Nvidia == nil {
+		if in.Raw.NvidiaPayload == "" {
+			return factor(TierBinding, "nvidia_signature", Skip, "no NVIDIA payload to verify")
+		}
+		return factor(TierBinding, "nvidia_signature", Fail, "NVIDIA verification was not attempted")
+	}
+	if in.Nvidia.SignatureErr != nil {
+		return factor(TierBinding, "nvidia_signature", Fail, fmt.Sprintf("signature invalid: %v", in.Nvidia.SignatureErr))
+	}
+	return factor(TierBinding, "nvidia_signature", Pass, nvidiaSignatureDetail(in.Nvidia))
+}
+func evalNvidiaClaims(in *ReportInput) []FactorResult {
+	if in.Nvidia == nil {
+		if in.Raw.NvidiaPayload == "" {
+			return factor(TierBinding, "nvidia_claims", Skip, "no NVIDIA payload to check")
+		}
+		return factor(TierBinding, "nvidia_claims", Fail, "NVIDIA verification was not attempted")
+	}
+	if in.Nvidia.ClaimsErr != nil {
+		return factor(TierBinding, "nvidia_claims", Fail, fmt.Sprintf("claims invalid: %v", in.Nvidia.ClaimsErr))
+	}
+	return factor(TierBinding, "nvidia_claims", Pass, nvidiaClaimsDetail(in.Nvidia))
+}
+func evalNvidiaNonceMatch(in *ReportInput) []FactorResult {
+	if in.Nvidia == nil {
+		if in.Raw.NvidiaPayload == "" {
+			return factor(TierBinding, "nvidia_nonce_match", Skip, "no NVIDIA payload; nonce not checked")
+		}
+		return factor(TierBinding, "nvidia_nonce_match", Skip, "NVIDIA verification not attempted")
+	}
+	if in.Nvidia.Nonce == "" {
+		return factor(TierBinding, "nvidia_nonce_match", Skip, "nonce field not found in NVIDIA payload")
+	}
+	if subtle.ConstantTimeCompare([]byte(in.Nvidia.Nonce), []byte(in.Nonce.Hex())) == 1 {
+		return factor(TierBinding, "nvidia_nonce_match", Pass, nvidiaNonceDetail(in.Nvidia))
+	}
+	return factor(TierBinding, "nvidia_nonce_match", Fail, fmt.Sprintf("nonce mismatch in NVIDIA payload: got %q, want %q", truncHex(in.Nvidia.Nonce), truncHex(in.Nonce.Hex())))
+}
+func evalNvidiaNRASVerified(in *ReportInput) []FactorResult {
+	if in.NvidiaNRAS == nil {
+		if in.Raw.NvidiaPayload == "" || in.Raw.NvidiaPayload[0] != '{' {
+			return factor(TierBinding, "nvidia_nras_verified", Skip, "no EAT payload; NRAS not applicable")
+		}
+		return factor(TierBinding, "nvidia_nras_verified", Skip, "offline mode; NRAS verification skipped")
+	}
+	if in.NvidiaNRAS.SignatureErr != nil {
+		return factor(TierBinding, "nvidia_nras_verified", Fail,
+			fmt.Sprintf("NRAS JWT signature invalid: %v", in.NvidiaNRAS.SignatureErr))
+	}
+	if in.NvidiaNRAS.ClaimsErr != nil {
+		return factor(TierBinding, "nvidia_nras_verified", Fail,
+			fmt.Sprintf("NRAS JWT claims invalid: %v", in.NvidiaNRAS.ClaimsErr))
+	}
+	if !in.NvidiaNRAS.OverallResult {
+		return factor(TierBinding, "nvidia_nras_verified", Fail, "NRAS result: false")
+	}
+	return factor(TierBinding, "nvidia_nras_verified", Pass, "NRAS: true (JWT verified)")
+}
+func evalE2EECapable(in *ReportInput) []FactorResult {
+	switch {
+	case in.Raw.SigningKey == "":
+		return factor(TierBinding, "e2ee_capable", Fail, "enclave public key absent; E2EE key exchange not possible")
+	case in.Raw.SigningAlgo == "ed25519" || len(in.Raw.SigningKey) == 64:
+		// V2: Ed25519 key (64 hex chars).
+		if err := ValidateModelKeyV2(in.Raw.SigningKey); err != nil {
+			return factor(TierBinding, "e2ee_capable", Fail, fmt.Sprintf("enclave ed25519 public key invalid: %v", err))
+		}
+		return factor(TierBinding, "e2ee_capable", Pass, "enclave ed25519 public key valid; v2 E2EE key exchange possible (ed25519)")
+	default:
+		// V1: secp256k1 key (130 hex chars).
+		s := &Session{}
+		if err := s.SetModelKey(in.Raw.SigningKey); err != nil {
+			return factor(TierBinding, "e2ee_capable", Fail, fmt.Sprintf("enclave public key is not a valid secp256k1 point: %v", err))
+		}
+		detail := "enclave public key is valid secp256k1 uncompressed point; E2EE key exchange possible"
+		if in.Raw.SigningAlgo != "" {
+			detail += fmt.Sprintf(" (%s)", in.Raw.SigningAlgo)
+		}
+		return factor(TierBinding, "e2ee_capable", Pass, detail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: Supply Chain & Channel Integrity evaluators
+// ---------------------------------------------------------------------------
+
+func evalTLSKeyBinding(in *ReportInput) []FactorResult {
+	switch {
+	case in.Raw.TLSFingerprint != "":
+		fpPreview := in.Raw.TLSFingerprint
+		if len(fpPreview) > 16 {
+			fpPreview = fpPreview[:16] + "..."
+		}
+		return factor(TierSupplyChain, "tls_key_binding", Pass,
+			fmt.Sprintf("TLS certificate SPKI bound to attestation (%s)", fpPreview))
+	case in.Raw.SigningKey != "":
+		return factor(TierSupplyChain, "tls_key_binding", Skip,
+			"provider uses E2EE key exchange; TLS binding not applicable")
+	default:
+		return factor(TierSupplyChain, "tls_key_binding", Fail,
+			"no TLS certificate binding in attestation")
+	}
+}
+func evalCPUGPUChain(_ *ReportInput) []FactorResult {
+	return factor(TierSupplyChain, "cpu_gpu_chain", Fail, "CPU-GPU attestation not bound")
+}
+func evalMeasuredModelWeights(_ *ReportInput) []FactorResult {
+	return factor(TierSupplyChain, "measured_model_weights", Fail, "no model weight hashes")
+}
+func evalBuildTransparencyLog(in *ReportInput) []FactorResult {
+	scPolicy := supplyChainPolicyForProvider(in.Provider)
+
+	if scPolicy != nil {
+		if f, done := checkImageRepoPolicy(in, scPolicy); done {
+			return []FactorResult{f}
+		}
+	}
+
+	if len(in.Rekor) == 0 {
+		return []FactorResult{buildTransparencyNoRekor(in, scPolicy)}
+	}
+
+	return []FactorResult{rekorProvenanceResult(in, scPolicy)}
+}
+
+// checkImageRepoPolicy validates model and gateway image repos against the
+// supply chain policy. Returns (result, true) on policy violation.
+func checkImageRepoPolicy(in *ReportInput, scPolicy *supplyChainPolicy) (FactorResult, bool) {
+	btlFail := FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail}
+
+	if len(in.ImageRepos) == 0 {
+		btlFail.Detail = "no attested model image repositories extracted from compose"
+		return btlFail, true
+	}
+	for _, repo := range in.ImageRepos {
+		if !scPolicy.allowedInModel(repo) {
+			btlFail.Detail = fmt.Sprintf("model container policy: image %q not in supply chain policy (%s)",
+				repo, strings.Join(scPolicy.modelRepoNames(), ", "))
+			return btlFail, true
+		}
+	}
+	if scPolicy.hasGatewayImages() {
+		if len(in.GatewayImageRepos) == 0 {
+			btlFail.Detail = "no attested gateway image repositories extracted from compose"
+			return btlFail, true
+		}
+		for _, repo := range in.GatewayImageRepos {
+			if !scPolicy.allowedInGateway(repo) {
+				btlFail.Detail = fmt.Sprintf("gateway container policy: image %q not in supply chain policy (%s)",
+					repo, strings.Join(scPolicy.gatewayRepoNames(), ", "))
+				return btlFail, true
+			}
+		}
+	} else if len(in.GatewayImageRepos) > 0 {
+		btlFail.Detail = fmt.Sprintf("provider %q has no gateway images in supply chain policy but %d gateway image repos were extracted",
+			in.Provider, len(in.GatewayImageRepos))
+		return btlFail, true
+	}
+	return FactorResult{}, false
+}
+
+// buildTransparencyNoRekor handles the build_transparency_log factor when
+// no Rekor provenance is available.
+func buildTransparencyNoRekor(in *ReportInput, scPolicy *supplyChainPolicy) FactorResult {
+	if scPolicy != nil {
+		return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+			Detail: "no Rekor provenance fetched for attested image digests"}
+	}
+	if in.Raw.ComposeHash != "" {
+		hashPreview := in.Raw.ComposeHash
+		if len(hashPreview) > 8 {
+			hashPreview = hashPreview[:8] + "..."
+		}
+		return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Skip,
+			Detail: fmt.Sprintf("compose hash present (%s) but no Rekor provenance fetched", hashPreview)}
+	}
+	return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
+		Detail: "no build transparency log"}
+}
+
+// rekorEntryKind is the classification of a single Rekor provenance entry.
+type rekorEntryKind int
+
+const (
+	rekorFulcio   rekorEntryKind = iota // Fulcio-signed provenance
+	rekorSigstore                       // Sigstore presence only
+	rekorFailed                         // policy violation or unexpected signer
+)
+
+// classifyRekorEntry classifies a single Rekor entry against the supply chain
+// policy. On rekorFailed, failDetail is the error message. On rekorFulcio,
+// commitDetail is populated for the first verified entry.
+func classifyRekorEntry(r *RekorProvenance, img *ImageProvenance, imageRepo string, scPolicy *supplyChainPolicy) (kind rekorEntryKind, failDetail string) {
+	if r.Err != nil {
+		if img != nil && img.Provenance == FulcioSigned {
+			return rekorFailed, fmt.Sprintf("image %q: Rekor provenance fetch failed: %v", imageRepo, r.Err)
+		}
+		return rekorSigstore, ""
+	}
+
+	switch {
+	case img != nil && img.Provenance == FulcioSigned:
+		if detail, failed := verifyFulcioEntry(r, img, imageRepo); failed {
+			return rekorFailed, detail
+		}
+		return rekorFulcio, ""
+
+	case img != nil:
+		if img.Provenance == SigstorePresent && img.KeyFingerprint != "" && r.KeyFingerprint != "" {
+			fpGot, errG := hex.DecodeString(r.KeyFingerprint)
+			fpWant, errW := hex.DecodeString(img.KeyFingerprint)
+			if errG != nil || errW != nil || subtle.ConstantTimeCompare(fpGot, fpWant) != 1 {
+				return rekorFailed, fmt.Sprintf("image %q: unexpected signing key fingerprint %s (expected %s)",
+					imageRepo, truncHex(r.KeyFingerprint), truncHex(img.KeyFingerprint))
+			}
+		}
+		return rekorSigstore, ""
+
+	case scPolicy == nil:
+		if !r.HasCert {
+			return rekorSigstore, ""
+		}
+		if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
+			return rekorFailed, "unexpected OIDC issuer: " + r.OIDCIssuer
+		}
+		return rekorFulcio, ""
+
+	default:
+		return rekorFailed, fmt.Sprintf("image %q: not in supply chain policy", imageRepo)
+	}
+}
+
+// rekorProvenanceResult verifies Rekor provenance entries against the supply
+// chain policy.
+func rekorProvenanceResult(in *ReportInput, scPolicy *supplyChainPolicy) FactorResult {
+	var fulcioVerified int
+	var sigstorePresent int
+	var detail string
+
+	for i := range in.Rekor {
+		r := &in.Rekor[i]
+		imageRepo := in.DigestToRepo[r.Digest]
+		var img *ImageProvenance
+		if scPolicy != nil {
+			img = scPolicy.lookup(imageRepo)
+		}
+
+		kind, failDetail := classifyRekorEntry(r, img, imageRepo, scPolicy)
+		switch kind {
+		case rekorFailed:
+			return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail, Detail: failDetail}
+		case rekorFulcio:
+			fulcioVerified++
+			if detail == "" {
+				detail = formatRekorCommitDetail(r)
+			}
+		case rekorSigstore:
+			sigstorePresent++
+		}
+	}
+
+	return formatBuildTransparencyResult(scPolicy, fulcioVerified, sigstorePresent, len(in.Rekor), detail)
+}
+
+// verifyFulcioEntry checks a single Rekor entry against a FulcioSigned policy.
+// Returns (detail, true) on failure.
+func verifyFulcioEntry(r *RekorProvenance, img *ImageProvenance, imageRepo string) (string, bool) {
+	if r.SignatureErr != nil && !img.NoDSSE {
+		return fmt.Sprintf("image %q: DSSE envelope signature verification failed: %v", imageRepo, r.SignatureErr), true
+	}
+	if !r.HasCert && r.HasNonFulcioCert {
+		return fmt.Sprintf("image %q: expected Fulcio certificate but entry has non-Fulcio X.509 cert (no OIDC issuer OID)", imageRepo), true
+	}
+	if !r.HasCert {
+		return fmt.Sprintf("image %q: expected Fulcio certificate but entry has raw key", imageRepo), true
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.OIDCIssuer), strings.TrimSpace(img.OIDCIssuer)) {
+		return fmt.Sprintf("image %q: unexpected OIDC issuer %q (expected %q)", imageRepo, r.OIDCIssuer, img.OIDCIssuer), true
+	}
+	if img.OIDCIdentity != "" && !strings.EqualFold(strings.TrimSpace(r.SubjectURI), strings.TrimSpace(img.OIDCIdentity)) {
+		return fmt.Sprintf("image %q: unexpected OIDC identity %q (expected %q)", imageRepo, r.SubjectURI, img.OIDCIdentity), true
+	}
+	repoID := strings.TrimSpace(r.SourceRepo)
+	repoURL := strings.TrimSpace(r.SourceRepoURL)
+	if !containsFold(repoID, img.SourceRepos) && !containsFold(repoURL, img.SourceRepos) {
+		return fmt.Sprintf("image %q: unexpected source repo %q (expected %v)", imageRepo, repoID, img.SourceRepos), true
+	}
+	return "", false
+}
+
+// formatRekorCommitDetail formats a commit summary from a Rekor provenance entry.
+func formatRekorCommitDetail(r *RekorProvenance) string {
+	commit := r.SourceCommit
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	return fmt.Sprintf("%s@%s, %s", r.SourceRepo, commit, r.RunnerEnv)
+}
+
+// formatBuildTransparencyResult produces the final factor result for
+// build_transparency_log after processing all Rekor entries.
+func formatBuildTransparencyResult(scPolicy *supplyChainPolicy, fulcioVerified, sigstorePresent, rekorCount int, detail string) FactorResult {
+	f := FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log"}
+	switch {
+	case scPolicy != nil && fulcioVerified > 0 && sigstorePresent > 0:
+		f.Status = Pass
+		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance; %d present in Sigstore (%s)",
+			fulcioVerified, sigstorePresent, detail)
+	case scPolicy != nil && fulcioVerified > 0:
+		f.Status = Pass
+		f.Detail = fmt.Sprintf("%d image(s) verified by Fulcio provenance (%s)", fulcioVerified, detail)
+	case scPolicy != nil && sigstorePresent > 0:
+		f.Status = Pass
+		f.Detail = fmt.Sprintf("%d image(s) present in Sigstore (no Fulcio provenance)", sigstorePresent)
+	case fulcioVerified > 0:
+		f.Status = Pass
+		f.Detail = fmt.Sprintf("%d/%d image(s) have Sigstore build provenance (%s)", fulcioVerified, rekorCount, detail)
+	default:
+		f.Status = Skip
+		f.Detail = "all images signed with raw keys (no Fulcio build provenance)"
+	}
+	return f
+}
+func evalCPUIDRegistry(in *ReportInput) []FactorResult {
+	if in.PoC != nil {
+		switch {
+		case in.PoC.Registered:
+			return factor(TierSupplyChain, "cpu_id_registry", Pass,
+				fmt.Sprintf("Proof of Cloud: registered (%s)", in.PoC.Label))
+		case in.PoC.Err != nil:
+			return factor(TierSupplyChain, "cpu_id_registry", Skip,
+				fmt.Sprintf("Proof of Cloud query failed: %v", in.PoC.Err))
+		default:
+			return factor(TierSupplyChain, "cpu_id_registry", Fail,
+				"hardware not found in Proof of Cloud registry; paste intel_quote from --save-dir at proofofcloud.org to verify")
+		}
+	}
+	if in.TDX != nil && in.TDX.PPID != "" {
+		return factor(TierSupplyChain, "cpu_id_registry", Skip,
+			fmt.Sprintf("PPID extracted (%s...) but offline; use default mode to check Proof of Cloud",
+				in.TDX.PPID[:min(8, len(in.TDX.PPID))]))
+	}
+	if in.Raw.DeviceID != "" {
+		idPreview := in.Raw.DeviceID
+		if len(idPreview) > 8 {
+			idPreview = idPreview[:8] + "..."
+		}
+		return factor(TierSupplyChain, "cpu_id_registry", Skip,
+			fmt.Sprintf("device ID present (%s) but no registry to verify against", idPreview))
+	}
+	return factor(TierSupplyChain, "cpu_id_registry", Fail, "no CPU ID registry check")
+}
+func evalComposeBinding(in *ReportInput) []FactorResult {
+	switch {
+	case in.Compose == nil || !in.Compose.Checked:
+		return factor(TierSupplyChain, "compose_binding", Skip, "no app_compose in attestation response")
+	case in.Compose.Err != nil:
+		return factor(TierSupplyChain, "compose_binding", Fail, fmt.Sprintf("compose binding failed: %v", in.Compose.Err))
+	default:
+		return factor(TierSupplyChain, "compose_binding", Pass, "sha256(app_compose) matches MRConfigID")
+	}
+}
+func evalSigstoreVerification(in *ReportInput) []FactorResult {
+	if len(in.Sigstore) == 0 {
+		return factor(TierSupplyChain, "sigstore_verification", Skip, "no image digests to verify")
+	}
+
+	scPolicy := supplyChainPolicyForProvider(in.Provider)
+	var composeOnly int
+	for _, r := range in.Sigstore {
+		if r.OK {
+			continue
+		}
+		if scPolicy != nil && len(in.DigestToRepo) > 0 {
+			repo := in.DigestToRepo[r.Digest]
+			img := scPolicy.lookup(repo)
+			if img != nil && img.Provenance == ComposeBindingOnly {
+				composeOnly++
+				continue
+			}
+		}
+		var failDetail string
+		if r.Err != nil {
+			failDetail = r.Err.Error()
+		} else {
+			failDetail = fmt.Sprintf("HTTP %d", r.Status)
+		}
+		return factor(TierSupplyChain, "sigstore_verification", Fail,
+			fmt.Sprintf("Sigstore check failed for sha256:%s (%s)", r.Digest[:min(16, len(r.Digest))], failDetail))
+	}
+
+	inSigstore := len(in.Sigstore) - composeOnly
+	if composeOnly > 0 {
+		return factor(TierSupplyChain, "sigstore_verification", Pass,
+			fmt.Sprintf("%d image digest(s) found in Sigstore transparency log; %d not Sigstore-signed (compose-pinned)", inSigstore, composeOnly))
+	}
+	return factor(TierSupplyChain, "sigstore_verification", Pass,
+		fmt.Sprintf("%d image digest(s) found in Sigstore transparency log", len(in.Sigstore)))
+}
+func evalEventLogIntegrity(in *ReportInput) []FactorResult {
+	if len(in.Raw.EventLog) == 0 {
+		return factor(TierSupplyChain, "event_log_integrity", Skip, "no event log entries in attestation response")
+	}
+	if in.TDX == nil || in.TDX.ParseErr != nil {
+		return factor(TierSupplyChain, "event_log_integrity", Skip, "no parseable TDX quote; cannot compare RTMRs")
+	}
+
+	replayed, err := ReplayEventLog(in.Raw.EventLog)
+	if err != nil {
+		return factor(TierSupplyChain, "event_log_integrity", Fail, fmt.Sprintf("event log replay failed: %v", err))
+	}
+
+	for i := range 4 {
+		if replayed[i] != in.TDX.RTMRs[i] {
+			return factor(TierSupplyChain, "event_log_integrity", Fail,
+				fmt.Sprintf("RTMR[%d] mismatch: replayed %s, quote %s",
+					i, hex.EncodeToString(replayed[i][:])[:16]+"...",
+					hex.EncodeToString(in.TDX.RTMRs[i][:])[:16]+"..."))
+		}
+	}
+
+	for i := range 4 {
+		if !in.Policy.HasRTMRPolicy(i) {
+			continue
+		}
+		rtmrHex := hex.EncodeToString(in.TDX.RTMRs[i][:])
+		if _, ok := in.Policy.RTMRAllow[i][rtmrHex]; !ok {
+			return factor(TierSupplyChain, "event_log_integrity", Fail,
+				fmt.Sprintf("RTMR[%d] not in policy allowlist: %s...", i, prefixHex(rtmrHex)))
+		}
+	}
+
+	return factor(TierSupplyChain, "event_log_integrity", Pass,
+		fmt.Sprintf("event log replayed (%d entries), all 4 RTMRs match quote", len(in.Raw.EventLog)))
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4: Gateway Attestation evaluators (nearcloud only)
+// ---------------------------------------------------------------------------
+
+func evalGatewayNonceMatch(in *ReportInput) []FactorResult {
+	switch {
+	case in.GatewayNonceHex == "":
+		return factor(TierGateway, "gateway_nonce_match", Fail, "gateway request_nonce absent")
+	case subtle.ConstantTimeCompare([]byte(in.GatewayNonceHex), []byte(in.GatewayNonce.Hex())) == 1:
+		return factor(TierGateway, "gateway_nonce_match", Pass, fmt.Sprintf("gateway nonce matches (%d hex chars)", len(in.GatewayNonceHex)))
+	default:
+		return factor(TierGateway, "gateway_nonce_match", Fail, fmt.Sprintf("gateway nonce mismatch: got %q, want %q", truncHex(in.GatewayNonceHex), truncHex(in.GatewayNonce.Hex())))
+	}
+}
+func evalGatewayTDXQuotePresent(in *ReportInput) []FactorResult {
+	if in.GatewayTDX == nil {
+		return factor(TierGateway, "gateway_tdx_quote_present", Fail, "gateway TDX quote not available")
+	}
+	return factor(TierGateway, "gateway_tdx_quote_present", Pass,
+		fmt.Sprintf("gateway TDX quote present (%d hex chars)", len(in.Raw.GatewayIntelQuote)))
+}
+
+// Precondition: in.GatewayTDX != nil (guaranteed by buildEvaluators).
+func evalGatewayTDXParseDependent(in *ReportInput) []FactorResult {
+	if in.GatewayTDX.ParseErr != nil {
+		return []FactorResult{
+			{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("gateway TDX quote parse failed: %v", in.GatewayTDX.ParseErr)},
+			{Tier: TierGateway, Name: "gateway_tdx_cert_chain", Status: Skip, Detail: "gateway quote parse failed; cert chain not extracted"},
+			{Tier: TierGateway, Name: "gateway_tdx_quote_signature", Status: Skip, Detail: "gateway quote parse failed; signature not verified"},
+			{Tier: TierGateway, Name: "gateway_tdx_debug_disabled", Status: Skip, Detail: "gateway quote parse failed; debug flag not checked"},
+		}
+	}
+
+	results := make([]FactorResult, 0, 4)
+	results = append(results, gatewayTDXQuoteStructure(in))
+
+	// gateway_tdx_cert_chain
+	if in.GatewayTDX.CertChainErr != nil {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_cert_chain", Status: Fail, Detail: fmt.Sprintf("gateway cert chain verification failed: %v", in.GatewayTDX.CertChainErr)})
+	} else {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_cert_chain", Status: Pass, Detail: "gateway certificate chain valid (Intel root CA)"})
+	}
+
+	// gateway_tdx_quote_signature
+	if in.GatewayTDX.SignatureErr != nil {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_signature", Status: Fail, Detail: fmt.Sprintf("gateway quote signature invalid: %v", in.GatewayTDX.SignatureErr)})
+	} else {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_signature", Status: Pass, Detail: "gateway quote signature verified"})
+	}
+
+	// gateway_tdx_debug_disabled
+	if in.GatewayTDX.DebugEnabled {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_debug_disabled", Status: Fail, Detail: "gateway TD_ATTRIBUTES debug bit is set — debug enclave"})
+	} else {
+		results = append(results, FactorResult{Tier: TierGateway, Name: "gateway_tdx_debug_disabled", Status: Pass, Detail: "gateway debug bit is 0 (production enclave)"})
+	}
+
+	return results
+}
+
+// gatewayTDXQuoteStructure evaluates the gateway_tdx_quote_structure factor
+// including GatewayPolicy MRTD/MRSEAM allowlist checks (GW-M-04).
+// Precondition: in.GatewayTDX.ParseErr == nil.
+func gatewayTDXQuoteStructure(in *ReportInput) FactorResult {
+	mrtdHex := hex.EncodeToString(in.GatewayTDX.MRTD)
+	mrSeamHex := hex.EncodeToString(in.GatewayTDX.MRSeam)
+
+	detail := fmt.Sprintf("valid %s structure", tdxQuoteVersion(in.GatewayTDX))
+	if len(mrtdHex) >= 16 {
+		detail = fmt.Sprintf("valid %s, MRTD: %s...", tdxQuoteVersion(in.GatewayTDX), mrtdHex[:16])
+	}
+
+	gp := in.GatewayPolicy
+	switch {
+	case gp.HasMRTDPolicy() && !containsAllowlist(gp.MRTDAllow, mrtdHex):
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("gateway MRTD not in policy allowlist: %s...", prefixHex(mrtdHex))}
+	case gp.HasMRSeamPolicy() && !containsAllowlist(gp.MRSeamAllow, mrSeamHex):
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Fail, Detail: fmt.Sprintf("gateway MRSEAM not in policy allowlist: %s...", prefixHex(mrSeamHex))}
+	case gp.HasMRTDPolicy() && gp.HasMRSeamPolicy():
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Pass, Detail: detail + " (gateway MRTD/MRSEAM policy matched)"}
+	case gp.HasMRTDPolicy():
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Pass, Detail: detail + " (gateway MRTD policy matched)"}
+	case gp.HasMRSeamPolicy():
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Pass, Detail: detail + " (gateway MRSEAM policy matched)"}
+	default:
+		return FactorResult{Tier: TierGateway, Name: "gateway_tdx_quote_structure", Status: Pass, Detail: detail}
+	}
+}
+func evalGatewayTDXReportDataBinding(in *ReportInput) []FactorResult {
+	switch {
+	case in.GatewayTDX.ParseErr != nil:
+		return factor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
+			"gateway TDX quote parse failed; REPORTDATA binding cannot be verified")
+	case in.GatewayTDX.ReportDataBindingErr != nil:
+		return factor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
+			fmt.Sprintf("gateway REPORTDATA binding failed: %v", in.GatewayTDX.ReportDataBindingErr))
+	case in.GatewayTDX.ReportDataBindingDetail != "":
+		return factor(TierGateway, "gateway_tdx_reportdata_binding", Pass,
+			in.GatewayTDX.ReportDataBindingDetail)
+	default:
+		return factor(TierGateway, "gateway_tdx_reportdata_binding", Fail,
+			"no gateway REPORTDATA verifier ran")
+	}
+}
+func evalGatewayComposeBinding(in *ReportInput) []FactorResult {
+	switch {
+	case in.GatewayCompose == nil || !in.GatewayCompose.Checked:
+		return factor(TierGateway, "gateway_compose_binding", Skip, "no gateway app_compose in attestation response")
+	case in.GatewayCompose.Err != nil:
+		return factor(TierGateway, "gateway_compose_binding", Fail, fmt.Sprintf("gateway compose binding failed: %v", in.GatewayCompose.Err))
+	default:
+		return factor(TierGateway, "gateway_compose_binding", Pass, "gateway sha256(app_compose) matches MRConfigID")
+	}
+}
+func evalGatewayCPUIDRegistry(in *ReportInput) []FactorResult {
+	if in.GatewayPoC != nil {
+		switch {
+		case in.GatewayPoC.Registered:
+			return factor(TierGateway, "gateway_cpu_id_registry", Pass,
+				fmt.Sprintf("gateway Proof of Cloud: registered (%s)", in.GatewayPoC.Label))
+		case in.GatewayPoC.Err != nil:
+			return factor(TierGateway, "gateway_cpu_id_registry", Skip,
+				fmt.Sprintf("gateway Proof of Cloud query failed: %v", in.GatewayPoC.Err))
+		default:
+			return factor(TierGateway, "gateway_cpu_id_registry", Fail,
+				"gateway hardware not found in Proof of Cloud registry; paste gateway intel_quote from --save-dir at proofofcloud.org to verify")
+		}
+	}
+	if in.GatewayTDX != nil && in.GatewayTDX.PPID != "" {
+		return factor(TierGateway, "gateway_cpu_id_registry", Skip,
+			fmt.Sprintf("gateway PPID extracted (%s...) but offline; use default mode to check Proof of Cloud",
+				in.GatewayTDX.PPID[:min(8, len(in.GatewayTDX.PPID))]))
+	}
+	return factor(TierGateway, "gateway_cpu_id_registry", Skip,
+		"gateway CPU ID registry check not available")
+}
+func evalGatewayEventLogIntegrity(in *ReportInput) []FactorResult {
+	if len(in.GatewayEventLog) == 0 {
+		return factor(TierGateway, "gateway_event_log_integrity", Skip, "no gateway event log entries in attestation response")
+	}
+	if in.GatewayTDX.ParseErr != nil {
+		return factor(TierGateway, "gateway_event_log_integrity", Skip, "gateway TDX quote not parseable; cannot compare RTMRs")
+	}
+
+	replayed, err := ReplayEventLog(in.GatewayEventLog)
+	if err != nil {
+		return factor(TierGateway, "gateway_event_log_integrity", Fail, fmt.Sprintf("gateway event log replay failed: %v", err))
+	}
+
+	for i := range 4 {
+		if replayed[i] != in.GatewayTDX.RTMRs[i] {
+			return factor(TierGateway, "gateway_event_log_integrity", Fail,
+				fmt.Sprintf("gateway RTMR[%d] mismatch: replayed %s, quote %s",
+					i, hex.EncodeToString(replayed[i][:])[:16]+"...",
+					hex.EncodeToString(in.GatewayTDX.RTMRs[i][:])[:16]+"..."))
+		}
+	}
+
+	// GW-M-06: Check RTMR policy allowlists using gateway-specific policy.
+	gp := in.GatewayPolicy
+	for i := range 4 {
+		if !gp.HasRTMRPolicy(i) {
+			continue
+		}
+		rtmrHex := hex.EncodeToString(in.GatewayTDX.RTMRs[i][:])
+		if _, ok := gp.RTMRAllow[i][rtmrHex]; !ok {
+			return factor(TierGateway, "gateway_event_log_integrity", Fail,
+				fmt.Sprintf("gateway RTMR[%d] not in gateway policy allowlist: %s...", i, prefixHex(rtmrHex)))
+		}
+	}
+
+	return factor(TierGateway, "gateway_event_log_integrity", Pass,
+		fmt.Sprintf("gateway event log replayed (%d entries), all 4 RTMRs match quote", len(in.GatewayEventLog)))
+}
+
+// ---------------------------------------------------------------------------
+// Supply chain policy types and helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 // ProvenanceType describes the expected level of Sigstore/Rekor evidence for
 // a container image.

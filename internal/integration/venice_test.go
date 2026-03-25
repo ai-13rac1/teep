@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,47 +51,12 @@ func parseVeniceCaptureTime(t *testing.T, fdir string) time.Time {
 	return ct
 }
 
-func TestIntegration_Venice_Fixture(t *testing.T) {
-	ctx := context.Background()
+// ---------------------------------------------------------------------------
+// Verification phase helpers
+// ---------------------------------------------------------------------------
 
-	// ---------------------------------------------------------------
-	// 1. Load fixtures
-	// ---------------------------------------------------------------
-	fdir := veniceFixtureDir(t)
-	captureTime := parseVeniceCaptureTime(t, fdir)
-	t.Logf("loading fixtures from %s (captured %s)", fdir, captureTime.Format(time.RFC3339))
-
-	attestBody := readFixtureFrom(t, fdir, "venice_attestation.json")
-	nonceHex := strings.TrimSpace(string(readFixtureFrom(t, fdir, "venice_fixture_nonce.txt")))
-	nonce, err := attestation.ParseNonce(nonceHex)
-	if err != nil {
-		t.Fatalf("parse nonce: %v", err)
-	}
-	t.Logf("nonce: %s", nonceHex[:16]+"...")
-
-	// ---------------------------------------------------------------
-	// 2. Parse fixture into RawAttestation
-	// ---------------------------------------------------------------
-	raw, err := venice.ParseAttestationResponse(attestBody)
-	if err != nil {
-		t.Fatalf("parse Venice fixture: %v", err)
-	}
-	t.Logf("model: %s", raw.Model)
-	t.Logf("intel_quote: %d hex chars", len(raw.IntelQuote))
-	t.Logf("nvidia_payload: %d bytes", len(raw.NvidiaPayload))
-	t.Logf("app_compose: %d bytes", len(raw.AppCompose))
-	t.Logf("signing_address: %s", raw.SigningAddress)
-
-	// ---------------------------------------------------------------
-	// 3. Set up mocks for ALL external services
-	// ---------------------------------------------------------------
-	pocPeers, client, rekorClient := setupMocks(t, fdir, "venice", raw)
-
-	// ---------------------------------------------------------------
-	// 4. Run the pipeline
-	// ---------------------------------------------------------------
-
-	// 4a. TDX quote verification
+func verifyVeniceTDX(ctx context.Context, t *testing.T, raw *attestation.RawAttestation, nonce attestation.Nonce) *attestation.TDXVerifyResult {
+	t.Helper()
 	t.Log("--- TDX verification ---")
 	tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, false)
 	t.Logf("TDX parse err: %v", tdxResult.ParseErr)
@@ -104,128 +70,136 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	if tdxResult.ParseErr != nil {
 		t.Fatalf("TDX parse failed: %v", tdxResult.ParseErr)
 	}
+	return tdxResult
+}
 
-	// 4b. REPORTDATA binding (Venice scheme: keccak address + nonce)
+func verifyVeniceReportData(t *testing.T, tdxResult *attestation.TDXVerifyResult, raw *attestation.RawAttestation, nonce attestation.Nonce) {
+	t.Helper()
 	t.Log("--- REPORTDATA binding ---")
 	verifier := venice.ReportDataVerifier{}
 	detail, rdErr := verifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
 	tdxResult.ReportDataBindingErr = rdErr
 	tdxResult.ReportDataBindingDetail = detail
 	t.Logf("REPORTDATA binding: detail=%q err=%v", detail, rdErr)
+}
 
-	// 4c. NVIDIA EAT verification
+func verifyVeniceNvidiaEAT(t *testing.T, raw *attestation.RawAttestation, nonce attestation.Nonce) *attestation.NvidiaVerifyResult {
+	t.Helper()
 	t.Log("--- NVIDIA EAT verification ---")
-	var nvidiaResult *attestation.NvidiaVerifyResult
-	if raw.NvidiaPayload != "" {
-		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
-		t.Logf("NVIDIA format: %s", nvidiaResult.Format)
-		t.Logf("NVIDIA signature err: %v", nvidiaResult.SignatureErr)
-		t.Logf("NVIDIA claims err: %v", nvidiaResult.ClaimsErr)
-		t.Logf("NVIDIA nonce: %s", nvidiaResult.Nonce)
+	if raw.NvidiaPayload == "" {
+		return nil
 	}
+	result := attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+	t.Logf("NVIDIA format: %s", result.Format)
+	t.Logf("NVIDIA signature err: %v", result.SignatureErr)
+	t.Logf("NVIDIA claims err: %v", result.ClaimsErr)
+	t.Logf("NVIDIA nonce: %s", result.Nonce)
+	return result
+}
 
-	// 4d. NVIDIA NRAS verification
+func verifyVeniceNRAS(ctx context.Context, t *testing.T, raw *attestation.RawAttestation, client *http.Client, captureTime time.Time) *attestation.NvidiaVerifyResult {
+	t.Helper()
 	t.Log("--- NVIDIA NRAS verification ---")
-	var nrasResult *attestation.NvidiaVerifyResult
-	if raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
-		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client,
-			jwt.WithTimeFunc(func() time.Time { return captureTime }),
-			jwt.WithLeeway(10*time.Second),
-		)
-		t.Logf("NRAS format: %s", nrasResult.Format)
-		t.Logf("NRAS signature err: %v", nrasResult.SignatureErr)
-		t.Logf("NRAS claims err: %v", nrasResult.ClaimsErr)
-		t.Logf("NRAS overall result: %v", nrasResult.OverallResult)
+	if raw.NvidiaPayload == "" || raw.NvidiaPayload[0] != '{' {
+		return nil
 	}
+	result := attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, client,
+		jwt.WithTimeFunc(func() time.Time { return captureTime }),
+		jwt.WithLeeway(10*time.Second),
+	)
+	t.Logf("NRAS format: %s", result.Format)
+	t.Logf("NRAS signature err: %v", result.SignatureErr)
+	t.Logf("NRAS claims err: %v", result.ClaimsErr)
+	t.Logf("NRAS overall result: %v", result.OverallResult)
+	return result
+}
 
-	// 4e. Compose binding
+func verifyVeniceCompose(t *testing.T, raw *attestation.RawAttestation, tdxResult *attestation.TDXVerifyResult) *attestation.ComposeBindingResult {
+	t.Helper()
 	t.Log("--- compose binding ---")
-	var composeResult *attestation.ComposeBindingResult
-	if raw.AppCompose != "" && tdxResult.ParseErr == nil {
-		composeResult = &attestation.ComposeBindingResult{Checked: true}
-		composeResult.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
-		t.Logf("compose binding err: %v", composeResult.Err)
+	if raw.AppCompose == "" || tdxResult.ParseErr != nil {
+		return nil
 	}
+	result := &attestation.ComposeBindingResult{Checked: true}
+	result.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
+	t.Logf("compose binding err: %v", result.Err)
+	return result
+}
 
-	// 4f. Sigstore
+type sigstoreOutput struct {
+	results      []attestation.SigstoreResult
+	imageRepos   []string
+	digestToRepo map[string]string
+}
+
+func verifyVeniceSigstore(ctx context.Context, t *testing.T, raw *attestation.RawAttestation, rekorClient *attestation.RekorClient) sigstoreOutput {
+	t.Helper()
 	t.Log("--- Sigstore ---")
-	var sigstoreResults []attestation.SigstoreResult
-	var imageRepos []string
-	var digestToRepo map[string]string
-	if raw.AppCompose != "" {
-		dockerCompose, err := attestation.ExtractDockerCompose(raw.AppCompose)
-		if err != nil {
-			t.Logf("extract docker_compose_file: %v (using raw app_compose)", err)
-		}
-		source := dockerCompose
-		if source == "" {
-			source = raw.AppCompose
-		}
-		imageRepos = attestation.ExtractImageRepositories(source)
-		digestToRepo = attestation.ExtractImageDigestToRepoMap(source)
-		digests := attestation.ExtractImageDigests(source)
-		t.Logf("image digests: %d", len(digests))
-		for _, d := range digests {
-			t.Logf("  sha256:%s...", d[:min(16, len(d))])
-		}
-		if len(digests) > 0 {
-			sigstoreResults = rekorClient.CheckSigstoreDigests(ctx, digests)
-			for _, r := range sigstoreResults {
-				t.Logf("  sigstore: digest=%s ok=%v status=%d err=%v", r.Digest[:min(16, len(r.Digest))], r.OK, r.Status, r.Err)
-			}
-		}
+	if raw.AppCompose == "" {
+		return sigstoreOutput{}
 	}
 
-	// 4g. Rekor
+	dockerCompose, err := attestation.ExtractDockerCompose(raw.AppCompose)
+	if err != nil {
+		t.Logf("extract docker_compose_file: %v (using raw app_compose)", err)
+	}
+	source := dockerCompose
+	if source == "" {
+		source = raw.AppCompose
+	}
+
+	out := sigstoreOutput{
+		imageRepos:   attestation.ExtractImageRepositories(source),
+		digestToRepo: attestation.ExtractImageDigestToRepoMap(source),
+	}
+
+	digests := attestation.ExtractImageDigests(source)
+	t.Logf("image digests: %d", len(digests))
+	for _, d := range digests {
+		t.Logf("  sha256:%s...", d[:min(16, len(d))])
+	}
+	if len(digests) > 0 {
+		out.results = rekorClient.CheckSigstoreDigests(ctx, digests)
+		for _, r := range out.results {
+			t.Logf("  sigstore: digest=%s ok=%v status=%d err=%v", r.Digest[:min(16, len(r.Digest))], r.OK, r.Status, r.Err)
+		}
+	}
+	return out
+}
+
+func verifyVeniceRekor(ctx context.Context, t *testing.T, sigstoreResults []attestation.SigstoreResult, rekorClient *attestation.RekorClient) []attestation.RekorProvenance {
+	t.Helper()
 	t.Log("--- Rekor ---")
-	var rekorResults []attestation.RekorProvenance
+	var results []attestation.RekorProvenance
 	for _, sr := range sigstoreResults {
 		if sr.OK {
 			prov := rekorClient.FetchRekorProvenance(ctx, sr.Digest)
 			t.Logf("  rekor: digest=%s hasCert=%v err=%v", prov.Digest[:min(16, len(prov.Digest))], prov.HasCert, prov.Err)
-			rekorResults = append(rekorResults, prov)
+			results = append(results, prov)
 		}
 	}
+	return results
+}
 
-	// 4h. PoC
+func verifyVenicePoC(ctx context.Context, t *testing.T, pocPeers []string, client *http.Client, intelQuote string) *attestation.PoCResult {
+	t.Helper()
 	t.Log("--- Proof of Cloud ---")
 	poc := attestation.NewPoCClient(pocPeers, 3, client)
-	pocResult := poc.CheckQuote(ctx, raw.IntelQuote)
-	t.Logf("PoC registered: %v", pocResult.Registered)
-	t.Logf("PoC machine ID: %s", pocResult.MachineID)
-	t.Logf("PoC label: %s", pocResult.Label)
-	t.Logf("PoC err: %v", pocResult.Err)
+	result := poc.CheckQuote(ctx, intelQuote)
+	t.Logf("PoC registered: %v", result.Registered)
+	t.Logf("PoC machine ID: %s", result.MachineID)
+	t.Logf("PoC label: %s", result.Label)
+	t.Logf("PoC err: %v", result.Err)
+	return result
+}
 
-	// ---------------------------------------------------------------
-	// 5. Build report and assert factors
-	// ---------------------------------------------------------------
-	t.Log("--- BuildReport ---")
-	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:     "venice",
-		Model:        raw.Model,
-		Raw:          raw,
-		Nonce:        nonce,
-		TDX:          tdxResult,
-		Nvidia:       nvidiaResult,
-		NvidiaNRAS:   nrasResult,
-		PoC:          pocResult,
-		Compose:      composeResult,
-		ImageRepos:   imageRepos,
-		DigestToRepo: digestToRepo,
-		Sigstore:     sigstoreResults,
-		Rekor:        rekorResults,
-	})
+// ---------------------------------------------------------------------------
+// Assertion helpers
+// ---------------------------------------------------------------------------
 
-	total := report.Passed + report.Failed + report.Skipped
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
-		report.Passed, total, report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
 
-	// ---------------------------------------------------------------
-	// 6. Assert expected factor results
-	// ---------------------------------------------------------------
 	expectations := []struct {
 		name   string
 		status attestation.Status
@@ -243,7 +217,6 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		{"sigstore_verification", attestation.Pass},
 		{"event_log_integrity", attestation.Pass},
 	}
-
 	for _, exp := range expectations {
 		f := findFactor(t, report, exp.name)
 		if f.Status != exp.status {
@@ -313,5 +286,79 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	if report.Passed < 10 {
 		t.Errorf("expected at least 10 passing factors, got %d", report.Passed)
 	}
+	total := report.Passed + report.Failed + report.Skipped
 	t.Logf("PASS: %d/%d factors passed", report.Passed, total)
+}
+
+// ---------------------------------------------------------------------------
+// Main test
+// ---------------------------------------------------------------------------
+
+func TestIntegration_Venice_Fixture(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Load fixtures
+	fdir := veniceFixtureDir(t)
+	captureTime := parseVeniceCaptureTime(t, fdir)
+	t.Logf("loading fixtures from %s (captured %s)", fdir, captureTime.Format(time.RFC3339))
+
+	attestBody := readFixtureFrom(t, fdir, "venice_attestation.json")
+	nonceHex := strings.TrimSpace(string(readFixtureFrom(t, fdir, "venice_fixture_nonce.txt")))
+	nonce, err := attestation.ParseNonce(nonceHex)
+	if err != nil {
+		t.Fatalf("parse nonce: %v", err)
+	}
+	t.Logf("nonce: %s", nonceHex[:16]+"...")
+
+	// 2. Parse fixture into RawAttestation
+	raw, err := venice.ParseAttestationResponse(attestBody)
+	if err != nil {
+		t.Fatalf("parse Venice fixture: %v", err)
+	}
+	t.Logf("model: %s", raw.Model)
+	t.Logf("intel_quote: %d hex chars", len(raw.IntelQuote))
+	t.Logf("nvidia_payload: %d bytes", len(raw.NvidiaPayload))
+	t.Logf("app_compose: %d bytes", len(raw.AppCompose))
+	t.Logf("signing_address: %s", raw.SigningAddress)
+
+	// 3. Set up mocks for ALL external services
+	pocPeers, client, rekorClient := setupMocks(t, fdir, "venice", raw)
+
+	// 4. Run the pipeline
+	tdxResult := verifyVeniceTDX(ctx, t, raw, nonce)
+	verifyVeniceReportData(t, tdxResult, raw, nonce)
+	nvidiaResult := verifyVeniceNvidiaEAT(t, raw, nonce)
+	nrasResult := verifyVeniceNRAS(ctx, t, raw, client, captureTime)
+	composeResult := verifyVeniceCompose(t, raw, tdxResult)
+	sig := verifyVeniceSigstore(ctx, t, raw, rekorClient)
+	rekorResults := verifyVeniceRekor(ctx, t, sig.results, rekorClient)
+	pocResult := verifyVenicePoC(ctx, t, pocPeers, client, raw.IntelQuote)
+
+	// 5. Build report
+	t.Log("--- BuildReport ---")
+	report := attestation.BuildReport(&attestation.ReportInput{
+		Provider:     "venice",
+		Model:        raw.Model,
+		Raw:          raw,
+		Nonce:        nonce,
+		TDX:          tdxResult,
+		Nvidia:       nvidiaResult,
+		NvidiaNRAS:   nrasResult,
+		PoC:          pocResult,
+		Compose:      composeResult,
+		ImageRepos:   sig.imageRepos,
+		DigestToRepo: sig.digestToRepo,
+		Sigstore:     sig.results,
+		Rekor:        rekorResults,
+	})
+
+	total := report.Passed + report.Failed + report.Skipped
+	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
+		report.Passed, total, report.Passed, report.Failed, report.Skipped)
+	for _, f := range report.Factors {
+		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
+	}
+
+	// 6. Assert expected factor results
+	assertVeniceReport(t, report)
 }

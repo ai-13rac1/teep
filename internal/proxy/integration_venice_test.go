@@ -122,103 +122,131 @@ func isPrintableUTF8(s string) bool {
 	return false
 }
 
+// assertNonStreamResponse validates a non-streaming chat response has valid
+// printable UTF-8 content.
+func assertNonStreamResponse(t *testing.T, resp *http.Response) {
+	t.Helper()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	content := extractMessageContent(t, body)
+	if !isPrintableUTF8(content) {
+		t.Errorf("content is not valid printable UTF-8: %q", content)
+	}
+	t.Logf("response: %q", content)
+}
+
+// assertStreamResponse validates a streaming chat response has valid printable
+// UTF-8 content across all SSE chunks.
+func assertStreamResponse(t *testing.T, resp *http.Response) {
+	t.Helper()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	chunks := readSSEChunks(t, resp.Body)
+	if len(chunks) == 0 {
+		t.Fatal("no SSE chunks received")
+	}
+
+	var sb strings.Builder
+	for _, c := range chunks {
+		sb.WriteString(extractDeltaContent(t, c))
+	}
+	content := sb.String()
+	if !isPrintableUTF8(content) {
+		t.Errorf("content is not valid printable UTF-8: %q", content)
+	}
+	t.Logf("response (%d chunks): %q", len(chunks), content)
+}
+
+// assertReportFactors verifies tier-1 factors pass and REPORTDATA binding holds.
+func assertReportFactors(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	tier1 := []string{
+		"nonce_match",
+		"tdx_quote_present",
+		"tdx_quote_structure",
+		"tdx_cert_chain",
+		"tdx_quote_signature",
+		"tdx_debug_disabled",
+		"signing_key_present",
+	}
+	for _, name := range tier1 {
+		f, ok := findFactor(report.Factors, name)
+		if !ok {
+			t.Errorf("factor %q not found in report", name)
+			continue
+		}
+		if f.Status != attestation.Pass {
+			t.Errorf("factor %q: status = %v, want Pass; detail: %s", name, f.Status, f.Detail)
+		}
+	}
+
+	f, ok := findFactor(report.Factors, "tdx_reportdata_binding")
+	if !ok {
+		t.Error("factor tdx_reportdata_binding not found")
+	} else if f.Status != attestation.Pass {
+		t.Errorf("tdx_reportdata_binding: status = %v, want Pass; detail: %s", f.Status, f.Detail)
+	}
+
+	for _, f := range report.Factors {
+		if f.Status != attestation.Pass {
+			t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+		}
+	}
+
+	t.Logf("score: %d/%d passed, %d skipped, %d failed",
+		report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+}
+
 func TestIntegration_Venice(t *testing.T) {
 	skipIntegration(t)
 
 	t.Run("NonStream", func(t *testing.T) {
 		proxySrv := newProxyServer(t, integrationPlaintextConfig(t))
 		defer proxySrv.Close()
-
 		resp := postChatIntegration(t, proxySrv.URL, integrationModel(), false)
 		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-		content := extractMessageContent(t, body)
-		if !isPrintableUTF8(content) {
-			t.Errorf("content is not valid printable UTF-8: %q", content)
-		}
-		t.Logf("response: %q", content)
+		assertNonStreamResponse(t, resp)
 	})
 
 	t.Run("Streaming", func(t *testing.T) {
 		proxySrv := newProxyServer(t, integrationPlaintextConfig(t))
 		defer proxySrv.Close()
-
 		resp := postChatIntegration(t, proxySrv.URL, integrationModel(), true)
 		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-		}
-
-		chunks := readSSEChunks(t, resp.Body)
-		if len(chunks) == 0 {
-			t.Fatal("no SSE chunks received")
-		}
-
-		var sb strings.Builder
-		for _, c := range chunks {
-			sb.WriteString(extractDeltaContent(t, c))
-		}
-		content := sb.String()
-		if !isPrintableUTF8(content) {
-			t.Errorf("aggregated content is not valid printable UTF-8: %q", content)
-		}
-		t.Logf("response (%d chunks): %q", len(chunks), content)
+		assertStreamResponse(t, resp)
 	})
 
 	t.Run("E2EEStreaming", func(t *testing.T) {
 		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
 		defer proxySrv.Close()
-
-		// E2EE forces stream: true internally for per-chunk decryption.
 		resp := postChatIntegration(t, proxySrv.URL, integrationModel(), true)
 		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-		}
-
-		chunks := readSSEChunks(t, resp.Body)
-		if len(chunks) == 0 {
-			t.Fatal("no SSE chunks received")
-		}
-
-		var sb strings.Builder
-		for _, c := range chunks {
-			sb.WriteString(extractDeltaContent(t, c))
-		}
-		content := sb.String()
-		if !isPrintableUTF8(content) {
-			t.Errorf("decrypted content is not valid printable UTF-8: %q", content)
-		}
-		t.Logf("E2EE response (%d chunks): %q", len(chunks), content)
+		assertStreamResponse(t, resp)
 	})
 
 	t.Run("AttestationReport", func(t *testing.T) {
-		// Self-sufficient: create own proxy and populate cache via a chat request.
-		// Online mode so the report includes Intel PCS, NRAS, and PoC results.
 		cfg := integrationE2EEConfig(t)
 		cfg.Offline = false
 		proxySrv := newProxyServer(t, cfg)
 		defer proxySrv.Close()
 
 		chatResp := postChatIntegration(t, proxySrv.URL, integrationModel(), true)
-		io.Copy(io.Discard, chatResp.Body) // drain so the proxy's relayStream finishes cleanly
+		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		// The cache key uses the upstream model name. With identity mapping,
-		// the upstream model name equals integrationModel().
 		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=venice&model=%s", proxySrv.URL, integrationModel())
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
@@ -235,45 +263,6 @@ func TestIntegration_Venice(t *testing.T) {
 		if err := json.NewDecoder(reportResp.Body).Decode(&report); err != nil {
 			t.Fatalf("decode report: %v", err)
 		}
-
-		// Verify Tier 1 factors all pass.
-		tier1 := []string{
-			"nonce_match",
-			"tdx_quote_present",
-			"tdx_quote_structure",
-			"tdx_cert_chain",
-			"tdx_quote_signature",
-			"tdx_debug_disabled",
-			"signing_key_present",
-		}
-		for _, name := range tier1 {
-			f, ok := findFactor(report.Factors, name)
-			if !ok {
-				t.Errorf("factor %q not found in report", name)
-				continue
-			}
-			if f.Status != attestation.Pass {
-				t.Errorf("factor %q: status = %v, want Pass; detail: %s", name, f.Status, f.Detail)
-			}
-		}
-
-		// Verify REPORTDATA binding passes (required for E2EE).
-		f, ok := findFactor(report.Factors, "tdx_reportdata_binding")
-		if !ok {
-			t.Error("factor tdx_reportdata_binding not found")
-		} else if f.Status != attestation.Pass {
-			t.Errorf("tdx_reportdata_binding: status = %v, want Pass; detail: %s", f.Status, f.Detail)
-		}
-
-		// Log every non-Pass factor so failures are visible in test output.
-		for _, f := range report.Factors {
-			if f.Status == attestation.Pass {
-				continue
-			}
-			t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
-		}
-
-		t.Logf("score: %d/%d passed, %d skipped, %d failed",
-			report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+		assertReportFactors(t, &report)
 	})
 }
