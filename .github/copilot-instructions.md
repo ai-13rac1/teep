@@ -56,9 +56,7 @@ for security validation.
 
 ## Go Conventions
 
-- Use stdlib `testing` — no test frameworks.
 - All new code and bug fixes require unit test coverage.
-- Run `make check` (fmt + vet + lint + tests) before committing.
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
 - Use `Connection: close` or equivalent to prevent TLS connection reuse
   across attestation boundaries.
