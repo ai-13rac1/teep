@@ -24,7 +24,7 @@ import (
 // attestationPath is the NanoGPT API path for TEE attestation.
 const attestationPath = "/v1/tee/attestation"
 
-// eventLogEntry is one entry in NanoGPT's event_log array -- a TDX RTMR
+// eventLogEntry is one entry in NanoGPT's event_log array — a TDX RTMR
 // measurement extend event. Mirrors attestation.EventLogEntry but with
 // NanoGPT's field order for strict JSON parsing.
 type eventLogEntry struct {
@@ -81,14 +81,14 @@ type nanogptInfo struct {
 // endpoint. All fields are parsed to eliminate jsonstrict warnings.
 type attestationResponse struct {
 	// Core fields.
-	Verified       bool            `json:"verified"`
-	Nonce          string          `json:"nonce"`
-	Model          string          `json:"model"`
-	TEEProvider    string          `json:"tee_provider"`
-	SigningKey     string          `json:"signing_key"`
-	SigningAddress string          `json:"signing_address"`
-	IntelQuote     string          `json:"intel_quote"`
-	NvidiaPayload  json.RawMessage `json:"nvidia_payload"`
+	Verified       bool   `json:"verified"`
+	Nonce          string `json:"nonce"`
+	Model          string `json:"model"`
+	TEEProvider    string `json:"tee_provider"`
+	SigningKey     string `json:"signing_key"`
+	SigningAddress string `json:"signing_address"`
+	IntelQuote     string `json:"intel_quote"`
+	NvidiaPayload  string `json:"nvidia_payload"`
 
 	// Extended dstack fields.
 	EventLog        []eventLogEntry `json:"event_log"`
@@ -156,7 +156,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		// Use host+path only -- never include query parameters (may leak nonce).
+		// Use host+path only — never include query parameters (may leak nonce).
 		return nil, fmt.Errorf("nanogpt: GET %s%s: %w", endpoint.Host, endpoint.Path, err)
 	}
 	defer resp.Body.Close()
@@ -209,7 +209,7 @@ func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) 
 		SigningKey:     ar.SigningKey,
 		SigningAddress: ar.SigningAddress,
 		IntelQuote:     ar.IntelQuote,
-		NvidiaPayload:  string(ar.NvidiaPayload),
+		NvidiaPayload:  ar.NvidiaPayload,
 
 		TEEHardware:     ar.TEEHardware,
 		SigningAlgo:     ar.SigningAlgo,

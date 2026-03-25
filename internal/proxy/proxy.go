@@ -297,6 +297,7 @@ func fromConfig(
 	case "nanogpt":
 		p.ChatPath = "/v1/chat/completions"
 		p.Attester = nanogpt.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		// NanoGPT uses the same dstack REPORTDATA binding as Venice.
 		p.ReportDataVerifier = venice.ReportDataVerifier{}
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt)", cp.Name)

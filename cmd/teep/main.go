@@ -458,6 +458,7 @@ func newReportDataVerifier(name string) provider.ReportDataVerifier {
 	case "neardirect", "nearcloud":
 		return neardirect.ReportDataVerifier{}
 	case "nanogpt":
+		// NanoGPT uses the same dstack REPORTDATA binding as Venice.
 		return venice.ReportDataVerifier{}
 	default:
 		return nil

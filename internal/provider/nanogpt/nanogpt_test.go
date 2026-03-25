@@ -13,7 +13,7 @@ import (
 
 // validAttestationJSON is a structurally complete NanoGPT attestation response
 // covering all fields. The signing_key and intel_quote are intentionally short
-// placeholder values -- real attestation verification happens in the attestation
+// placeholder values — real attestation verification happens in the attestation
 // package.
 const validAttestationJSON = `{
 	"verified": true,
@@ -223,7 +223,6 @@ func TestAttester_FetchAttestation_HTTP500(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 500, got nil")
 	}
-	t.Logf("HTTP 500 error: %v", err)
 }
 
 func TestAttester_FetchAttestation_HTTP401(t *testing.T) {
@@ -235,7 +234,6 @@ func TestAttester_FetchAttestation_HTTP401(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 401, got nil")
 	}
-	t.Logf("HTTP 401 error: %v", err)
 }
 
 func TestAttester_FetchAttestation_InvalidJSON(t *testing.T) {
@@ -247,7 +245,6 @@ func TestAttester_FetchAttestation_InvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
-	t.Logf("invalid JSON error: %v", err)
 }
 
 func TestAttester_FetchAttestation_ContextCancelled(t *testing.T) {
@@ -264,7 +261,6 @@ func TestAttester_FetchAttestation_ContextCancelled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cancelled context, got nil")
 	}
-	t.Logf("cancelled context error: %v", err)
 }
 
 func TestAttester_FetchAttestation_InvalidBaseURL(t *testing.T) {
@@ -273,7 +269,6 @@ func TestAttester_FetchAttestation_InvalidBaseURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid base URL, got nil")
 	}
-	t.Logf("invalid base URL error: %v", err)
 }
 
 func TestAttester_FetchAttestation_UnknownFields(t *testing.T) {
@@ -299,7 +294,6 @@ func TestAttester_FetchAttestation_UnknownFields(t *testing.T) {
 	if raw.Model != "TEE/test" {
 		t.Errorf("Model = %q, want %q", raw.Model, "TEE/test")
 	}
-	t.Log("unknown field parsed without error (warning expected in logs)")
 }
 
 func TestAttester_FetchAttestation_EmptyResponse(t *testing.T) {
@@ -317,5 +311,4 @@ func TestAttester_FetchAttestation_EmptyResponse(t *testing.T) {
 	if raw.Model != "" {
 		t.Errorf("Model = %q for empty response, want empty", raw.Model)
 	}
-	t.Log("empty response parsed without panic")
 }

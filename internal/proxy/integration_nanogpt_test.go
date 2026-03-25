@@ -82,7 +82,7 @@ func TestIntegration_NanoGPT(t *testing.T) {
 
 		// First chat request triggers attestation and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
-		io.Copy(io.Discard, chatResp.Body)
+		_, _ = io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
 		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nanogpt&model=%s", proxySrv.URL, model)
