@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-tdx-guest/pcs"
@@ -181,6 +183,14 @@ func factorNames(r *attestation.VerificationReport) []string {
 // Rekor mock helpers
 // ---------------------------------------------------------------------------
 
+// datadogAgentKeyPEM is the raw ECDSA P-256 public key used to cosign the
+// datadog/agent container image. Its SHA-256 fingerprint matches the
+// supply-chain policy (25bcab4ec8eede1e...).
+const datadogAgentKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEgLMCN19xdaSnmBi/BYD26q6AoWjK
+Fdml3gKLajAqc2o72mewgyjHsYHsm3P7gP5jZMP33fzug1xX7obF21k/JQ==
+-----END PUBLIC KEY-----`
+
 // realFulcioCertPEM is a real Fulcio certificate from NEAR AI's compose-manager
 // image, extracted during the Rekor API investigation.
 const realFulcioCertPEM = `-----BEGIN CERTIFICATE-----
@@ -289,19 +299,60 @@ func setupMocks(t *testing.T, fdir, prefix string, raw *attestation.RawAttestati
 	attestation.NvidiaJWKSURL = jwksSrv.URL
 	t.Cleanup(func() { attestation.NvidiaJWKSURL = origJWKS })
 
-	// Rekor
-	testUUID := "24296fb24b8ad77a1234567890abcdef"
-	dsseBody := buildMockDSSEBody(realFulcioCertPEM)
-	entryResp := buildMockEntryResponse(testUUID, dsseBody)
+	// Rekor — per-digest mock. The supply chain policy checks key
+	// fingerprints (SigstorePresent) or Fulcio OIDC identities
+	// (FulcioSigned) so the mock must return the correct entry per image.
+	//
+	// Build a digest→repo map from the docker-compose manifest so we can
+	// route each index query to the right mock entry.
+	composeSource := raw.AppCompose
+	if dc, err := attestation.ExtractDockerCompose(raw.AppCompose); err == nil && dc != "" {
+		composeSource = dc
+	}
+	digestToRepo := attestation.ExtractImageDigestToRepoMap(composeSource)
+
+	// Pre-build per-image entries.
+	const fulcioUUID = "24296fb24b8ad77a1234567890abcdef"
+	const datadogUUID = "24296fb24b8ad77adddddddddddddddd"
+	fulcioDSSE := buildMockDSSEBody(realFulcioCertPEM)
+	datadogDSSE := buildMockDSSEBody(datadogAgentKeyPEM)
+
 	rekorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("Rekor mock: %s %s", r.Method, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+
 		switch r.URL.Path {
 		case "/api/v1/index/retrieve":
-			resp, _ := json.Marshal([]string{testUUID})
+			// Parse {\"hash\":\"sha256:<digest>\"} to route by image.
+			var req struct {
+				Hash string `json:"hash"`
+			}
+			_ = json.Unmarshal(body, &req)
+			digest := strings.TrimPrefix(req.Hash, "sha256:")
+			repo := digestToRepo[digest]
+			uuid := fulcioUUID
+			if repo == "datadog/agent" {
+				uuid = datadogUUID
+			}
+			resp, _ := json.Marshal([]string{uuid})
 			w.Write(resp)
+
 		case "/api/v1/log/entries/retrieve":
-			w.Write(entryResp)
+			// Parse {\"entryUUIDs\":[\"<uuid>\"]} to return the right entry.
+			var req struct {
+				EntryUUIDs []string `json:"entryUUIDs"`
+			}
+			_ = json.Unmarshal(body, &req)
+			uuid := fulcioUUID
+			dsseBody := fulcioDSSE
+			if len(req.EntryUUIDs) > 0 && req.EntryUUIDs[0] == datadogUUID {
+				uuid = datadogUUID
+				dsseBody = datadogDSSE
+			}
+			w.Write(buildMockEntryResponse(uuid, dsseBody))
+
 		default:
 			t.Errorf("unexpected Rekor request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)

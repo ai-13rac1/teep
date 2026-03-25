@@ -306,11 +306,13 @@ func TestIntegration_NearDirect_Fixture(t *testing.T) {
 		}
 	}
 
-	// build_transparency_log — may fail with stale fixtures due to pinned key
-	// fingerprints or OIDC identity mismatches. Re-capture fixtures to fix.
+	// build_transparency_log — the mock Rekor cannot produce valid Signed
+	// Entry Timestamps (SET) for Fulcio entries so this factor is expected
+	// to fail with an SET verification error. Key fingerprint and OIDC
+	// identity checks pass with the per-image mock entries.
 	btlF := findFactor(t, report, "build_transparency_log")
 	if btlF.Status == attestation.Fail {
-		t.Logf("WARNING: build_transparency_log failed (stale fixture key fingerprint or OIDC identity, recapture fixtures): %s", btlF.Detail)
+		t.Logf("WARNING: build_transparency_log failed (mock Rekor lacks SET signatures): %s", btlF.Detail)
 	}
 
 	// Intel PCS collateral — expect pass with fixture data.
