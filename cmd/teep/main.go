@@ -27,6 +27,7 @@ import (
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/provider/venice"
@@ -148,6 +149,7 @@ var providerEnvVars = map[string]string{
 	"venice":     "VENICE_API_KEY",
 	"neardirect": "NEARAI_API_KEY",
 	"nearcloud":  "NEARAI_API_KEY",
+	"nanogpt":    "NANOGPT_API_KEY",
 }
 
 // providerNotFoundError returns a descriptive error when a provider is not configured.
@@ -442,8 +444,10 @@ func newAttester(name string, cp *config.Provider, offline bool) (provider.Attes
 		return neardirect.NewAttester(cp.BaseURL, cp.APIKey, offline), nil
 	case "nearcloud":
 		return nearcloud.NewAttester(cp.APIKey, offline), nil
+	case "nanogpt":
+		return nanogpt.NewAttester(cp.BaseURL, cp.APIKey, offline), nil
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud)", name)
+		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt)", name)
 	}
 }
 
@@ -453,6 +457,8 @@ func newReportDataVerifier(name string) provider.ReportDataVerifier {
 		return venice.ReportDataVerifier{}
 	case "neardirect", "nearcloud":
 		return neardirect.ReportDataVerifier{}
+	case "nanogpt":
+		return venice.ReportDataVerifier{}
 	default:
 		return nil
 	}

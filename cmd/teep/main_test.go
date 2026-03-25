@@ -13,6 +13,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/provider/venice"
@@ -593,6 +594,16 @@ func TestNewAttester(t *testing.T) {
 		}
 	})
 
+	t.Run("nanogpt", func(t *testing.T) {
+		a, err := newAttester("nanogpt", cp, false)
+		if err != nil {
+			t.Fatalf("newAttester(nanogpt): %v", err)
+		}
+		if _, ok := a.(*nanogpt.Attester); !ok {
+			t.Errorf("newAttester(nanogpt) returned %T, want *nanogpt.Attester", a)
+		}
+	})
+
 	t.Run("unknown", func(t *testing.T) {
 		_, err := newAttester("bogus", cp, false)
 		t.Logf("newAttester(bogus) error: %v", err)
@@ -613,6 +624,7 @@ func TestNewReportDataVerifier(t *testing.T) {
 	}{
 		{"venice", "venice.ReportDataVerifier", false},
 		{"neardirect", "neardirect.ReportDataVerifier", false},
+		{"nanogpt", "venice.ReportDataVerifier", false},
 		{"unknown", "", true},
 	}
 	for _, tc := range tests {
