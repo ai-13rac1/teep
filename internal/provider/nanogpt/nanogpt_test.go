@@ -288,3 +288,79 @@ func TestAttester_FetchAttestation_EmptyResponse(t *testing.T) {
 		t.Errorf("SigningKey = %q for empty response, want empty", raw.SigningKey)
 	}
 }
+
+func TestAttester_FetchAttestation_TCBInfoAsString(t *testing.T) {
+	// tcb_info as a JSON-encoded string (double-encoded), which some dstack
+	// versions produce.
+	jsonBody := `{
+		"nonce": "aabb",
+		"signing_public_key": "a6c0596e48e124f9b567e41fe3968d74d0fb845140e47abc11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+		"intel_quote": "dGVzdA==",
+		"info": {
+			"app_name": "dstack-nvidia-0.5.5",
+			"device_id": "dev1",
+			"tcb_info": "{\"app_compose\":\"version: 3\",\"compose_hash\":\"aabb\",\"os_image_hash\":\"os1\"}"
+		}
+	}`
+	srv := makeAttestationServer(t, http.StatusOK, jsonBody)
+	defer srv.Close()
+
+	a := nanogpt.NewAttester(srv.URL, "key")
+	raw, err := a.FetchAttestation(context.Background(), "TEE/test", attestation.NewNonce())
+	if err != nil {
+		t.Fatalf("FetchAttestation: %v", err)
+	}
+	if raw.AppCompose != "version: 3" {
+		t.Errorf("AppCompose = %q, want %q (parsed from string-encoded tcb_info)", raw.AppCompose, "version: 3")
+	}
+	if raw.DeviceID != "dev1" {
+		t.Errorf("DeviceID = %q, want %q", raw.DeviceID, "dev1")
+	}
+}
+
+func TestAttester_FetchAttestation_EventLogAsArray(t *testing.T) {
+	// event_log as a direct JSON array (not string-encoded).
+	jsonBody := `{
+		"nonce": "aabb",
+		"signing_public_key": "a6c0596e48e124f9b567e41fe3968d74d0fb845140e47abc11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+		"intel_quote": "dGVzdA==",
+		"event_log": [
+			{"digest":"d6d8d853b6454f838d98c5573d6a098c","event":"","event_payload":"095464785461626c65","event_type":2147483659,"imr":0}
+		]
+	}`
+	srv := makeAttestationServer(t, http.StatusOK, jsonBody)
+	defer srv.Close()
+
+	a := nanogpt.NewAttester(srv.URL, "key")
+	raw, err := a.FetchAttestation(context.Background(), "TEE/test", attestation.NewNonce())
+	if err != nil {
+		t.Fatalf("FetchAttestation: %v", err)
+	}
+	if raw.EventLogCount != 1 {
+		t.Errorf("EventLogCount = %d, want 1", raw.EventLogCount)
+	}
+	if len(raw.EventLog) != 1 {
+		t.Errorf("len(EventLog) = %d, want 1", len(raw.EventLog))
+	}
+}
+
+func TestSupplyChainPolicy(t *testing.T) {
+	p := nanogpt.SupplyChainPolicy()
+	if p == nil {
+		t.Fatal("SupplyChainPolicy() returned nil")
+	}
+	if len(p.Images) != 10 {
+		t.Errorf("len(Images) = %d, want 10", len(p.Images))
+	}
+	for _, img := range p.Images {
+		if !img.ModelTier {
+			t.Errorf("image %q: ModelTier should be true", img.Repo)
+		}
+		if img.Provenance != attestation.ComposeBindingOnly {
+			t.Errorf("image %q: Provenance = %v, want ComposeBindingOnly", img.Repo, img.Provenance)
+		}
+	}
+	if p.HasGatewayImages() {
+		t.Error("NanoGPT policy should have no gateway images")
+	}
+}

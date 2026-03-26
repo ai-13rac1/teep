@@ -734,6 +734,17 @@ func TestEvalNvidiaNonceMatch(t *testing.T) {
 		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: "wrong-nonce"}
 		assertSingleFactor(t, evalNvidiaNonceMatch(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Fail)
 	})
+
+	t.Run("pass_via_request_nonce", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.NvidiaPayload = `{"evidence_list":[]}`
+		raw.NvidiaNonce = "provider-internal-nonce-aabb"
+		nv := &NvidiaVerifyResult{Format: "EAT", GPUCount: 4, Nonce: "provider-internal-nonce-aabb"}
+		f := assertSingleFactor(t, evalNvidiaNonceMatch(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Pass)
+		if !strings.Contains(f.Detail, "request_nonce") {
+			t.Errorf("detail should mention request_nonce: %s", f.Detail)
+		}
+	})
 }
 
 func TestEvalNvidiaClientNonceBound(t *testing.T) {
@@ -1327,6 +1338,53 @@ func TestSupplyChainPolicyNanoGPT(t *testing.T) {
 	}
 	if p.HasGatewayImages() {
 		t.Error("NanoGPT policy should have no gateway images")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GatewayRepoNames test
+// ---------------------------------------------------------------------------
+
+func TestGatewayRepoNames(t *testing.T) {
+	p := testNearcloudPolicy()
+	names := p.GatewayRepoNames()
+	want := []string{"datadog/agent", "nearaidev/dstack-vpc-client", "nearaidev/dstack-vpc", "alpine", "nearaidev/cloud-api", "nearaidev/cvm-ingress"}
+	if len(names) != len(want) {
+		t.Fatalf("GatewayRepoNames() = %v (len %d), want len %d", names, len(names), len(want))
+	}
+	for i, name := range names {
+		if name != want[i] {
+			t.Errorf("GatewayRepoNames()[%d] = %q, want %q", i, name, want[i])
+		}
+	}
+}
+
+func TestGatewayRepoNames_NoGateway(t *testing.T) {
+	p := testNeardirectPolicy()
+	names := p.GatewayRepoNames()
+	if len(names) != 0 {
+		t.Errorf("GatewayRepoNames() = %v, want empty", names)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ProvenanceType.String test
+// ---------------------------------------------------------------------------
+
+func TestProvenanceTypeString(t *testing.T) {
+	tests := []struct {
+		p    ProvenanceType
+		want string
+	}{
+		{FulcioSigned, "fulcio-signed"},
+		{SigstorePresent, "sigstore-present"},
+		{ComposeBindingOnly, "compose-binding-only"},
+		{ProvenanceType(99), "unknown"},
+	}
+	for _, tc := range tests {
+		if got := tc.p.String(); got != tc.want {
+			t.Errorf("ProvenanceType(%d).String() = %q, want %q", tc.p, got, tc.want)
+		}
 	}
 }
 

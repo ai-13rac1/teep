@@ -773,3 +773,39 @@ type successAttester struct{ raw *attestation.RawAttestation }
 func (a successAttester) FetchAttestation(_ context.Context, _ string, _ attestation.Nonce) (*attestation.RawAttestation, error) {
 	return a.raw, nil
 }
+
+// --------------------------------------------------------------------------
+// supplyChainPolicy tests
+// --------------------------------------------------------------------------
+
+func TestSupplyChainPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		wantNil  bool
+	}{
+		{"venice", "venice", false},
+		{"neardirect", "neardirect", false},
+		{"nearcloud", "nearcloud", false},
+		{"nanogpt", "nanogpt", false},
+		{"unknown", "bogus", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := supplyChainPolicy(tc.provider)
+			if tc.wantNil {
+				if p != nil {
+					t.Errorf("supplyChainPolicy(%q) = %v, want nil", tc.provider, p)
+				}
+				return
+			}
+			if p == nil {
+				t.Fatalf("supplyChainPolicy(%q) = nil, want non-nil", tc.provider)
+			}
+			if len(p.Images) == 0 {
+				t.Errorf("supplyChainPolicy(%q) returned policy with 0 images", tc.provider)
+			}
+			t.Logf("supplyChainPolicy(%q): %d images", tc.provider, len(p.Images))
+		})
+	}
+}
