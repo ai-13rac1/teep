@@ -224,7 +224,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("venice: GET %s: %w", endpoint.String(), err)
+		return nil, fmt.Errorf("venice: GET %s%s: %w", endpoint.Host, endpoint.Path, err)
 	}
 	defer resp.Body.Close()
 
