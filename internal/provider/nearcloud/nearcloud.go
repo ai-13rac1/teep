@@ -65,7 +65,7 @@ type gatewayAttestation struct {
 	EventLog           string `json:"event_log"` // JSON string, not array
 	TLSCertFingerprint string `json:"tls_cert_fingerprint"`
 	Info               struct {
-		TCBInfo *tcbInfo `json:"tcb_info"`
+		TCBInfo tcbInfo `json:"tcb_info"`
 	} `json:"info"`
 }
 
@@ -93,15 +93,10 @@ func ParseGatewayResponse(body []byte, model string) (*GatewayRaw, *attestation.
 		return nil, nil, errors.New("nearcloud: gateway_attestation section missing or empty")
 	}
 
-	var appCompose string
-	if gr.GatewayAttestation.Info.TCBInfo != nil {
-		appCompose = gr.GatewayAttestation.Info.TCBInfo.AppCompose
-	}
-
 	gw := &GatewayRaw{
 		NonceHex:           gr.GatewayAttestation.RequestNonce,
 		IntelQuote:         gr.GatewayAttestation.IntelQuote,
-		AppCompose:         appCompose,
+		AppCompose:         gr.GatewayAttestation.Info.TCBInfo.AppCompose,
 		TLSCertFingerprint: gr.GatewayAttestation.TLSCertFingerprint,
 	}
 

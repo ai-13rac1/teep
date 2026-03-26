@@ -73,7 +73,7 @@ type nanogptInfo struct {
 	KeyProvider  string   `json:"key_provider_info"`
 	MRAggregated string   `json:"mr_aggregated"`
 	OSImageHash  string   `json:"os_image_hash"`
-	TCBInfo      *tcbInfo `json:"tcb_info"`
+	TCBInfo      tcbInfo `json:"tcb_info"`
 	VMConfig     string   `json:"vm_config"`
 }
 
@@ -216,10 +216,7 @@ func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) 
 			"event", e.Event, "type", e.EventType, "digest", digest)
 	}
 
-	var appCompose string
-	if ar.Info.TCBInfo != nil {
-		appCompose = ar.Info.TCBInfo.AppCompose
-	}
+	appCompose := ar.Info.TCBInfo.AppCompose
 
 	// NanoGPT returns the raw secp256k1 x||y point (64 bytes = 128 hex)
 	// without the 04 uncompressed-point prefix. Prepend it so downstream

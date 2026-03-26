@@ -2,7 +2,7 @@ package neardirect
 
 import "encoding/json"
 
-// ExtractAppCompose exposes tcbInfo unmarshalling + appCompose() for external tests.
+// ExtractAppCompose exposes tcbInfo unmarshalling for external tests.
 func ExtractAppCompose(data []byte) string {
 	if len(data) == 0 {
 		return ""
@@ -11,5 +11,5 @@ func ExtractAppCompose(data []byte) string {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return ""
 	}
-	return t.appCompose()
+	return t.AppCompose
 }

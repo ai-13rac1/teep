@@ -73,7 +73,7 @@ type modelAttestation struct {
 		ComposeHash string   `json:"compose_hash"`
 		OSImageHash string   `json:"os_image_hash"`
 		DeviceID    string   `json:"device_id"`
-		TCBInfo     *tcbInfo `json:"tcb_info"`
+		TCBInfo     tcbInfo `json:"tcb_info"`
 	} `json:"info"`
 }
 
@@ -99,11 +99,11 @@ type attestationResponse struct {
 	Verified           bool                        `json:"verified"`
 	EventLog           []attestation.EventLogEntry `json:"event_log"`
 	Info               struct {
-		AppName     string   `json:"app_name"`
-		ComposeHash string   `json:"compose_hash"`
-		OSImageHash string   `json:"os_image_hash"`
-		DeviceID    string   `json:"device_id"`
-		TCBInfo     *tcbInfo `json:"tcb_info"`
+		AppName     string  `json:"app_name"`
+		ComposeHash string  `json:"compose_hash"`
+		OSImageHash string  `json:"os_image_hash"`
+		DeviceID    string  `json:"device_id"`
+		TCBInfo     tcbInfo `json:"tcb_info"`
 	} `json:"info"`
 }
 
@@ -244,7 +244,7 @@ func ParseAttestationResponse(body []byte, model string) (*attestation.RawAttest
 		TLSFingerprint: ar.TLSCertFingerprint,
 		IntelQuote:     ar.IntelQuote,
 		NvidiaPayload:  ar.NvidiaPayload,
-		AppCompose:     ar.Info.TCBInfo.appCompose(),
+		AppCompose:     ar.Info.TCBInfo.AppCompose,
 		AppName:        ar.Info.AppName,
 		ComposeHash:    ar.Info.ComposeHash,
 		OSImageHash:    ar.Info.OSImageHash,
@@ -280,7 +280,7 @@ func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) (*
 		TLSFingerprint: m.TLSCertFingerprint,
 		IntelQuote:     m.IntelQuote,
 		NvidiaPayload:  m.NvidiaPayload,
-		AppCompose:     m.Info.TCBInfo.appCompose(),
+		AppCompose:     m.Info.TCBInfo.AppCompose,
 		AppName:        m.Info.AppName,
 		ComposeHash:    m.Info.ComposeHash,
 		OSImageHash:    m.Info.OSImageHash,
@@ -293,14 +293,6 @@ func rawFromModelAttestation(m *modelAttestation, verified bool, body []byte) (*
 		raw.TEEHardware = "intel-tdx"
 	}
 	return raw, nil
-}
-
-// appCompose returns the AppCompose field, or "" if t is nil.
-func (t *tcbInfo) appCompose() string {
-	if t == nil {
-		return ""
-	}
-	return t.AppCompose
 }
 
 // normalizeUncompressedKey prepends the "04" uncompressed point prefix if the

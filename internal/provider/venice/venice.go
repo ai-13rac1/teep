@@ -149,7 +149,7 @@ type veniceInfo struct {
 	KeyProvider  string   `json:"key_provider_info"`
 	MRAggregated string   `json:"mr_aggregated"`
 	OSImageHash  string   `json:"os_image_hash"`
-	TCBInfo      *tcbInfo `json:"tcb_info"`
+	TCBInfo      tcbInfo `json:"tcb_info"`
 	VMConfig     string   `json:"vm_config"`
 }
 
@@ -263,11 +263,6 @@ func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) 
 			"event", e.Event, "type", e.EventType, "digest", digest)
 	}
 
-	var appCompose string
-	if ar.Info.TCBInfo != nil {
-		appCompose = ar.Info.TCBInfo.AppCompose
-	}
-
 	return &attestation.RawAttestation{
 		Verified:       ar.Verified,
 		Nonce:          ar.Nonce,
@@ -285,7 +280,7 @@ func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) 
 		ComposeHash:     ar.Info.ComposeHash,
 		OSImageHash:     ar.Info.OSImageHash,
 		DeviceID:        ar.Info.DeviceID,
-		AppCompose:      appCompose,
+		AppCompose:      ar.Info.TCBInfo.AppCompose,
 		EventLog:        toEventLogEntries(ar.EventLog),
 		EventLogCount:   len(ar.EventLog),
 		NonceSource:     ar.NonceSource,
