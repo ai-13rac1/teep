@@ -117,6 +117,7 @@ var DefaultEnforced = []string{
 	"compose_binding",
 	"nvidia_signature",
 	"nvidia_nonce_match",
+	"tdx_tcb_not_revoked",
 	"build_transparency_log",
 	"sigstore_verification",
 	"event_log_integrity",
@@ -135,7 +136,7 @@ var KnownFactors = []string{
 	"nonce_match", "tdx_quote_present", "tdx_quote_structure", "tdx_cert_chain",
 	"tdx_quote_signature", "tdx_debug_disabled", "signing_key_present",
 	"tdx_reportdata_binding", "intel_pcs_collateral", "tdx_tcb_current",
-	"nvidia_payload_present", "nvidia_signature", "nvidia_claims", "nvidia_nonce_match",
+	"tdx_tcb_not_revoked", "nvidia_payload_present", "nvidia_signature", "nvidia_claims", "nvidia_nonce_match",
 	"nvidia_nonce_client_bound", "nvidia_nras_verified", "e2ee_capable", "tls_key_binding", "cpu_gpu_chain",
 	"measured_model_weights", "build_transparency_log", "cpu_id_registry",
 	"compose_binding", "sigstore_verification", "event_log_integrity",
@@ -262,6 +263,7 @@ func buildEvaluators(includeGateway bool) []evaluatorFunc {
 		evalTDXReportDataBinding,
 		evalIntelPCSCollateral,
 		evalTDXTCBCurrent,
+		evalTDXTCBNotRevoked,
 		evalNvidiaPayloadPresent,
 		evalNvidiaSignature,
 		evalNvidiaClaims,
@@ -458,6 +460,24 @@ func evalTDXTCBCurrent(in *ReportInput) []FactorResult {
 	svnHex := hex.EncodeToString(in.TDX.TeeTCBSVN)
 	return factor(TierBinding, "tdx_tcb_current", Skip,
 		fmt.Sprintf("TEE_TCB_SVN: %s (offline; full check requires Intel PCS)", svnHex))
+}
+func evalTDXTCBNotRevoked(in *ReportInput) []FactorResult {
+	if in.TDX == nil || in.TDX.ParseErr != nil {
+		return factor(TierBinding, "tdx_tcb_not_revoked", Skip, "no parseable TDX quote")
+	}
+	if in.TDX.TcbStatus == "" {
+		if in.TDX.CollateralErr != nil {
+			return factor(TierBinding, "tdx_tcb_not_revoked", Skip,
+				fmt.Sprintf("Intel PCS collateral fetch failed: %v", in.TDX.CollateralErr))
+		}
+		return factor(TierBinding, "tdx_tcb_not_revoked", Skip, "offline; Intel PCS collateral not fetched")
+	}
+	if in.TDX.TcbStatus == pcs.TcbComponentStatusRevoked {
+		return factor(TierBinding, "tdx_tcb_not_revoked", Fail,
+			"TCB status: Revoked — Intel has determined this firmware is fundamentally compromised")
+	}
+	return factor(TierBinding, "tdx_tcb_not_revoked", Pass,
+		fmt.Sprintf("TCB status %s is not Revoked", in.TDX.TcbStatus))
 }
 func evalNvidiaPayloadPresent(in *ReportInput) []FactorResult {
 	if in.Raw.NvidiaPayload == "" {
@@ -1311,6 +1331,19 @@ func supplyChainPolicyForProvider(provider string) *supplyChainPolicy {
 					"nearai/cvm-ingress",
 					"https://github.com/nearai/cvm-ingress",
 				}},
+		}}
+	case "nanogpt":
+		return &supplyChainPolicy{Images: []ImageProvenance{
+			{Repo: "alpine", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "dstacktee/dstack-ingress", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "dstacktee/vllm-proxy", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "haproxy", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "lmsysorg/sglang", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "mondaylord/vllm-openai", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "phalanetwork/vllm-proxy", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "python", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "redis", ModelTier: true, Provenance: ComposeBindingOnly},
+			{Repo: "vllm/vllm-openai", ModelTier: true, Provenance: ComposeBindingOnly},
 		}}
 	default:
 		return nil

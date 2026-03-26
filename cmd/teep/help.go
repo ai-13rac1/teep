@@ -125,6 +125,18 @@ var factorRegistry = []factorInfo{
 			"mode, shows only the raw TEE_TCB_SVN bytes.",
 	},
 	{
+		Name:    "tdx_tcb_not_revoked",
+		Tier:    2,
+		Summary: "TCB firmware not revoked by Intel",
+		Description: "Checks that the TDX TCB status from Intel PCS collateral is " +
+			"not Revoked. Unlike tdx_tcb_current (which also fails on " +
+			"SWHardeningNeeded or OutOfDate), this factor only blocks on " +
+			"Revoked — meaning Intel has determined the firmware is " +
+			"fundamentally compromised with no available mitigation. This " +
+			"is enforced by default as a minimum safety check. Skipped in " +
+			"--offline mode or when Intel PCS collateral is unavailable.",
+	},
+	{
 		Name:    "nvidia_payload_present",
 		Tier:    2,
 		Summary: "NVIDIA attestation payload present",

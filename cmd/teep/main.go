@@ -11,6 +11,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -223,6 +225,21 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 	}
 	client := config.NewAttestationClient(offline)
 
+	var pocSigningKey ed25519.PublicKey
+	if cfg.PoCSigningKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(cfg.PoCSigningKey)
+		if err != nil {
+			slog.Error("poc_signing_key: invalid base64", "err", err)
+			os.Exit(1)
+		}
+		if len(keyBytes) != ed25519.PublicKeySize {
+			slog.Error("poc_signing_key: wrong size", "expected", ed25519.PublicKeySize, "got", len(keyBytes))
+			os.Exit(1)
+		}
+		pocSigningKey = ed25519.PublicKey(keyBytes)
+		slog.Info("PoC JWT EdDSA signature verification enabled")
+	}
+
 	nonce := attestation.NewNonce()
 	slog.Debug("nonce generated", "provider", providerName, "model", modelName, "nonce", nonce.Hex()[:16]+"...")
 	ctx := context.Background()
@@ -238,7 +255,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 
 	tdxResult := verifyTDX(ctx, raw, nonce, providerName, offline)
 	nvidiaResult, nrasResult := verifyNVIDIA(ctx, raw, nonce, client, offline)
-	pocResult := checkPoC(ctx, raw.IntelQuote, client, offline)
+	pocResult := checkPoC(ctx, raw.IntelQuote, client, offline, pocSigningKey)
 
 	// Model compose evidence (gated on TDX).
 	var composeResult *attestation.ComposeBindingResult
@@ -255,7 +272,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 	}
 
 	// Gateway verification (nearcloud-specific fields).
-	gatewayTDX, gatewayCompose, gatewayPoCResult := verifyNearcloudGateway(ctx, raw, nonce, client, offline)
+	gatewayTDX, gatewayCompose, gatewayPoCResult := verifyNearcloudGateway(ctx, raw, nonce, client, offline, pocSigningKey)
 	var gatewayCD attestation.ComposeDigests
 	if gatewayCompose != nil && gatewayCompose.Err == nil {
 		gatewayCD = attestation.ExtractComposeDigests(raw.GatewayAppCompose)
@@ -363,14 +380,20 @@ func verifyNVIDIA(ctx context.Context, raw *attestation.RawAttestation, nonce at
 }
 
 // checkPoC runs a Proof of Cloud check for the given intel_quote.
-// Returns nil if offline or quote is empty.
-func checkPoC(ctx context.Context, quote string, client *http.Client, offline bool) *attestation.PoCResult {
+// Returns nil if offline or quote is empty. When signingKey is non-nil,
+// PoC JWT EdDSA signatures are verified.
+func checkPoC(ctx context.Context, quote string, client *http.Client, offline bool, signingKey ed25519.PublicKey) *attestation.PoCResult {
 	if offline || quote == "" {
 		return nil
 	}
 	slog.Debug("Proof of Cloud check starting")
 	pocStart := time.Now()
-	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
+	var poc *attestation.PoCClient
+	if signingKey != nil {
+		poc = attestation.NewPoCClientWithSigningKey(attestation.PoCPeers, attestation.PoCQuorum, client, signingKey)
+	} else {
+		poc = attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
+	}
 	result := poc.CheckQuote(ctx, quote)
 	slog.Debug("Proof of Cloud check complete", "elapsed", time.Since(pocStart),
 		"registered", result != nil && result.Registered)
@@ -381,7 +404,7 @@ func checkPoC(ctx context.Context, quote string, client *http.Client, offline bo
 // providers that populate GatewayIntelQuote (nearcloud).
 func verifyNearcloudGateway(
 	ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce,
-	client *http.Client, offline bool,
+	client *http.Client, offline bool, pocSigningKey ed25519.PublicKey,
 ) (tdx *attestation.TDXVerifyResult, compose *attestation.ComposeBindingResult, poc *attestation.PoCResult) {
 	if raw.GatewayIntelQuote == "" {
 		return nil, nil, nil
@@ -398,7 +421,7 @@ func verifyNearcloudGateway(
 		compose = &attestation.ComposeBindingResult{Checked: true}
 		compose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, tdx.MRConfigID)
 	}
-	poc = checkPoC(ctx, raw.GatewayIntelQuote, client, offline)
+	poc = checkPoC(ctx, raw.GatewayIntelQuote, client, offline, pocSigningKey)
 	slog.Debug("gateway TDX verification complete")
 	return tdx, compose, poc
 }

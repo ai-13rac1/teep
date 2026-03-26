@@ -107,8 +107,8 @@ func TestBuildReportFactorCount(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
 
-	if len(report.Factors) != 25 {
-		t.Errorf("factor count: got %d, want 25", len(report.Factors))
+	if len(report.Factors) != 26 {
+		t.Errorf("factor count: got %d, want 26", len(report.Factors))
 	}
 }
 
@@ -523,6 +523,65 @@ func TestEvalTDXTCBCurrent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
 			f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{
+				Raw: raw, Nonce: nonce, TDX: tc.tdx,
+			}), tc.want)
+			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
+				t.Errorf("detail %q should contain %q", f.Detail, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestEvalTDXTCBNotRevoked(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+
+	tests := []struct {
+		name       string
+		tdx        *TDXVerifyResult
+		want       Status
+		wantDetail string
+	}{
+		{
+			"pass_up_to_date",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16), TcbStatus: "UpToDate"},
+			Pass, "not Revoked",
+		},
+		{
+			"pass_sw_hardening_needed",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16), TcbStatus: "SWHardeningNeeded"},
+			Pass, "not Revoked",
+		},
+		{
+			"pass_out_of_date",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16), TcbStatus: "OutOfDate"},
+			Pass, "not Revoked",
+		},
+		{
+			"fail_revoked",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16), TcbStatus: "Revoked"},
+			Fail, "Revoked",
+		},
+		{
+			"skip_nil_tdx",
+			nil,
+			Skip, "no parseable TDX",
+		},
+		{
+			"skip_offline",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16)},
+			Skip, "offline",
+		},
+		{
+			"skip_collateral_err",
+			&TDXVerifyResult{TeeTCBSVN: make([]byte, 16), CollateralErr: errors.New("timeout")},
+			Skip, "collateral fetch failed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := buildMinimalRaw(nonce, sigKey)
+			f := assertSingleFactor(t, evalTDXTCBNotRevoked(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.want)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -1180,6 +1239,30 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 	})
 }
 
+func TestSupplyChainPolicyNanoGPT(t *testing.T) {
+	p := supplyChainPolicyForProvider("nanogpt")
+	if p == nil {
+		t.Fatal("supplyChainPolicyForProvider(\"nanogpt\") returned nil")
+	}
+
+	expectedRepos := []string{
+		"alpine", "dstacktee/dstack-ingress", "dstacktee/vllm-proxy",
+		"haproxy", "lmsysorg/sglang", "mondaylord/vllm-openai",
+		"phalanetwork/vllm-proxy", "python", "redis", "vllm/vllm-openai",
+	}
+	for _, repo := range expectedRepos {
+		if !p.allowedInModel(repo) {
+			t.Errorf("repo %q should be allowed in model tier", repo)
+		}
+	}
+	if p.allowedInModel("attacker/evil-image") {
+		t.Error("unexpected repo should not be allowed")
+	}
+	if p.hasGatewayImages() {
+		t.Error("NanoGPT policy should have no gateway images")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tier 3 always-fail factors via BuildReport (quick sanity check)
 // ---------------------------------------------------------------------------
@@ -1619,8 +1702,8 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 	// gateway_tdx_quote_structure, gateway_tdx_cert_chain, gateway_tdx_quote_signature,
 	// gateway_tdx_debug_disabled, gateway_tdx_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 35 {
-		t.Errorf("factor count with gateway: got %d, want 35", len(report.Factors))
+	if len(report.Factors) != 36 {
+		t.Errorf("factor count with gateway: got %d, want 36", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}
