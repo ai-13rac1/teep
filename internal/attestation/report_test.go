@@ -107,8 +107,8 @@ func TestBuildReportFactorCount(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
 
-	if len(report.Factors) != 24 {
-		t.Errorf("factor count: got %d, want 24", len(report.Factors))
+	if len(report.Factors) != 25 {
+		t.Errorf("factor count: got %d, want 25", len(report.Factors))
 	}
 }
 
@@ -624,6 +624,44 @@ func TestEvalNvidiaNonceMatch(t *testing.T) {
 		raw.NvidiaPayload = `{"evidence_list":[]}`
 		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: "wrong-nonce"}
 		assertSingleFactor(t, evalNvidiaNonceMatch(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Fail)
+	})
+}
+
+func TestEvalNvidiaClientNonceBound(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+
+	t.Run("pass_direct_match", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.NvidiaPayload = `{"evidence_list":[]}`
+		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: nonce.Hex()}
+		f := assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Pass)
+		if !strings.Contains(f.Detail, "client nonce directly") {
+			t.Errorf("detail should mention direct match: %s", f.Detail)
+		}
+	})
+
+	t.Run("fail_matched_via_request_nonce", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.NvidiaPayload = `{"evidence_list":[]}`
+		raw.NvidiaNonce = "aabbccdd"
+		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: "aabbccdd"} // matches request_nonce, not client
+		f := assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Fail)
+		if !strings.Contains(f.Detail, "request_nonce") {
+			t.Errorf("detail should mention request_nonce fallback: %s", f.Detail)
+		}
+	})
+
+	t.Run("skip_no_nvidia", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nil}), Skip)
+	})
+
+	t.Run("skip_empty_nonce", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.NvidiaPayload = `{"evidence_list":[]}`
+		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: ""}
+		assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Skip)
 	})
 }
 
@@ -1581,8 +1619,8 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 	// gateway_tdx_quote_structure, gateway_tdx_cert_chain, gateway_tdx_quote_signature,
 	// gateway_tdx_debug_disabled, gateway_tdx_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 34 {
-		t.Errorf("factor count with gateway: got %d, want 34", len(report.Factors))
+	if len(report.Factors) != 35 {
+		t.Errorf("factor count with gateway: got %d, want 35", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}

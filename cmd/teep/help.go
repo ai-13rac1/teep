@@ -161,6 +161,18 @@ var factorRegistry = []factorInfo{
 			"verification session.",
 	},
 	{
+		Name:    "nvidia_nonce_client_bound",
+		Tier:    2,
+		Summary: "NVIDIA nonce bound directly to client",
+		Description: "Advisory factor that checks whether the NVIDIA GPU attestation " +
+			"nonce matches the client-supplied nonce directly, rather than a " +
+			"provider-internal request_nonce. When the GPU nonce matches only " +
+			"via the provider's request_nonce, GPU attestation freshness depends " +
+			"on trusting the provider to relay the nonce honestly. This factor " +
+			"is not enforced by default — it provides observability into the " +
+			"nonce binding path.",
+	},
+	{
 		Name:    "nvidia_nras_verified",
 		Tier:    2,
 		Summary: "NVIDIA NRAS RIM measurement verification",
@@ -496,7 +508,7 @@ Usage:
   teep serve PROVIDER [--offline] [--log-level LEVEL]
 
 Arguments:
-  PROVIDER   Provider name (venice, neardirect, nearcloud).
+  PROVIDER   Provider name (venice, neardirect, nearcloud, nanogpt).
 
 The proxy intercepts OpenAI-compatible chat completion requests, performs TEE
 attestation verification against the upstream provider, and optionally enables
@@ -539,7 +551,7 @@ Usage:
   teep verify PROVIDER --model MODEL [flags]
 
 Arguments:
-  PROVIDER   Provider name (venice, neardirect, nearcloud).
+  PROVIDER   Provider name (venice, neardirect, nearcloud, nanogpt).
 
 Connects to the specified provider's attestation endpoint, fetches the TEE
 attestation for the given model, and runs all verification factors. The

@@ -136,7 +136,7 @@ var KnownFactors = []string{
 	"tdx_quote_signature", "tdx_debug_disabled", "signing_key_present",
 	"tdx_reportdata_binding", "intel_pcs_collateral", "tdx_tcb_current",
 	"nvidia_payload_present", "nvidia_signature", "nvidia_claims", "nvidia_nonce_match",
-	"nvidia_nras_verified", "e2ee_capable", "tls_key_binding", "cpu_gpu_chain",
+	"nvidia_nonce_client_bound", "nvidia_nras_verified", "e2ee_capable", "tls_key_binding", "cpu_gpu_chain",
 	"measured_model_weights", "build_transparency_log", "cpu_id_registry",
 	"compose_binding", "sigstore_verification", "event_log_integrity",
 	// Gateway factors (nearcloud only).
@@ -266,6 +266,7 @@ func buildEvaluators(includeGateway bool) []evaluatorFunc {
 		evalNvidiaSignature,
 		evalNvidiaClaims,
 		evalNvidiaNonceMatch,
+		evalNvidiaClientNonceBound,
 		evalNvidiaNRASVerified,
 		evalE2EECapable,
 		// Tier 3: Supply Chain & Channel Integrity
@@ -508,6 +509,17 @@ func evalNvidiaNonceMatch(in *ReportInput) []FactorResult {
 			nvidiaNonceDetail(in.Nvidia)+" (matched provider request_nonce)")
 	}
 	return factor(TierBinding, "nvidia_nonce_match", Fail, fmt.Sprintf("nonce mismatch in NVIDIA payload: got %q, want %q", truncHex(in.Nvidia.Nonce), truncHex(in.Nonce.Hex())))
+}
+func evalNvidiaClientNonceBound(in *ReportInput) []FactorResult {
+	if in.Nvidia == nil || in.Nvidia.Nonce == "" {
+		return factor(TierBinding, "nvidia_nonce_client_bound", Skip, "no NVIDIA nonce to check")
+	}
+	if subtle.ConstantTimeCompare([]byte(in.Nvidia.Nonce), []byte(in.Nonce.Hex())) == 1 {
+		return factor(TierBinding, "nvidia_nonce_client_bound", Pass, "NVIDIA nonce matches client nonce directly")
+	}
+	return factor(TierBinding, "nvidia_nonce_client_bound", Fail, fmt.Sprintf(
+		"NVIDIA nonce does not match client nonce (matched via provider request_nonce); got %q, want %q",
+		truncHex(in.Nvidia.Nonce), truncHex(in.Nonce.Hex())))
 }
 func evalNvidiaNRASVerified(in *ReportInput) []FactorResult {
 	if in.NvidiaNRAS == nil {
