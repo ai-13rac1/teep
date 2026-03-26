@@ -157,7 +157,8 @@ func checkProviderStructure(r *result, prov string) {
 	parseFunc := checkParseFunc(r, fset, files, prov, exc)
 	checkParseFuncUsesJSONStrict(r, fset, parseFunc, prov)
 	checkFetchUsesLimitReader(r, fset, files, prov)
-	checkNoBytesEqual(r, dir, prov)
+	checkNoBytesEqual(r, fset, files)
+	checkNoLogImport(r, files, prov)
 	checkNoSlogAPIKeyArgs(r, fset, files, prov)
 	checkNoJSONRawMessage(r, fset, files, fileNames, prov)
 	checkExternalTestPackage(r, dir, prov)
@@ -320,29 +321,29 @@ func checkFetchUsesLimitReader(r *result, fset *token.FileSet, files []*ast.File
 	r.fail("FetchAttestation method not found in %s", prov)
 }
 
-// No bytes.Equal in reportdata verifier files.
-func checkNoBytesEqual(r *result, dir, prov string) {
-	rdFiles, _ := filepath.Glob(filepath.Join(dir, "reportdata*.go"))
-	if len(rdFiles) == 0 {
-		r.skip("no reportdata verifier files in %s", prov)
-		return
-	}
-
-	rdFset := token.NewFileSet()
-	for _, path := range rdFiles {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(rdFset, path, nil, 0)
-		if err != nil {
-			continue
-		}
+// No bytes.Equal anywhere in provider package (use subtle.ConstantTimeCompare).
+func checkNoBytesEqual(r *result, fset *token.FileSet, files []*ast.File) {
+	for _, f := range files {
 		if containsCall(f, "bytes", "Equal") {
-			r.fail("bytes.Equal found in %s (use subtle.ConstantTimeCompare)", filepath.Base(path))
+			pos := fset.Position(f.Pos())
+			r.fail("bytes.Equal found in %s (use subtle.ConstantTimeCompare)", filepath.Base(pos.Filename))
 			return
 		}
 	}
-	r.pass("no bytes.Equal in reportdata verifiers")
+	r.pass("no bytes.Equal in provider package")
+}
+
+// No "log" package import (use log/slog).
+func checkNoLogImport(r *result, files []*ast.File, prov string) {
+	for _, f := range files {
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, `"`) == "log" {
+				r.fail("\"log\" imported in %s (use log/slog)", prov)
+				return
+			}
+		}
+	}
+	r.pass("no \"log\" import (uses log/slog)")
 }
 
 // No slog calls with API key field names.
@@ -546,6 +547,7 @@ func checkProxyWiring(r *result, providers []string) {
 	checkFromConfigFieldAssignment(r, fd, providers, "ChatPath")
 	checkFromConfigFieldAssignment(r, fd, providers, "Attester")
 	checkFromConfigFieldAssignment(r, fd, providers, "ReportDataVerifier")
+	checkFromConfigFieldAssignment(r, fd, providers, "SupplyChainPolicy")
 	fmt.Println()
 }
 
@@ -595,6 +597,21 @@ func checkCLIMain(r *result, providers []string) {
 				r.pass("newReportDataVerifier switch includes %q", prov)
 			} else {
 				r.fail("newReportDataVerifier switch missing %q", prov)
+			}
+		}
+	}
+
+	// supplyChainPolicy() switch has case for each provider.
+	scpFunc := findFunc(f, "supplyChainPolicy")
+	if scpFunc == nil {
+		r.fail("supplyChainPolicy function not found")
+	} else {
+		cases := collectSwitchCases(scpFunc.Body)
+		for _, prov := range providers {
+			if cases[prov] {
+				r.pass("supplyChainPolicy switch includes %q", prov)
+			} else {
+				r.fail("supplyChainPolicy switch missing %q", prov)
 			}
 		}
 	}
