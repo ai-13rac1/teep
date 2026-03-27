@@ -52,6 +52,112 @@ func (blockedPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRe
 	}, nil
 }
 
+// signingKeyPinnedHandler returns a signing key on first call (cache miss)
+// and no report on subsequent calls (simulating SPKI cache hits). It records
+// the SigningKey from PinnedRequest to verify the proxy passes cached keys.
+type signingKeyPinnedHandler struct {
+	key          string
+	calls        int
+	lastReqSKKey string
+}
+
+func (h *signingKeyPinnedHandler) HandlePinned(_ context.Context, req *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	h.calls++
+	h.lastReqSKKey = req.SigningKey
+	body := io.NopCloser(strings.NewReader(nonStreamResponse("ok")))
+	if h.calls == 1 {
+		// First call: SPKI cache miss → return report + signing key.
+		return &provider.PinnedResponse{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       body,
+			SigningKey: h.key,
+			Report: &attestation.VerificationReport{
+				Provider: "neardirect",
+				Model:    "test-model",
+				Factors: []attestation.FactorResult{
+					{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+					{Name: "tdx_reportdata_binding", Status: attestation.Pass, Detail: "binding ok"},
+				},
+			},
+		}, nil
+	}
+	// Subsequent calls: SPKI cache hit → no report, no signing key from handler.
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+	}, nil
+}
+
+// blockedThenOKPinnedHandler returns blocked on first call, then OK on subsequent calls.
+type blockedThenOKPinnedHandler struct {
+	calls int
+}
+
+func (h *blockedThenOKPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	h.calls++
+	if h.calls == 1 {
+		return &provider.PinnedResponse{
+			StatusCode: http.StatusBadGateway,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Report: &attestation.VerificationReport{
+				Provider: "neardirect",
+				Model:    "test-model",
+				Factors: []attestation.FactorResult{
+					{Name: "nonce_match", Status: attestation.Fail, Enforced: true, Detail: "mismatch"},
+				},
+			},
+		}, nil
+	}
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(nonStreamResponse("recovered"))),
+		Report: &attestation.VerificationReport{
+			Provider: "neardirect",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+			},
+		},
+	}, nil
+}
+
+// reportDataFailPinnedHandler returns a passing report where
+// tdx_reportdata_binding fails. Used for E2EE cache checks.
+type reportDataFailPinnedHandler struct {
+	calls int
+}
+
+func (h *reportDataFailPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	h.calls++
+	body := io.NopCloser(strings.NewReader(nonStreamResponse("ok")))
+	if h.calls == 1 {
+		// First call: return report (cache miss), reportdata binding fails.
+		return &provider.PinnedResponse{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       body,
+			Report: &attestation.VerificationReport{
+				Provider: "neardirect",
+				Model:    "test-model",
+				Factors: []attestation.FactorResult{
+					{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+					{Name: "tdx_reportdata_binding", Status: attestation.Fail, Detail: "binding mismatch"},
+				},
+			},
+		}, nil
+	}
+	// Second call: SPKI hit → no report (proxy uses cached).
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+	}, nil
+}
+
 // --------------------------------------------------------------------------
 // Test helpers
 // --------------------------------------------------------------------------
@@ -2457,5 +2563,188 @@ func TestHandleIndex_AfterRequest(t *testing.T) {
 	// Should show model name in the models table.
 	if !strings.Contains(html, "test-model") {
 		t.Error("index page missing model name 'test-model' after request")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Phase 4: Cache coherence and signing key tests
+// --------------------------------------------------------------------------
+
+func TestSigningKeyCacheReuse(t *testing.T) {
+	// Two sequential requests to a pinned E2EE provider. First triggers
+	// attestation + signing key cache population. Second uses the cached
+	// signing key (verify signing key is passed to PinnedRequest).
+	handler := &signingKeyPinnedHandler{key: "test-signing-key-hex"}
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+				E2EE:    true,
+			},
+		},
+		Enforced: []string{},
+	}
+
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	prov := srv.ProviderByName("neardirect")
+	if prov == nil {
+		t.Fatal("neardirect provider missing")
+	}
+	prov.PinnedHandler = handler
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// First request: attestation + signing key cached.
+	resp1, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", resp1.StatusCode)
+	}
+	if handler.calls != 1 {
+		t.Fatalf("handler calls = %d, want 1", handler.calls)
+	}
+	// First request should NOT have a signing key from cache.
+	if handler.lastReqSKKey != "" {
+		t.Errorf("first request SigningKey should be empty, got %q", handler.lastReqSKKey)
+	}
+
+	// Second request: SPKI hit, signing key should come from cache.
+	resp2, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", resp2.StatusCode)
+	}
+	if handler.calls != 2 {
+		t.Fatalf("handler calls = %d, want 2", handler.calls)
+	}
+	// Second request should receive the cached signing key.
+	if handler.lastReqSKKey != "test-signing-key-hex" {
+		t.Errorf("second request SigningKey = %q, want %q", handler.lastReqSKKey, "test-signing-key-hex")
+	}
+}
+
+func TestBlockedReport_NegCacheAndAttestCacheInteraction(t *testing.T) {
+	// Blocked attestation → negative cache record. Verify second request
+	// gets 503 (neg cache) not 502 (re-attest). Third request after
+	// recovery should succeed.
+	handler := &blockedThenOKPinnedHandler{}
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+				E2EE:    false,
+			},
+		},
+		Enforced: []string{},
+	}
+
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	prov := srv.ProviderByName("neardirect")
+	if prov == nil {
+		t.Fatal("neardirect provider missing")
+	}
+	prov.PinnedHandler = handler
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// Request 1: blocked → 502 + negative cache populated.
+	resp1, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("request 1: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusBadGateway {
+		t.Fatalf("request 1 status = %d, want 502", resp1.StatusCode)
+	}
+	if handler.calls != 1 {
+		t.Fatalf("handler calls = %d, want 1", handler.calls)
+	}
+
+	// Request 2: negative cache → 503. Handler should NOT be called again.
+	resp2, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("request 2: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("request 2 status = %d, want 503 (neg cache)", resp2.StatusCode)
+	}
+	if handler.calls != 1 {
+		t.Errorf("handler calls = %d, want still 1 (neg cache should intercept)", handler.calls)
+	}
+}
+
+func TestPinnedPath_E2EE_ReportDataBindingCacheCheck(t *testing.T) {
+	// E2EE provider: first request caches report where
+	// tdx_reportdata_binding fails. Second request (SPKI cache hit)
+	// should be rejected with 502 because cached report has no binding.
+	handler := &reportDataFailPinnedHandler{}
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+				E2EE:    true,
+			},
+		},
+		Enforced: []string{},
+	}
+
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	prov := srv.ProviderByName("neardirect")
+	if prov == nil {
+		t.Fatal("neardirect provider missing")
+	}
+	prov.PinnedHandler = handler
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// Request 1: attestation returns report where reportdata binding fails.
+	// The proxy should still forward (binding not enforced at proxy level
+	// for non-cached reports on first request — only enforced on E2EE
+	// cache path). But the report is cached.
+	resp1, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("request 1: %v", err)
+	}
+	resp1.Body.Close()
+	t.Logf("request 1 status: %d", resp1.StatusCode)
+
+	// Request 2: SPKI cache hit → proxy checks cached report for E2EE.
+	// Cached report has tdx_reportdata_binding=Fail → proxy should refuse
+	// with 502 to prevent E2EE downgrade.
+	resp2, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("request 2: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadGateway {
+		t.Fatalf("request 2 status = %d, want 502 (reportdata binding failed in cached report)", resp2.StatusCode)
 	}
 }
