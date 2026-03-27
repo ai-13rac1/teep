@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -396,4 +397,112 @@ func TestSigningKeyCachePutEviction(t *testing.T) {
 	if c.Len() > 5 {
 		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
 	}
+}
+
+// --------------------------------------------------------------------------
+// Eviction with all non-expired entries (I-1 regression tests)
+// --------------------------------------------------------------------------
+
+// TestCachePutEviction_AllNonExpired verifies that when all entries are within
+// TTL (none expired), the cache still enforces a hard upper bound by evicting
+// the oldest entry.
+func TestCachePutEviction_AllNonExpired(t *testing.T) {
+	c := NewCache(time.Hour) // Long TTL — nothing expires.
+	for i := range maxCacheEntries + 2 {
+		c.Put("p", fmt.Sprintf("m-%d", i), &VerificationReport{})
+	}
+	if c.Len() > maxCacheEntries+1 {
+		t.Errorf("cache should be bounded; got Len = %d", c.Len())
+	}
+}
+
+// TestNegativeCacheRecordEviction_AllNonExpired verifies that when all entries
+// are within TTL, the negative cache still enforces a hard upper bound.
+func TestNegativeCacheRecordEviction_AllNonExpired(t *testing.T) {
+	c := NewNegativeCache(time.Hour) // Long TTL — nothing expires.
+	for i := range maxCacheEntries + 2 {
+		c.Record("p", fmt.Sprintf("m-%d", i))
+	}
+	if c.Len() > maxCacheEntries+1 {
+		t.Errorf("negative cache should be bounded; got Len = %d", c.Len())
+	}
+}
+
+// TestSigningKeyCachePutEviction_AllNonExpired verifies that when all entries
+// are within TTL, the signing key cache still enforces a hard upper bound.
+func TestSigningKeyCachePutEviction_AllNonExpired(t *testing.T) {
+	c := NewSigningKeyCache(time.Hour) // Long TTL — nothing expires.
+	for i := range maxCacheEntries + 2 {
+		c.Put("p", fmt.Sprintf("m-%d", i), "key")
+	}
+	if c.Len() > maxCacheEntries+1 {
+		t.Errorf("signing key cache should be bounded; got Len = %d", c.Len())
+	}
+}
+
+// --------------------------------------------------------------------------
+// Concurrent access tests
+// --------------------------------------------------------------------------
+
+func TestCacheConcurrentAccess(t *testing.T) {
+	c := NewCache(time.Minute)
+	var wg sync.WaitGroup
+
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Put("p", fmt.Sprintf("m-%d", i), &VerificationReport{})
+		}(i)
+	}
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Get("p", fmt.Sprintf("m-%d", i))
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestNegativeCacheConcurrentAccess(t *testing.T) {
+	c := NewNegativeCache(time.Minute)
+	var wg sync.WaitGroup
+
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Record("p", fmt.Sprintf("m-%d", i))
+		}(i)
+	}
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.IsBlocked("p", fmt.Sprintf("m-%d", i))
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestSigningKeyCacheConcurrentAccess(t *testing.T) {
+	c := NewSigningKeyCache(time.Minute)
+	var wg sync.WaitGroup
+
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Put("p", fmt.Sprintf("m-%d", i), "key")
+		}(i)
+	}
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Get("p", fmt.Sprintf("m-%d", i))
+		}(i)
+	}
+	wg.Wait()
 }
