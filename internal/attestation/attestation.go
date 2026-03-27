@@ -185,6 +185,21 @@ func (c *Cache) Put(provider, model string, report *VerificationReport) {
 				delete(c.entries, k)
 			}
 		}
+		// If still over capacity after pruning expired entries,
+		// evict the oldest entry to enforce a hard upper bound.
+		if len(c.entries) > maxCacheEntries {
+			var oldestKey cacheKey
+			var oldestTime time.Time
+			for k, e := range c.entries {
+				if oldestTime.IsZero() || e.fetchedAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = e.fetchedAt
+				}
+			}
+			if !oldestTime.IsZero() {
+				delete(c.entries, oldestKey)
+			}
+		}
 	}
 	c.entries[cacheKey{provider, model}] = &cacheEntry{
 		report:    report,
@@ -260,6 +275,21 @@ func (c *NegativeCache) Record(provider, model string) {
 				delete(c.entries, k)
 			}
 		}
+		// If still over capacity after pruning expired entries,
+		// evict the oldest entry to enforce a hard upper bound.
+		if len(c.entries) > maxCacheEntries {
+			var oldestKey cacheKey
+			var oldestTime time.Time
+			for k, t := range c.entries {
+				if oldestTime.IsZero() || t.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = t
+				}
+			}
+			if !oldestTime.IsZero() {
+				delete(c.entries, oldestKey)
+			}
+		}
 	}
 	c.entries[cacheKey{provider, model}] = time.Now()
 }
@@ -317,6 +347,21 @@ func (c *SigningKeyCache) Put(provider, model, signingKey string) {
 		for k, e := range c.entries {
 			if now.Sub(e.fetchedAt) > c.ttl {
 				delete(c.entries, k)
+			}
+		}
+		// If still over capacity after pruning expired entries,
+		// evict the oldest entry to enforce a hard upper bound.
+		if len(c.entries) > maxCacheEntries {
+			var oldestKey cacheKey
+			var oldestTime time.Time
+			for k, e := range c.entries {
+				if oldestTime.IsZero() || e.fetchedAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = e.fetchedAt
+				}
+			}
+			if !oldestTime.IsZero() {
+				delete(c.entries, oldestKey)
 			}
 		}
 	}
