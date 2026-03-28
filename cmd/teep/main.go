@@ -198,6 +198,8 @@ func runVerify(args []string) {
 	modelName := fs.String("model", "", "model name as known to the provider (required)")
 	saveDir := fs.String("save-dir", "", "directory to save raw attestation data (EAT, TDX quote)")
 	offline := fs.Bool("offline", false, "skip external verification (Intel PCS, Proof of Cloud, Certificate Transparency)")
+	updateConfig := fs.Bool("update-config", false, "write observed measurements to the config file ($TEEP_CONFIG)")
+	configOut := fs.String("config-out", "", "write updated config to this path instead of $TEEP_CONFIG")
 	fs.String("log-level", "info", "log verbosity: debug, info, warn, error")
 
 	if err := fs.Parse(args); err != nil {
@@ -212,6 +214,23 @@ func runVerify(args []string) {
 
 	report := runVerification(providerName, *modelName, *saveDir, *offline)
 	fmt.Print(formatReport(report))
+
+	if *updateConfig || *configOut != "" {
+		outPath := *configOut
+		if outPath == "" {
+			outPath = os.Getenv("TEEP_CONFIG")
+		}
+		if outPath == "" {
+			fmt.Fprintf(os.Stderr, "teep verify: --update-config requires $TEEP_CONFIG or --config-out\n")
+			os.Exit(1)
+		}
+		observed := extractObserved(report)
+		if err := config.UpdateConfig(outPath, providerName, &observed); err != nil {
+			fmt.Fprintf(os.Stderr, "teep verify: update config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Config updated: %s (provider %s, warn_measurements=false)\n", outPath, providerName)
+	}
 
 	if report.Blocked() {
 		os.Exit(1)
@@ -323,6 +342,27 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		GatewayEventLog:   raw.GatewayEventLog,
 		E2EETest:          e2eeResult,
 	})
+}
+
+// extractObserved builds an ObservedMeasurements from the verification report
+// metadata. Missing metadata keys result in empty strings (no policy change).
+func extractObserved(report *attestation.VerificationReport) config.ObservedMeasurements {
+	m := report.Metadata
+	return config.ObservedMeasurements{
+		MRSeam: m["mrseam"],
+		MRTD:   m["mrtd"],
+		RTMR0:  m["rtmr0"],
+		RTMR1:  m["rtmr1"],
+		RTMR2:  m["rtmr2"],
+		// RTMR3 omitted: verified via event log replay, varies across instances.
+
+		GatewayMRSeam: m["gateway_mrseam"],
+		GatewayMRTD:   m["gateway_mrtd"],
+		GatewayRTMR0:  m["gateway_rtmr0"],
+		GatewayRTMR1:  m["gateway_rtmr1"],
+		GatewayRTMR2:  m["gateway_rtmr2"],
+		// Gateway RTMR3 omitted for the same reason as RTMR3.
+	}
 }
 
 // loadConfig loads the TOML config and looks up the named provider.
