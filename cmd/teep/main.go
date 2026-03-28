@@ -700,7 +700,10 @@ func doE2EEStreamTest(req *http.Request, session *attestation.Session, version s
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue // skip malformed chunks (e.g. usage-only chunks)
+			return &attestation.E2EETestResult{
+				Attempted: true,
+				Err:       fmt.Errorf("parse SSE chunk %d: %w", chunkCount, err),
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -708,7 +711,10 @@ func doE2EEStreamTest(req *http.Request, session *attestation.Session, version s
 
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(chunk.Choices[0].Delta, &fields); err != nil {
-			continue
+			return &attestation.E2EETestResult{
+				Attempted: true,
+				Err:       fmt.Errorf("parse delta in chunk %d: %w", chunkCount, err),
+			}
 		}
 
 		for key, raw := range fields {
