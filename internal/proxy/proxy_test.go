@@ -2752,7 +2752,12 @@ func TestPinnedPath_E2EE_ReportDataBindingCacheCheck(t *testing.T) {
 		t.Fatalf("request 1: %v", err)
 	}
 	resp1.Body.Close()
-	t.Logf("request 1 status: %d", resp1.StatusCode)
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("request 1 status = %d, want 200 (first attested request should be forwarded and cached)", resp1.StatusCode)
+	}
+	if handler.calls != 1 {
+		t.Fatalf("handler calls after request 1 = %d, want 1", handler.calls)
+	}
 
 	// Request 2: SPKI cache hit → proxy checks cached report for E2EE.
 	// Cached report has tdx_reportdata_binding=Fail → proxy should refuse
