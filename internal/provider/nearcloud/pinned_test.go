@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/provider"
@@ -1235,6 +1238,329 @@ func TestEncryptChat_UsesRequestSigningKey(t *testing.T) {
 	}
 	if headers.Get("X-Encryption-Version") != "2" {
 		t.Errorf("X-Encryption-Version = %q, want 2", headers.Get("X-Encryption-Version"))
+	}
+}
+
+func TestHandlePinned_GatewayBlockedModelPasses(t *testing.T) {
+	// Gateway attestation returns mismatched nonce (blocked), model would pass.
+	// Request must be blocked because gateway factor fails — fail-closed.
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			// Gateway returns wrong nonce, model returns correct nonce.
+			// Non-empty intel_quote triggers gateway TDX evaluator inclusion.
+			_, _ = fmt.Fprintf(w, `{
+				"gateway_attestation": {
+					"request_nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+					"intel_quote": "AQAAAA==",
+					"event_log": "",
+					"tls_cert_fingerprint": %q,
+					"info": {"tcb_info": "{\"app_compose\":\"gw-compose\"}"}
+				},
+				"model_attestations": [{
+					"model_name": "test-model",
+					"intel_quote": "",
+					"nvidia_payload": "",
+					"signing_public_key": "04aaaa",
+					"signing_address": "0xtest",
+					"signing_algo": "ecdsa",
+					"tls_cert_fingerprint": %q,
+					"request_nonce": %q
+				}]
+			}`, spkiHash, spkiHash, nonceHex)
+			return
+		}
+		http.Error(w, "chat should not be reached", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	spkiCache := attestation.NewSPKICache()
+
+	handler := NewPinnedHandler(
+		spkiCache, "test-key", true,
+		[]string{"gateway_nonce_match"},
+		attestation.MeasurementPolicy{},
+		attestation.MeasurementPolicy{},
+		nil, nil, nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+	handler.SetCTChecker(nil)
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Report == nil {
+		t.Fatal("Report should be non-nil")
+	}
+	if !resp.Report.Blocked() {
+		t.Fatal("Report should be blocked when gateway nonce mismatches")
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+	if spkiCache.Contains(gatewayHost, spkiHash) {
+		t.Error("SPKI cache should remain empty when gateway is blocked")
+	}
+}
+
+func TestHandlePinned_GatewayPassesModelBlocked(t *testing.T) {
+	// Gateway attestation passes, model returns wrong nonce (blocked).
+	// Request must be blocked — both must pass.
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			// Gateway returns correct nonce, model returns wrong nonce.
+			_, _ = fmt.Fprintf(w, `{
+				"gateway_attestation": {
+					"request_nonce": %q,
+					"intel_quote": "",
+					"event_log": "",
+					"tls_cert_fingerprint": %q,
+					"info": {"tcb_info": "{\"app_compose\":\"gw-compose\"}"}
+				},
+				"model_attestations": [{
+					"model_name": "test-model",
+					"intel_quote": "",
+					"nvidia_payload": "",
+					"signing_public_key": "04aaaa",
+					"signing_address": "0xtest",
+					"signing_algo": "ecdsa",
+					"tls_cert_fingerprint": %q,
+					"request_nonce": "0000000000000000000000000000000000000000000000000000000000000000"
+				}]
+			}`, nonceHex, spkiHash, spkiHash)
+			return
+		}
+		http.Error(w, "chat should not be reached", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	spkiCache := attestation.NewSPKICache()
+
+	handler := NewPinnedHandler(
+		spkiCache, "test-key", true,
+		[]string{"nonce_match"},
+		attestation.MeasurementPolicy{},
+		attestation.MeasurementPolicy{},
+		nil, nil, nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+	handler.SetCTChecker(nil)
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Report == nil {
+		t.Fatal("Report should be non-nil")
+	}
+	if !resp.Report.Blocked() {
+		t.Fatal("Report should be blocked when model nonce mismatches")
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+	if spkiCache.Contains(gatewayHost, spkiHash) {
+		t.Error("SPKI cache should remain empty when model is blocked")
+	}
+}
+
+func TestHandlePinned_SigningKeyCachedOnSuccess(t *testing.T) {
+	// First request: SPKI miss → attestation → caches SPKI + returns signing key.
+	// Second request: SPKI hit → no attestation → signing key from PinnedRequest.
+	var spkiHash string
+	var attestCalls atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			attestCalls.Add(1)
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nearcloudAttestationJSON(spkiHash, nonceHex)))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	spkiCache := attestation.NewSPKICache()
+
+	handler := NewPinnedHandler(
+		spkiCache, "test-key", true,
+		[]string{},
+		attestation.MeasurementPolicy{},
+		attestation.MeasurementPolicy{},
+		nil, nil, nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+	handler.SetCTChecker(nil)
+
+	// First request — triggers attestation, should return signing key.
+	resp1, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:  "POST",
+		Path:    "/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatalf("first HandlePinned: %v", err)
+	}
+	resp1.Body.Close()
+
+	if resp1.Report == nil {
+		t.Fatal("first request: Report should be non-nil (cache miss)")
+	}
+	firstKey := resp1.SigningKey
+	t.Logf("first signing key: %q", firstKey)
+	if firstKey == "" {
+		t.Error("first request should return a signing key")
+	}
+
+	if !spkiCache.Contains(gatewayHost, spkiHash) {
+		t.Fatal("SPKI should be cached after first request")
+	}
+	if attestCalls.Load() != 1 {
+		t.Errorf("attestation calls = %d, want 1", attestCalls.Load())
+	}
+
+	// Second request — SPKI cache hit, no attestation.
+	resp2, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:     "POST",
+		Path:       "/v1/chat/completions",
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:      "test-model",
+		SigningKey: firstKey,
+	})
+	if err != nil {
+		t.Fatalf("second HandlePinned: %v", err)
+	}
+	resp2.Body.Close()
+
+	if resp2.Report != nil {
+		t.Error("second request: Report should be nil (cache hit)")
+	}
+	if attestCalls.Load() != 1 {
+		t.Errorf("attestation calls after second = %d, want still 1", attestCalls.Load())
+	}
+}
+
+func TestHandlePinned_ConcurrentRequests_SingleflightDedup(t *testing.T) {
+	// Multiple concurrent requests on SPKI cache miss should trigger only one
+	// attestation via singleflight.
+	var spkiHash string
+	var attestCalls atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			attestCalls.Add(1)
+			// Hold the attestation response long enough for all goroutines
+			// to pile into singleflight before the winner returns.
+			time.Sleep(100 * time.Millisecond)
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nearcloudAttestationJSON(spkiHash, nonceHex)))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	spkiCache := attestation.NewSPKICache()
+
+	handler := NewPinnedHandler(
+		spkiCache, "test-key", true,
+		[]string{},
+		attestation.MeasurementPolicy{},
+		attestation.MeasurementPolicy{},
+		nil, nil, nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	})
+	handler.SetCTChecker(nil)
+
+	const N = 5
+	// Barrier ensures all goroutines enter HandlePinned concurrently.
+	var ready sync.WaitGroup
+	ready.Add(N)
+	errs := make(chan error, N)
+	for range N {
+		go func() {
+			ready.Done()
+			ready.Wait()
+			resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+				Method:  "POST",
+				Path:    "/v1/chat/completions",
+				Headers: http.Header{"Content-Type": {"application/json"}},
+				Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+				Model:   "test-model",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			resp.Body.Close()
+			errs <- nil
+		}()
+	}
+
+	for range N {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent request error: %v", err)
+		}
+	}
+
+	// All goroutines share the same singleflight key (domain+SPKI) so
+	// exactly one attestation fetch should occur; the rest either join the
+	// in-flight call or find the SPKI already cached.
+	calls := attestCalls.Load()
+	t.Logf("attestation calls: %d", calls)
+	if calls != 1 {
+		t.Errorf("attestation calls = %d, want exactly 1 (singleflight dedup)", calls)
+	}
+	if !spkiCache.Contains(gatewayHost, spkiHash) {
+		t.Error("SPKI should be cached after concurrent requests")
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -580,7 +581,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the Blocked() check would allow a key from a failed attestation to
 	// be reused for E2EE on a subsequent cache-hit request.
 	if raw != nil && raw.SigningKey != "" {
-		if prev, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok && prev != raw.SigningKey {
+		if prev, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok && subtle.ConstantTimeCompare([]byte(prev), []byte(raw.SigningKey)) == 0 {
 			slog.Warn("signing key rotated (VM restart?)", "provider", prov.Name, "model", upstreamModel)
 		}
 		s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
@@ -752,6 +753,16 @@ func (s *Server) handlePinnedChat(
 		if err := json.NewEncoder(w).Encode(report); err != nil {
 			slog.Error("encode response", "error", err)
 		}
+		return
+	}
+	// E2EE providers require REPORTDATA binding even on first request (SPKI
+	// miss). Without it a MITM can substitute the enclave public key and
+	// E2EE degrades to plaintext.
+	if prov.E2EE && report != nil && !report.ReportDataBindingPassed() {
+		s.negCache.Record(prov.Name, upstreamModel)
+		slog.Error("E2EE required but tdx_reportdata_binding not passed; refusing request",
+			"provider", prov.Name, "model", upstreamModel)
+		http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
 		return
 	}
 	if pinnedResp.SigningKey != "" {

@@ -14,6 +14,12 @@ func (s *Server) ProviderByName(name string) *provider.Provider {
 	return s.providers[name]
 }
 
+// SetNegativeCache replaces the server's negative cache.
+// Exported for use in external tests that need a short TTL.
+func (s *Server) SetNegativeCache(nc *attestation.NegativeCache) {
+	s.negCache = nc
+}
+
 // ReassembleNonStream exposes reassembleNonStream for external tests.
 func ReassembleNonStream(body io.Reader, session *attestation.Session) ([]byte, error) {
 	return reassembleNonStream(body, session)
