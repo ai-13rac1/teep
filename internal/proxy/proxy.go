@@ -39,6 +39,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/defaults"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
@@ -198,7 +199,10 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	for name, cp := range cfg.Providers {
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced, cfg.MeasurementPolicy, cfg.GatewayMeasurementPolicy, s.rekorClient, s.pocSigningKey)
+		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
+		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)
+		mergedGWPolicy := config.MergedGatewayMeasurementPolicy(name, cfg, gwDefaults)
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced, mergedPolicy, mergedGWPolicy, s.rekorClient, s.pocSigningKey)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -261,10 +265,12 @@ func fromConfig(
 	pocSigningKey ed25519.PublicKey,
 ) (*provider.Provider, error) {
 	p := &provider.Provider{
-		Name:    cp.Name,
-		BaseURL: cp.BaseURL,
-		APIKey:  cp.APIKey,
-		E2EE:    cp.E2EE,
+		Name:                     cp.Name,
+		BaseURL:                  cp.BaseURL,
+		APIKey:                   cp.APIKey,
+		E2EE:                     cp.E2EE,
+		MeasurementPolicy:        policy,
+		GatewayMeasurementPolicy: gatewayPolicy,
 	}
 	switch cp.Name {
 	case "venice":
@@ -459,7 +465,8 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Raw:               raw,
 		Nonce:             nonce,
 		Enforced:          s.cfg.Enforced,
-		Policy:            s.cfg.MeasurementPolicy,
+		Policy:            prov.MeasurementPolicy,
+		GatewayPolicy:     prov.GatewayMeasurementPolicy,
 		SupplyChainPolicy: prov.SupplyChainPolicy,
 		ImageRepos:        imageRepos,
 		DigestToRepo:      digestToRepo,

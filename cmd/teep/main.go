@@ -32,6 +32,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/defaults"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
@@ -291,13 +292,18 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 
 	e2eeResult := testE2EE(ctx, raw, providerName, cp, modelName, offline)
 
+	mDefaults, gwDefaults := defaults.MeasurementDefaults(providerName)
+	mergedPolicy := config.MergedMeasurementPolicy(providerName, cfg, mDefaults)
+	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(providerName, cfg, gwDefaults)
+
 	return attestation.BuildReport(&attestation.ReportInput{
 		Provider:          providerName,
 		Model:             modelName,
 		Raw:               raw,
 		Nonce:             nonce,
 		Enforced:          cfg.Enforced,
-		Policy:            cfg.MeasurementPolicy,
+		Policy:            mergedPolicy,
+		GatewayPolicy:     mergedGWPolicy,
 		SupplyChainPolicy: supplyChainPolicy(providerName),
 		TDX:               tdxResult,
 		Nvidia:            nvidiaResult,
