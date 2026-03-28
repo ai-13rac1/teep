@@ -1419,6 +1419,22 @@ func buildMetadata(in *ReportInput) map[string]string {
 		m["event_log"] = fmt.Sprintf("%d entries", in.Raw.EventLogCount)
 	}
 
+	// Include full TDX measurement register values so operators can
+	// identify golden values for allowlist policy configuration.
+	if in.TDX != nil && in.TDX.ParseErr == nil {
+		if v := hex.EncodeToString(in.TDX.MRSeam); v != "" {
+			m["mrseam"] = v
+		}
+		if v := hex.EncodeToString(in.TDX.MRTD); v != "" {
+			m["mrtd"] = v
+		}
+		for i, rtmr := range in.TDX.RTMRs {
+			if v := hex.EncodeToString(rtmr[:]); v != "" {
+				m[fmt.Sprintf("rtmr%d", i)] = v
+			}
+		}
+	}
+
 	if len(m) == 0 {
 		return nil
 	}
