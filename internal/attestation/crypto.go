@@ -55,7 +55,8 @@ type Session struct {
 	// sent in the X-Client-Pub-Key header.
 	Ed25519PubHex string
 	// ModelEd25519Hex is the model's Ed25519 public key (64 hex chars),
-	// sent in the X-Model-Pub-Key header.
+	// used internally for key derivation. Not sent as a header per the
+	// NEAR AI E2EE v2 protocol.
 	ModelEd25519Hex string
 	// x25519Priv is the client's X25519 private key (derived from Ed25519
 	// seed) used for decrypting incoming response chunks.

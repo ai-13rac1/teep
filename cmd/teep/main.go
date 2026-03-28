@@ -649,7 +649,6 @@ func testE2EEv2(ctx context.Context, raw *attestation.RawAttestation, cp *config
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Signing-Algo", "ed25519")
 	req.Header.Set("X-Client-Pub-Key", session.Ed25519PubHex)
-	req.Header.Set("X-Model-Pub-Key", session.ModelEd25519Hex)
 	req.Header.Set("X-Encryption-Version", "2")
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")

@@ -200,10 +200,13 @@ func (h *PinnedHandler) encryptChat(
 	}
 
 	// V2 protocol headers per NEAR AI E2EE docs.
+	// Note: X-Model-Pub-Key is intentionally omitted. The gateway uses it
+	// to pin requests to a specific model instance by signing key, which
+	// causes 502 "model unavailable" errors when the instance restarts or
+	// scales. The official NEAR AI E2EE v2 protocol does not require it.
 	hdrs := make(http.Header)
 	hdrs.Set("X-Signing-Algo", "ed25519")
 	hdrs.Set("X-Client-Pub-Key", sess.Ed25519PubHex)
-	hdrs.Set("X-Model-Pub-Key", sess.ModelEd25519Hex)
 	hdrs.Set("X-Encryption-Version", "2")
 
 	return encBody, sess, hdrs, nil
