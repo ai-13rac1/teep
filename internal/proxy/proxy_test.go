@@ -2639,7 +2639,7 @@ func TestSigningKeyCacheReuse(t *testing.T) {
 func TestBlockedReport_NegCacheAndAttestCacheInteraction(t *testing.T) {
 	// Blocked attestation → negative cache record. Verify second request
 	// gets 503 (neg cache) not 502 (re-attest). Third request after
-	// recovery should succeed.
+	// negative cache expiry should succeed (recovery).
 	handler := &blockedThenOKPinnedHandler{}
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
@@ -2658,6 +2658,8 @@ func TestBlockedReport_NegCacheAndAttestCacheInteraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
+	// Use a very short negative cache TTL so the test can expire it quickly.
+	srv.SetNegativeCache(attestation.NewNegativeCache(50 * time.Millisecond))
 	prov := srv.ProviderByName("neardirect")
 	if prov == nil {
 		t.Fatal("neardirect provider missing")
@@ -2691,6 +2693,22 @@ func TestBlockedReport_NegCacheAndAttestCacheInteraction(t *testing.T) {
 	}
 	if handler.calls != 1 {
 		t.Errorf("handler calls = %d, want still 1 (neg cache should intercept)", handler.calls)
+	}
+
+	// Wait for negative cache to expire.
+	time.Sleep(100 * time.Millisecond)
+
+	// Request 3: negative cache expired → re-attest → handler returns OK.
+	resp3, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("request 3: %v", err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("request 3 status = %d, want 200 (recovery after neg cache expiry)", resp3.StatusCode)
+	}
+	if handler.calls != 2 {
+		t.Errorf("handler calls = %d, want 2 (re-attest after neg cache expiry)", handler.calls)
 	}
 }
 
