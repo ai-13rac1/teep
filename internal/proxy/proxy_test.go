@@ -2759,30 +2759,28 @@ func TestPinnedPath_E2EE_ReportDataBindingCacheCheck(t *testing.T) {
 	defer proxySrv.Close()
 
 	// Request 1: attestation returns report where reportdata binding fails.
-	// The proxy should still forward (binding not enforced at proxy level
-	// for non-cached reports on first request — only enforced on E2EE
-	// cache path). But the report is cached.
+	// For an E2EE provider, the proxy must refuse the request even on first
+	// request (SPKI miss) to prevent plaintext downgrade.
 	resp1, err := postChat(t, proxySrv.URL, "test-model", false)
 	if err != nil {
 		t.Fatalf("request 1: %v", err)
 	}
 	resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("request 1 status = %d, want 200 (first attested request should be forwarded and cached)", resp1.StatusCode)
+	if resp1.StatusCode != http.StatusBadGateway {
+		t.Fatalf("request 1 status = %d, want 502 (reportdata binding failed; E2EE must refuse)", resp1.StatusCode)
 	}
 	if handler.calls != 1 {
-		t.Fatalf("handler calls after request 1 = %d, want 1", handler.calls)
+		t.Fatalf("handler calls after request 1 = %d, want 1 (handler called for attestation)", handler.calls)
 	}
 
-	// Request 2: SPKI cache hit → proxy checks cached report for E2EE.
-	// Cached report has tdx_reportdata_binding=Fail → proxy should refuse
-	// with 502 to prevent E2EE downgrade.
+	// Request 2: provider/model is now negative-cached after the first
+	// REPORTDATA binding failure → request is blocked immediately with 503.
 	resp2, err := postChat(t, proxySrv.URL, "test-model", false)
 	if err != nil {
 		t.Fatalf("request 2: %v", err)
 	}
 	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusBadGateway {
-		t.Fatalf("request 2 status = %d, want 502 (reportdata binding failed in cached report)", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("request 2 status = %d, want 503 (negative-cached after binding failure)", resp2.StatusCode)
 	}
 }
