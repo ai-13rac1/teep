@@ -31,19 +31,19 @@ func buildTestReport(provider, model string) *attestation.VerificationReport {
 		{Name: "nonce_match", Status: attestation.Pass, Detail: "Nonce matches (64 hex chars)", Enforced: true, Tier: attestation.TierCore},
 		{Name: "tdx_quote_present", Status: attestation.Pass, Detail: "TDX quote present (1247 base64 chars)", Tier: attestation.TierCore},
 		{Name: "tdx_quote_structure", Status: attestation.Pass, Detail: "Valid QuoteV4 structure", Tier: attestation.TierCore},
-		{Name: "tdx_cert_chain", Status: attestation.Pass, Detail: "Certificate chain valid (Intel root CA)", Tier: attestation.TierCore},
+		{Name: "tdx_cert_chain", Status: attestation.Pass, Detail: "cert chain valid (Intel root CA)", Tier: attestation.TierCore},
 		{Name: "tdx_quote_signature", Status: attestation.Pass, Detail: "Quote signature verified", Tier: attestation.TierCore},
 		{Name: "tdx_debug_disabled", Status: attestation.Pass, Detail: "Debug bit is 0", Enforced: true, Tier: attestation.TierCore},
 		{Name: "signing_key_present", Status: attestation.Pass, Detail: "enclave pubkey present (04a3b2...)", Enforced: true, Tier: attestation.TierCore},
 		// Tier 2
 		{Name: "tdx_reportdata_binding", Status: attestation.Pass, Detail: "REPORTDATA binds signing key + nonce", Enforced: true, Tier: attestation.TierBinding},
 		{Name: "intel_pcs_collateral", Status: attestation.Skip, Detail: "Quote age not determinable", Tier: attestation.TierBinding},
-		{Name: "tdx_tcb_current", Status: attestation.Pass, Detail: "TCB SVN: 03000000000000000000000000000000", Tier: attestation.TierBinding},
+		{Name: "tdx_tcb_current", Status: attestation.Pass, Detail: "TCB is UpToDate per Intel PCS", Tier: attestation.TierBinding},
 		{Name: "nvidia_payload_present", Status: attestation.Pass, Detail: "NVIDIA payload present (512 chars)", Tier: attestation.TierBinding},
 		{Name: "nvidia_signature", Status: attestation.Pass, Detail: "JWT signature valid (RS256)", Tier: attestation.TierBinding},
 		{Name: "nvidia_claims", Status: attestation.Pass, Detail: "Claims valid", Tier: attestation.TierBinding},
-		{Name: "nvidia_nonce_client_bound", Status: attestation.Skip, Detail: "nonce field not found in NVIDIA payload", Tier: attestation.TierBinding},
-		{Name: "nvidia_nras_verified", Status: attestation.Skip, Detail: "offline mode; NRAS verification skipped", Tier: attestation.TierBinding},
+		{Name: "nvidia_nonce_client_bound", Status: attestation.Skip, Detail: "nonce not found in NVIDIA payload", Tier: attestation.TierBinding},
+		{Name: "nvidia_nras_verified", Status: attestation.Skip, Detail: "offline mode; NRAS skipped", Tier: attestation.TierBinding},
 		{Name: "e2ee_capable", Status: attestation.Pass, Detail: "E2EE key exchange possible", Tier: attestation.TierBinding},
 		// Tier 3
 		{Name: "tls_key_binding", Status: attestation.Fail, Detail: "no TLS key in attestation", Tier: attestation.TierSupplyChain},
@@ -140,6 +140,10 @@ func TestFormatReport_EnforcedTag(t *testing.T) {
 	// nonce_match is enforced in our test report.
 	if !strings.Contains(out, "[ENFORCED]") {
 		t.Errorf("[ENFORCED] tag not found; output:\n%s", out)
+	}
+	// tdx_quote_present is not enforced, so it should show [ALLOWED].
+	if !strings.Contains(out, "[ALLOWED]") {
+		t.Errorf("[ALLOWED] tag not found; output:\n%s", out)
 	}
 }
 

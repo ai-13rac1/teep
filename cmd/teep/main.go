@@ -853,6 +853,8 @@ func formatReport(r *attestation.VerificationReport) string {
 		line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
 		if f.Enforced {
 			line += "  [ENFORCED]"
+		} else {
+			line += "  [ALLOWED]"
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
