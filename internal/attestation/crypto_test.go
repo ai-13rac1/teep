@@ -513,15 +513,32 @@ func TestTestE2EESetupV1Pass(t *testing.T) {
 }
 
 func TestTestE2EESetupEmptyKey(t *testing.T) {
-	if r := TestE2EESetup("", E2EEv2); r != nil {
-		t.Errorf("expected nil for empty key, got %+v", r)
+	r := TestE2EESetup("", E2EEv2)
+	if r == nil {
+		t.Fatal("expected non-nil result for empty key")
+	}
+	if r.Attempted {
+		t.Error("expected Attempted=false for empty key")
+	}
+	if r.Detail == "" {
+		t.Error("expected non-empty Detail for empty key")
 	}
 }
 
 func TestTestE2EESetupUnknownVersion(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if r := TestE2EESetup(hex.EncodeToString(pub), 99); r != nil {
-		t.Errorf("expected nil for unknown version, got %+v", r)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := TestE2EESetup(hex.EncodeToString(pub), 99)
+	if r == nil {
+		t.Fatal("expected non-nil result for unknown version")
+	}
+	if r.Attempted {
+		t.Error("expected Attempted=false for unknown version")
+	}
+	if r.Detail == "" {
+		t.Error("expected non-empty Detail for unknown version")
 	}
 }
 

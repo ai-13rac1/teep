@@ -571,11 +571,10 @@ func ValidateModelKeyV2(ed25519PubHex string) error {
 // TestE2EESetup validates that E2EE key exchange and encryption work for the
 // given signing key and version. It creates a session, sets the model key,
 // encrypts a test message, and zeros the session. This is a local crypto test;
-// it does not send a network request. Returns nil when the provider is not
-// E2EE-capable (no signing key).
+// it does not send a network request.
 func TestE2EESetup(signingKey string, version int) *E2EETestResult {
 	if signingKey == "" {
-		return nil // e2ee_capable will report the missing key
+		return &E2EETestResult{Detail: "signing key absent; E2EE setup test skipped"}
 	}
 	switch version {
 	case E2EEv1:
@@ -583,7 +582,7 @@ func TestE2EESetup(signingKey string, version int) *E2EETestResult {
 	case E2EEv2:
 		return testE2EESetupV2(signingKey)
 	default:
-		return nil
+		return &E2EETestResult{Detail: fmt.Sprintf("unsupported E2EE version %d; setup test skipped", version)}
 	}
 }
 
