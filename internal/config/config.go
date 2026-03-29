@@ -126,9 +126,10 @@ type Config struct {
 	// allowlists parsed from [providers.X.policy] gateway_ fields.
 	ProviderGatewayPolicies map[string]attestation.MeasurementPolicy
 
-	// GlobalAllowFailDefined is true when the TOML config explicitly sets
-	// a top-level allow_fail list (including an empty list). When false,
-	// MergedAllowFail checks per-provider Go defaults before the global default.
+	// GlobalAllowFailDefined is true when the TOML config explicitly sets a
+	// global allow_fail list (including an empty list), either via the root
+	// allow_fail field or [policy].allow_fail. When false, MergedAllowFail
+	// checks per-provider Go defaults before the global default.
 	GlobalAllowFailDefined bool
 
 	// Offline skips external verification calls (Intel PCS collateral,
