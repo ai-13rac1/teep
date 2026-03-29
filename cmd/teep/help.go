@@ -584,7 +584,7 @@ Optional flags:
 										PPID is still extracted locally.
   --update-config   Write observed TDX measurements to the config file at
                     $TEEP_CONFIG. Adds values to [providers.X.policy] with
-                    deduplication and sets warn_measurements = false. Creates
+                    deduplication. Creates
                     a .bak backup of the original file.
   --config-out PATH Write updated config to PATH instead of $TEEP_CONFIG.
                     Implies --update-config behavior.
@@ -628,8 +628,7 @@ Quickstart: Bootstrap Allowlists from Observed Values
        teep verify venice --model e2ee-qwen3-32b --update-config
 
      This writes the observed MRSEAM, MRTD, and RTMR0-2 values to
-     [providers.venice.policy] in $TEEP_CONFIG, with deduplication. It also
-     sets warn_measurements = false to enforce the allowlists.
+     [providers.venice.policy] in $TEEP_CONFIG, with deduplication.
 
   2. To write to a different file instead of $TEEP_CONFIG:
 
@@ -651,7 +650,6 @@ Measurement allowlists are configured in TOML policy sections:
 
   # Global policy (applies to all providers without per-provider overrides)
   [policy]
-  warn_measurements = true
   mrseam_allow = ["49b66faa..."]
   mrtd_allow = ["b24d3b24..."]
   rtmr0_allow = ["0cb94dba..."]
@@ -660,22 +658,11 @@ Measurement allowlists are configured in TOML policy sections:
 
   # Per-provider policy (overrides global for this provider)
   [providers.venice.policy]
-  warn_measurements = false
   mrseam_allow = ["49b66faa..."]
   mrtd_allow = ["b24d3b24..."]
 
 Merge order: per-provider TOML > global TOML > Go-coded defaults.
 Each allowlist field is resolved independently.
-
-Warn-Only Mode
---------------
-
-When warn_measurements = true (the default for Go-coded defaults), measurement
-mismatches produce a PASS result annotated with "WARN:" instead of failing.
-This lets you observe measurement values before committing to enforcement.
-
-To transition to enforcement, set warn_measurements = false in your config or
-use --update-config (which sets it automatically).
 
 Register Reference
 ------------------

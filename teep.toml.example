@@ -59,12 +59,6 @@ api_key_env = "NANOGPT_API_KEY"
 #   "event_log_integrity",
 # ]
 
-# Warn-only mode for measurement allowlists.
-# When true, measurement mismatches produce warnings instead of failures.
-# Set to false after verifying observed values against canonical sources.
-# Default: true (from Go-coded defaults)
-warn_measurements = true
-
 # MRSEAM: Intel TDX module identity. Published by Intel at:
 #   github.com/intel/confidential-computing.tdx.tdx-module
 # mrseam_allow = [
@@ -95,7 +89,6 @@ warn_measurements = true
 
 # Example: enforce measurements for venice only
 # [providers.venice.policy]
-# warn_measurements = false
 # mrseam_allow = [
 #   "49b66faa451d19ebbdbe89371b8daf2b65aa3984ec90110343e9e2eec116af08850fa20e3b1aa9a874d77a65380ee7e6",
 # ]
@@ -114,7 +107,6 @@ warn_measurements = true
 
 # Example: nearcloud gateway CVM measurements
 # [providers.nearcloud.policy]
-# warn_measurements = false
 # gateway_mrseam_allow = ["49b66faa..."]
 # gateway_mrtd_allow = ["b24d3b24..."]
 # gateway_rtmr0_allow = ["..."]

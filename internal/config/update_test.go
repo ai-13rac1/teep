@@ -46,9 +46,6 @@ func TestUpdateConfigNewFile(t *testing.T) {
 	if len(prov.Policy.RTMR0Allow) != 1 || prov.Policy.RTMR0Allow[0] != obs.RTMR0 {
 		t.Errorf("rtmr0_allow = %v, want [%s]", prov.Policy.RTMR0Allow, obs.RTMR0)
 	}
-	if prov.Policy.WarnMeasurements {
-		t.Error("warn_measurements should be false after update")
-	}
 
 	// No backup for new file.
 	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {

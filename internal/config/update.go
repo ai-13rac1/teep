@@ -32,8 +32,7 @@ type ObservedMeasurements struct {
 
 // UpdateConfig reads the TOML config at path, adds the observed measurement
 // values to the [providers.<providerName>.policy] section (deduplicating),
-// sets warn_measurements = false for that provider, and writes the result
-// back. The original file is backed up to path+".bak".
+// and writes the result back. The original file is backed up to path+".bak".
 //
 // If path is empty or the file does not exist, a new config is created.
 func UpdateConfig(path, providerName string, observed *ObservedMeasurements) error {
@@ -68,7 +67,6 @@ func UpdateConfig(path, providerName string, observed *ObservedMeasurements) err
 		}
 	}
 	mergeObserved(&prov.Policy, observed)
-	prov.Policy.WarnMeasurements = false
 	f.Providers[providerName] = prov
 
 	return writeConfig(path, &f)
@@ -106,8 +104,6 @@ type updatePolicy struct {
 	GatewayRTMR1Allow  []string `toml:"gateway_rtmr1_allow,omitempty"`
 	GatewayRTMR2Allow  []string `toml:"gateway_rtmr2_allow,omitempty"`
 	GatewayRTMR3Allow  []string `toml:"gateway_rtmr3_allow,omitempty"`
-
-	WarnMeasurements bool `toml:"warn_measurements"`
 }
 
 // mergeObserved adds observed values into the provider policy, deduplicating.

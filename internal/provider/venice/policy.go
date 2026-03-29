@@ -7,7 +7,7 @@ import (
 
 // DefaultMeasurementPolicy returns the default TDX measurement allowlists for
 // Venice. Venice runs on the same dstack platform as neardirect but deploys on
-// different hardware, producing different RTMR0/2 values. Ships WarnOnly: true.
+// different hardware, producing different RTMR0/2 values.
 func DefaultMeasurementPolicy() attestation.MeasurementPolicy {
 	p := attestation.DstackBaseMeasurementPolicy()
 	p.RTMRAllow[0] = map[string]struct{}{

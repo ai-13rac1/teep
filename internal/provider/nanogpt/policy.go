@@ -5,7 +5,7 @@ import "github.com/13rac1/teep/internal/attestation"
 // DefaultMeasurementPolicy returns the default TDX measurement allowlists for
 // NanoGPT. NanoGPT runs on varied dstack configurations (0.5.4.1 and 0.5.5)
 // with multiple hardware profiles, so the RTMR allowlists are broader than
-// single-deployment providers. Ships WarnOnly: true.
+// single-deployment providers.
 func DefaultMeasurementPolicy() attestation.MeasurementPolicy {
 	p := attestation.DstackBaseMeasurementPolicy()
 	p.RTMRAllow[0] = map[string]struct{}{

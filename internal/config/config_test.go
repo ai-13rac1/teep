@@ -250,80 +250,6 @@ base_url = "https://api.venice.ai"
 	}
 }
 
-func TestLoadTOMLWarnMeasurements(t *testing.T) {
-	valid48 := strings.Repeat("ab", 48)
-	tomlCfg := `
-[policy]
-warn_measurements = true
-mrtd_allow = ["` + valid48 + `"]
-`
-	path := writeConfigFile(t, tomlCfg, 0o600)
-	setenv(t, "TEEP_CONFIG", path)
-	unsetenv(t, "TEEP_LISTEN_ADDR")
-	unsetenv(t, "VENICE_API_KEY")
-	unsetenv(t, "NEARAI_API_KEY")
-	unsetenv(t, "NANOGPT_API_KEY")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if !cfg.MeasurementPolicy.WarnOnly {
-		t.Error("MeasurementPolicy.WarnOnly should be true when warn_measurements = true")
-	}
-	if !cfg.GatewayMeasurementPolicy.WarnOnly {
-		t.Error("GatewayMeasurementPolicy.WarnOnly should be true when warn_measurements = true")
-	}
-}
-
-func TestLoadTOMLWarnMeasurementsDefault(t *testing.T) {
-	valid48 := strings.Repeat("ab", 48)
-	tomlCfg := `
-[policy]
-mrtd_allow = ["` + valid48 + `"]
-`
-	path := writeConfigFile(t, tomlCfg, 0o600)
-	setenv(t, "TEEP_CONFIG", path)
-	unsetenv(t, "TEEP_LISTEN_ADDR")
-	unsetenv(t, "VENICE_API_KEY")
-	unsetenv(t, "NEARAI_API_KEY")
-	unsetenv(t, "NANOGPT_API_KEY")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.MeasurementPolicy.WarnOnly {
-		t.Error("MeasurementPolicy.WarnOnly should default to false")
-	}
-}
-
-func TestLoadTOMLWarnMeasurementsExplicitFalse(t *testing.T) {
-	valid48 := strings.Repeat("ab", 48)
-	tomlCfg := `
-[policy]
-warn_measurements = false
-mrtd_allow = ["` + valid48 + `"]
-`
-	path := writeConfigFile(t, tomlCfg, 0o600)
-	setenv(t, "TEEP_CONFIG", path)
-	unsetenv(t, "TEEP_LISTEN_ADDR")
-	unsetenv(t, "VENICE_API_KEY")
-	unsetenv(t, "NEARAI_API_KEY")
-	unsetenv(t, "NANOGPT_API_KEY")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.MeasurementPolicy.WarnOnly {
-		t.Error("MeasurementPolicy.WarnOnly should be false when warn_measurements = false")
-	}
-	if !cfg.MeasurementPolicy.WarnOnlySet {
-		t.Error("MeasurementPolicy.WarnOnlySet should be true when warn_measurements is explicit")
-	}
-}
-
 func TestLoadTOMLPerProviderPolicy(t *testing.T) {
 	valid48a := strings.Repeat("ab", 48)
 	valid48b := strings.Repeat("cd", 48)
@@ -399,39 +325,6 @@ func TestMergedMeasurementPolicy(t *testing.T) {
 	merged2 := MergedMeasurementPolicy("neardirect", cfg, goDefaults)
 	if _, ok := merged2.MRTDAllow[valid48b]; !ok {
 		t.Error("global MRTD should override Go defaults for neardirect")
-	}
-}
-
-func TestMergedMeasurementPolicyWarnOnly(t *testing.T) {
-	goDefaults := attestation.MeasurementPolicy{WarnOnly: true}
-	cfg := &Config{
-		ProviderPolicies:        make(map[string]attestation.MeasurementPolicy),
-		ProviderGatewayPolicies: make(map[string]attestation.MeasurementPolicy),
-	}
-
-	// Go default WarnOnly should propagate.
-	merged := MergedMeasurementPolicy("venice", cfg, goDefaults)
-	if !merged.WarnOnly {
-		t.Error("Go default WarnOnly=true should propagate")
-	}
-}
-
-func TestMergedMeasurementPolicyExplicitFalse(t *testing.T) {
-	goDefaults := attestation.MeasurementPolicy{WarnOnly: true}
-	cfg := &Config{
-		// Global TOML has warn_measurements = false explicitly.
-		MeasurementPolicy: attestation.MeasurementPolicy{
-			WarnOnly:    false,
-			WarnOnlySet: true,
-		},
-		ProviderPolicies:        make(map[string]attestation.MeasurementPolicy),
-		ProviderGatewayPolicies: make(map[string]attestation.MeasurementPolicy),
-	}
-
-	// Explicit false in TOML should override Go default true.
-	merged := MergedMeasurementPolicy("venice", cfg, goDefaults)
-	if merged.WarnOnly {
-		t.Error("explicit warn_measurements=false in TOML should override Go default WarnOnly=true")
 	}
 }
 

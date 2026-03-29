@@ -66,11 +66,6 @@ type PolicyConfig struct {
 	GatewayRTMR1Allow  []string `toml:"gateway_rtmr1_allow"`
 	GatewayRTMR2Allow  []string `toml:"gateway_rtmr2_allow"`
 	GatewayRTMR3Allow  []string `toml:"gateway_rtmr3_allow"`
-
-	// WarnMeasurements, when non-nil, explicitly sets whether measurement
-	// allowlist mismatches produce warnings instead of blocking. Tri-state:
-	// nil = not configured (preserve defaults), true = warn, false = enforce.
-	WarnMeasurements *bool `toml:"warn_measurements"`
 }
 
 // tomlFile mirrors the top-level structure of the optional TOML config file.
@@ -237,10 +232,6 @@ func buildMeasurementPolicy(p *PolicyConfig) (attestation.MeasurementPolicy, err
 		}
 	}
 
-	if p.WarnMeasurements != nil {
-		out.WarnOnly = *p.WarnMeasurements
-		out.WarnOnlySet = true
-	}
 	return out, nil
 }
 
@@ -264,25 +255,19 @@ func buildGatewayMeasurementPolicy(p *PolicyConfig) (attestation.MeasurementPoli
 		}
 	}
 
-	if p.WarnMeasurements != nil {
-		out.WarnOnly = *p.WarnMeasurements
-		out.WarnOnlySet = true
-	}
 	return out, nil
 }
 
-// hasMeasurementPolicy reports whether p has any configured allowlists or
-// an explicitly set WarnOnly value.
+// hasMeasurementPolicy reports whether p has any configured allowlists.
 func hasMeasurementPolicy(p attestation.MeasurementPolicy) bool {
 	return p.HasMRTDPolicy() || p.HasMRSeamPolicy() ||
 		p.HasRTMRPolicy(0) || p.HasRTMRPolicy(1) ||
-		p.HasRTMRPolicy(2) || p.HasRTMRPolicy(3) || p.WarnOnlySet
+		p.HasRTMRPolicy(2) || p.HasRTMRPolicy(3)
 }
 
 // MergedMeasurementPolicy returns a MeasurementPolicy that merges three layers:
 // per-provider TOML > global TOML > Go defaults. For each allowlist field, the
-// most specific non-empty layer wins. WarnOnly follows the same precedence
-// (per-provider > global > Go defaults).
+// most specific non-empty layer wins.
 func MergedMeasurementPolicy(providerName string, cfg *Config, goDefaults attestation.MeasurementPolicy) attestation.MeasurementPolicy {
 	global := cfg.MeasurementPolicy
 	perProvider, hasPerProvider := cfg.ProviderPolicies[providerName]
@@ -322,14 +307,6 @@ func mergeAllowlists(base, overlay attestation.MeasurementPolicy) attestation.Me
 		if overlay.HasRTMRPolicy(i) {
 			base.RTMRAllow[i] = overlay.RTMRAllow[i]
 		}
-	}
-	// WarnOnly in the overlay is authoritative when the overlay has any
-	// measurement policy configured or an explicitly set WarnOnly value.
-	// This allows explicit TOML configuration (e.g., warn_measurements=false)
-	// to override Go defaults, while a completely empty overlay (no allowlists,
-	// no warn setting) preserves the base layer's WarnOnly value.
-	if hasMeasurementPolicy(overlay) {
-		base.WarnOnly = overlay.WarnOnly
 	}
 	return base
 }

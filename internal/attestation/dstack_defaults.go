@@ -5,11 +5,6 @@ import "maps"
 // Dstack TDX measurement defaults for providers running on the dstack TEE
 // platform. These baselines are derived from captured attestation data; see
 // docs/attestation_gaps/dstack_integrity.md for provenance details.
-//
-// All defaults ship with WarnOnly: true because the observed values lack full
-// cryptographic provenance (no reproducible-build attestation chain yet).
-// Operators should verify values against independent sources before setting
-// warn_measurements = false.
 
 // DstackMRSEAMAllow contains the Intel TDX module measurement hashes observed
 // across all dstack providers. Each entry corresponds to a known TDX module
@@ -35,13 +30,12 @@ var DstackMRTDAllow = map[string]struct{}{
 }
 
 // DstackBaseMeasurementPolicy returns a MeasurementPolicy with the shared
-// MRSEAM and MRTD allowlists for dstack providers. WarnOnly defaults to true.
+// MRSEAM and MRTD allowlists for dstack providers.
 // Callers should overlay provider-specific RTMR values.
 func DstackBaseMeasurementPolicy() MeasurementPolicy {
 	return MeasurementPolicy{
 		MRSeamAllow: copyMap(DstackMRSEAMAllow),
 		MRTDAllow:   copyMap(DstackMRTDAllow),
-		WarnOnly:    true,
 	}
 }
 

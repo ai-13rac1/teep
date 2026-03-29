@@ -268,7 +268,6 @@ func TestPrintMeasurementsHelp(t *testing.T) {
 		"TDX Measurement Allowlists",
 		"MRSEAM", "MRTD", "RTMR0", "RTMR1", "RTMR2", "RTMR3",
 		"--update-config",
-		"warn_measurements",
 		"dstack-mr measure",
 	} {
 		if !strings.Contains(out, want) {

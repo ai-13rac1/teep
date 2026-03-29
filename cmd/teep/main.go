@@ -229,7 +229,7 @@ func runVerify(args []string) {
 			fmt.Fprintf(os.Stderr, "teep verify: update config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "Config updated: %s (provider %s, warn_measurements=false)\n", outPath, providerName)
+		fmt.Fprintf(os.Stderr, "Config updated: %s (provider %s)\n", outPath, providerName)
 	}
 
 	if report.Blocked() {

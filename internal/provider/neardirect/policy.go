@@ -7,7 +7,7 @@ const GithubOIDC = "https://token.actions.githubusercontent.com"
 
 // DefaultMeasurementPolicy returns the default TDX measurement allowlists for
 // the neardirect provider, built from the shared dstack baselines plus
-// neardirect-observed RTMR values. Ships WarnOnly: true.
+// neardirect-observed RTMR values.
 func DefaultMeasurementPolicy() attestation.MeasurementPolicy {
 	p := attestation.DstackBaseMeasurementPolicy()
 	p.RTMRAllow[0] = map[string]struct{}{

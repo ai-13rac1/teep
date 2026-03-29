@@ -43,9 +43,6 @@ func TestDstackBaseMeasurementPolicy(t *testing.T) {
 	if !p.HasMRTDPolicy() {
 		t.Error("DstackBaseMeasurementPolicy should have MRTDAllow")
 	}
-	if !p.WarnOnly {
-		t.Error("DstackBaseMeasurementPolicy should have WarnOnly=true")
-	}
 	for i := range p.RTMRAllow {
 		if p.HasRTMRPolicy(i) {
 			t.Errorf("DstackBaseMeasurementPolicy should not have RTMR%d policy", i)
