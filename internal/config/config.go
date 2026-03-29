@@ -151,7 +151,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ListenAddr:              DefaultListenAddr,
 		Providers:               make(map[string]*Provider),
-		AllowFail:               append([]string(nil), DefaultAllowFail...),
 		ProviderAllowFail:       make(map[string][]string),
 		ProviderPolicies:        make(map[string]attestation.MeasurementPolicy),
 		ProviderGatewayPolicies: make(map[string]attestation.MeasurementPolicy),
@@ -325,13 +324,16 @@ func MergedAllowFail(providerName string, cfg *Config) []string {
 	case cfg.ProviderAllowFail[providerName] != nil:
 		// Use != nil (not ok) so that an explicitly empty slice is honored.
 		af = cfg.ProviderAllowFail[providerName]
-	case cfg.GlobalAllowFailDefined:
+	case cfg.GlobalAllowFailDefined || cfg.AllowFail != nil:
+		// GlobalAllowFailDefined is set by loadTOML; cfg.AllowFail != nil
+		// covers programmatic configs (tests, proxy setup) that set
+		// AllowFail directly without calling Load().
 		af = cfg.AllowFail
 	default:
 		if paf, ok := ProviderDefaultAllowFail[providerName]; ok {
 			af = paf
 		} else {
-			af = cfg.AllowFail
+			af = DefaultAllowFail
 		}
 	}
 	if cfg.Offline {

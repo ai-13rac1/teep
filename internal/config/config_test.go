@@ -53,13 +53,10 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.Providers) != 0 {
 		t.Errorf("Providers: got %d entries, want 0", len(cfg.Providers))
 	}
-	if len(cfg.AllowFail) != len(DefaultAllowFail) {
-		t.Errorf("AllowFail: got %d entries, want %d", len(cfg.AllowFail), len(DefaultAllowFail))
-	}
-	for i, name := range DefaultAllowFail {
-		if cfg.AllowFail[i] != name {
-			t.Errorf("AllowFail[%d]: got %q, want %q", i, cfg.AllowFail[i], name)
-		}
+	// AllowFail is nil when no TOML is loaded; MergedAllowFail falls back
+	// to per-provider Go defaults or DefaultAllowFail.
+	if cfg.AllowFail != nil {
+		t.Errorf("AllowFail: got %v, want nil (no TOML loaded)", cfg.AllowFail)
 	}
 }
 
@@ -227,9 +224,10 @@ allow_fail = []
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	// Global allow_fail should still be the defaults.
-	if len(cfg.AllowFail) != len(DefaultAllowFail) {
-		t.Errorf("global AllowFail: got %d entries, want %d", len(cfg.AllowFail), len(DefaultAllowFail))
+	// No global allow_fail in TOML → cfg.AllowFail stays nil;
+	// MergedAllowFail falls back to DefaultAllowFail for non-overridden providers.
+	if cfg.AllowFail != nil {
+		t.Errorf("global AllowFail: got %v, want nil (TOML didn't set global allow_fail)", cfg.AllowFail)
 	}
 	// Per-provider allow_fail should be empty (enforce all).
 	af := MergedAllowFail("venice", cfg)
@@ -320,8 +318,14 @@ base_url = "https://api.venice.ai"
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if len(cfg.AllowFail) != len(DefaultAllowFail) {
-		t.Errorf("AllowFail after TOML with no [policy]: got %d entries, want %d", len(cfg.AllowFail), len(DefaultAllowFail))
+	// No allow_fail in TOML → cfg.AllowFail stays nil;
+	// MergedAllowFail falls back to DefaultAllowFail for venice.
+	if cfg.AllowFail != nil {
+		t.Errorf("AllowFail after TOML with no [policy]: got %v, want nil", cfg.AllowFail)
+	}
+	af := MergedAllowFail("venice", cfg)
+	if len(af) != len(DefaultAllowFail) {
+		t.Errorf("MergedAllowFail(venice): got %d entries, want %d", len(af), len(DefaultAllowFail))
 	}
 }
 
@@ -760,8 +764,8 @@ base_url = "https://api.venice.ai"
 
 // --- DefaultAllowFail isolation ---
 
-// TestDefaultAllowFailImmutable verifies that modifying the returned cfg.AllowFail
-// slice does not alter DefaultAllowFail.
+// TestDefaultAllowFailImmutable verifies that mutating the slice returned by
+// MergedAllowFail does not alter the package-level DefaultAllowFail.
 func TestDefaultAllowFailImmutable(t *testing.T) {
 	unsetenv(t, "TEEP_CONFIG")
 	unsetenv(t, "TEEP_LISTEN_ADDR")
@@ -774,12 +778,16 @@ func TestDefaultAllowFailImmutable(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	// Mutate the returned slice.
-	cfg.AllowFail[0] = "mutated"
+	// MergedAllowFail for a provider without Go defaults uses DefaultAllowFail.
+	af := MergedAllowFail("venice", cfg)
+	if len(af) == 0 {
+		t.Fatal("expected non-empty allow_fail for venice defaults")
+	}
+	af[0] = "mutated"
 
 	// DefaultAllowFail must be unchanged.
 	if DefaultAllowFail[0] == "mutated" {
-		t.Error("mutating cfg.AllowFail affected DefaultAllowFail; Load must return a copy")
+		t.Error("mutating MergedAllowFail result affected DefaultAllowFail; must return a copy")
 	}
 }
 
@@ -1017,6 +1025,28 @@ allow_fail = []
 		if !afSet[name] {
 			t.Errorf("offline mode: factor %q should be in allow_fail but is not", name)
 		}
+	}
+}
+
+func TestMergedAllowFailProgrammaticAllowFail(t *testing.T) {
+	// Programmatic configs that set AllowFail directly (without Load())
+	// must be honored even for providers with Go-level defaults.
+	cfg := &Config{
+		AllowFail: attestation.KnownFactors,
+	}
+	af := MergedAllowFail("nearcloud", cfg)
+	if len(af) != len(attestation.KnownFactors) {
+		t.Errorf("programmatic AllowFail: got %d entries, want %d (KnownFactors)",
+			len(af), len(attestation.KnownFactors))
+	}
+
+	// Also verify an explicitly empty AllowFail is honored (enforce all).
+	cfg2 := &Config{
+		AllowFail: []string{},
+	}
+	af2 := MergedAllowFail("nearcloud", cfg2)
+	if len(af2) != 0 {
+		t.Errorf("programmatic empty AllowFail: got %d entries, want 0", len(af2))
 	}
 }
 
