@@ -411,6 +411,12 @@ func (h *PinnedHandler) attestOnConn(
 	if h.offline {
 		allowFail = attestation.WithOfflineAllowFail(allowFail)
 	}
+	// e2ee_usable requires a live E2EE inference test (see testE2EE in
+	// cmd/teep/main.go). The proxy cannot run a live inference during
+	// report building; it enforces E2EE at the transport layer instead
+	// (encrypting every request, decrypting every response chunk, blocking
+	// on any failure). Allow e2ee_usable to skip in the report.
+	allowFail = attestation.WithAllowFail(allowFail, "e2ee_usable")
 
 	report := attestation.BuildReport(&attestation.ReportInput{
 		Provider:          "nearcloud",
@@ -437,7 +443,6 @@ func (h *PinnedHandler) attestOnConn(
 		GatewayCompose:    gatewayCompose,
 		GatewayEventLog:   gwRaw.EventLog,
 		GatewayPolicy:     h.gatewayPolicy,
-		E2EETest:          attestation.TestE2EESetup(raw.SigningKey, attestation.E2EEv2),
 	})
 	return report, raw.SigningKey, nil
 }
@@ -452,6 +457,8 @@ func (h *PinnedHandler) sendAttestationRequest(
 	q.Set("model", model)
 	q.Set("include_tls_fingerprint", "true")
 	q.Set("nonce", nonce.Hex())
+	// Intentionally request ed25519 (E2EEv2) — never allow the provider
+	// to negotiate a weaker algorithm or regress to an older version.
 	q.Set("signing_algo", "ed25519")
 	path := attestationPath + "?" + q.Encode()
 
