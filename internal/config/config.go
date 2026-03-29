@@ -39,14 +39,29 @@ const (
 // blocking the proxy. Every factor NOT in this list is enforced.
 var DefaultAllowFail = attestation.DefaultAllowFail
 
-// ProviderDefaultAllowFail maps provider names to their provider-specific
+// providerDefaultAllowFail maps provider names to their provider-specific
 // Go-level default allow_fail lists. Providers not in this map fall back to
 // the global DefaultAllowFail.
-var ProviderDefaultAllowFail = map[string][]string{
+var providerDefaultAllowFail = map[string][]string{
 	"nearcloud":  attestation.NearcloudDefaultAllowFail,
 	"neardirect": attestation.NeardirectDefaultAllowFail,
 }
 
+// ProviderDefaultAllowFail returns a defensive copy of the provider-specific
+// default allow_fail lists. Callers must not rely on mutating the returned
+// map or its slices to change enforcement behavior at runtime.
+func ProviderDefaultAllowFail() map[string][]string {
+	out := make(map[string][]string, len(providerDefaultAllowFail))
+	for provider, allowList := range providerDefaultAllowFail {
+		if allowList == nil {
+			continue
+		}
+		copied := make([]string, len(allowList))
+		copy(copied, allowList)
+		out[provider] = copied
+	}
+	return out
+}
 // ProviderConfig holds the TOML-parsed configuration for one provider.
 // Either APIKey or APIKeyEnv must be set; APIKeyEnv takes precedence if both
 // are present. The resolved key is exposed via the Provider struct, not here.
