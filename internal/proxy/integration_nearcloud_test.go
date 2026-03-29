@@ -164,8 +164,9 @@ func TestIntegration_NearCloud(t *testing.T) {
 			t.Fatalf("decode report: %v", err)
 		}
 
-		// Verify model Tier 1 factors all pass.
-		tier1 := []string{
+		// Verify critical model factors (Tier 1 core + Tier 2 binding) all pass.
+		mustPass := []string{
+			// Tier 1: Core TDX.
 			"nonce_match",
 			"tdx_quote_present",
 			"tdx_quote_structure",
@@ -173,10 +174,11 @@ func TestIntegration_NearCloud(t *testing.T) {
 			"tdx_quote_signature",
 			"tdx_debug_disabled",
 			"signing_key_present",
+			// Tier 2: Binding & Crypto.
 			"e2ee_capable",
 			"e2ee_usable",
 		}
-		for _, name := range tier1 {
+		for _, name := range mustPass {
 			f, ok := findFactor(report.Factors, name)
 			if !ok {
 				t.Errorf("factor %q not found in report", name)
