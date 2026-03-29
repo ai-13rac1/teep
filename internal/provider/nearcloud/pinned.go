@@ -411,12 +411,6 @@ func (h *PinnedHandler) attestOnConn(
 	if h.offline {
 		allowFail = attestation.WithOfflineAllowFail(allowFail)
 	}
-	// e2ee_usable requires a live E2EE inference test (see testE2EE in
-	// cmd/teep/main.go). The proxy cannot run a live inference during
-	// report building; it enforces E2EE at the transport layer instead
-	// (encrypting every request, decrypting every response chunk, blocking
-	// on any failure). Allow e2ee_usable to skip in the report.
-	allowFail = attestation.WithAllowFail(allowFail, "e2ee_usable")
 
 	report := attestation.BuildReport(&attestation.ReportInput{
 		Provider:          "nearcloud",
