@@ -35,8 +35,6 @@ api_key_env = "NANOGPT_API_KEY"
 # in [providers.X.policy]. The allow_fail list is a top-level key (outside
 # [policy]) and can be overridden per-provider under [providers.X].
 
-[policy]
-
 # Allow-fail factors: these are allowed to fail without blocking the proxy.
 # Every factor NOT in this list is enforced (blocks the proxy on failure).
 # See internal/attestation/report.go DefaultAllowFail for the full default list.
@@ -63,6 +61,8 @@ api_key_env = "NANOGPT_API_KEY"
 #   "measured_model_weights",
 #   "cpu_id_registry",
 # ]
+
+[policy]
 
 # MRSEAM: Intel TDX module identity. Published by Intel at:
 #   github.com/intel/confidential-computing.tdx.tdx-module
