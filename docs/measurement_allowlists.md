@@ -137,16 +137,19 @@ Each allowlist field is resolved independently using:
 
 ## Measurement Enforcement Behavior
 
-Teep treats measurement allowlists as **enforced** by default: if a
-measurement factor is configured with one or more allowed values, a report
-whose value is not in that allowlist will cause attestation to fail and the
-request to be blocked.
+Teep's enforcement model is **strict**: for any measurement factor that is
+configured with one or more allowed values and **not** listed in
+`allow_fail`, a report whose value is not in that allowlist will cause
+attestation to fail and the request to be blocked.
 
-Some deployments may configure certain factors as *advisory* by listing them
-under `allow_fail` in the attestation policy. When a factor is in
-`allow_fail`, a mismatch is recorded and surfaced as a warning, but does not
-by itself block the request. Factors not listed in `allow_fail` are strictly
-enforced and any mismatch is a hard failure.
+However, the built-in Go defaults (`DefaultAllowFail`) mark some
+high-variability factors as *advisory* by default (for example,
+`tdx_hardware_config`, `tdx_boot_config`, and their gateway equivalents).
+When a factor is in `allow_fail`, a mismatch is recorded and surfaced as a
+warning, but does not by itself block the request. Factors not listed in
+`allow_fail` are strictly enforced and any mismatch is a hard failure. To
+enforce RTMR-related factors, remove them from `allow_fail` in your
+configuration (setting `allow_fail = []` enforces all factors).
 
 The `--update-config` flag helps populate or refresh measurement allowlists
 from observed reports. It writes the discovered values into the appropriate
