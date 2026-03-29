@@ -797,9 +797,9 @@ they fail.
 		fmt.Println()
 	}
 
-	fmt.Print(`Default enforced factors: nonce_match, tdx_debug_disabled,
-signing_key_present, tdx_reportdata_binding. These can be overridden in
-the TOML config file.
+	fmt.Print(`Default enforced factors: all factors NOT listed in allow_fail. Factors
+in the allow_fail list may fail without blocking. The default allow_fail list
+can be overridden globally or per-provider in the TOML config file.
 
 Run 'teep help factors' for full descriptions, or 'teep help <factor>'
 for a single factor.

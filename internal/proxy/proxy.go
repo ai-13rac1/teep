@@ -8,7 +8,7 @@
 //  2. Resolve model → provider. Unknown model → 400.
 //  3. Check negative cache. Blocked → 503.
 //  4. Check attestation cache. On miss, fetch + verify + cache.
-//  5. Any enforced factor Fail → 502 with report JSON.
+//  5. Any enforced factor Fail (not in allow_fail) → 502 with report JSON.
 //  6. If E2EE and tdx_reportdata_binding Pass: encrypt messages, set headers.
 //     Otherwise: warn and forward plaintext-over-HTTPS.
 //  7. Forward to upstream. Parse streaming SSE or buffer non-streaming body.
@@ -202,7 +202,7 @@ func New(cfg *config.Config) (*Server, error) {
 		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
 		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)
 		mergedGWPolicy := config.MergedGatewayMeasurementPolicy(name, cfg, gwDefaults)
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, cfg.Enforced, mergedPolicy, mergedGWPolicy, s.rekorClient, s.pocSigningKey)
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, config.MergedAllowFail(name, cfg), mergedPolicy, mergedGWPolicy, s.rekorClient, s.pocSigningKey)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -258,7 +258,7 @@ func fromConfig(
 	cp *config.Provider,
 	spkiCache *attestation.SPKICache,
 	offline bool,
-	enforced []string,
+	allowFail []string,
 	policy attestation.MeasurementPolicy,
 	gatewayPolicy attestation.MeasurementPolicy,
 	rekorClient *attestation.RekorClient,
@@ -293,7 +293,7 @@ func fromConfig(
 			spkiCache,
 			cp.APIKey,
 			offline,
-			enforced,
+			allowFail,
 			policy,
 			rdVerifier,
 			rekorClient,
@@ -311,7 +311,7 @@ func fromConfig(
 			spkiCache,
 			cp.APIKey,
 			offline,
-			enforced,
+			allowFail,
 			policy,
 			gatewayPolicy,
 			rdVerifier,
@@ -464,7 +464,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Model:             upstreamModel,
 		Raw:               raw,
 		Nonce:             nonce,
-		Enforced:          s.cfg.Enforced,
+		AllowFail:         config.MergedAllowFail(prov.Name, s.cfg),
 		Policy:            prov.MeasurementPolicy,
 		GatewayPolicy:     prov.GatewayMeasurementPolicy,
 		SupplyChainPolicy: prov.SupplyChainPolicy,

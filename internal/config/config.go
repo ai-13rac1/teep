@@ -35,8 +35,9 @@ const (
 	AttestationTimeout = 30 * time.Second
 )
 
-// DefaultEnforced lists the factor names that block the proxy on failure.
-var DefaultEnforced = attestation.DefaultEnforced
+// DefaultAllowFail lists the factor names that are allowed to fail without
+// blocking the proxy. Every factor NOT in this list is enforced.
+var DefaultAllowFail = attestation.DefaultAllowFail
 
 // ProviderConfig holds the TOML-parsed configuration for one provider.
 // Either APIKey or APIKeyEnv must be set; APIKeyEnv takes precedence if both
@@ -46,12 +47,13 @@ type ProviderConfig struct {
 	APIKeyEnv string       `toml:"api_key_env"`
 	BaseURL   string       `toml:"base_url"`
 	E2EE      bool         `toml:"e2ee"`
+	AllowFail []string     `toml:"allow_fail"`
 	Policy    PolicyConfig `toml:"policy"`
 }
 
 // PolicyConfig holds the optional [policy] section from the TOML file.
 type PolicyConfig struct {
-	Enforce     []string `toml:"enforce"`
+	AllowFail   []string `toml:"allow_fail"`
 	MRTDAllow   []string `toml:"mrtd_allow"`
 	MRSEAMAllow []string `toml:"mrseam_allow"`
 	RTMR0Allow  []string `toml:"rtmr0_allow"`
@@ -71,6 +73,7 @@ type PolicyConfig struct {
 // tomlFile mirrors the top-level structure of the optional TOML config file.
 type tomlFile struct {
 	Providers     map[string]ProviderConfig `toml:"providers"`
+	AllowFail     []string                  `toml:"allow_fail"`
 	Policy        PolicyConfig              `toml:"policy"`
 	PoCSigningKey string                    `toml:"poc_signing_key"`
 }
@@ -92,9 +95,13 @@ type Config struct {
 	// Providers is the map of provider name → resolved provider config.
 	Providers map[string]*Provider
 
-	// Enforced is the list of attestation factor names that block the proxy
-	// when they fail. Defaults to DefaultEnforced.
-	Enforced []string
+	// AllowFail lists factor names that are allowed to fail without blocking.
+	// Every factor NOT in this list is enforced. Defaults to DefaultAllowFail.
+	AllowFail []string
+
+	// ProviderAllowFail holds per-provider allow_fail overrides parsed from
+	// [providers.X] TOML sections. Keys are provider names.
+	ProviderAllowFail map[string][]string
 
 	// MeasurementPolicy defines optional allowlists for TDX measurements.
 	MeasurementPolicy attestation.MeasurementPolicy
@@ -130,7 +137,8 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ListenAddr:              DefaultListenAddr,
 		Providers:               make(map[string]*Provider),
-		Enforced:                append([]string(nil), DefaultEnforced...),
+		AllowFail:               append([]string(nil), DefaultAllowFail...),
+		ProviderAllowFail:       make(map[string][]string),
 		ProviderPolicies:        make(map[string]attestation.MeasurementPolicy),
 		ProviderGatewayPolicies: make(map[string]attestation.MeasurementPolicy),
 	}
@@ -165,6 +173,14 @@ func loadTOML(cfg *Config, path string) error {
 		p := resolveProvider(name, &pc)
 		cfg.Providers[name] = p
 
+		// Parse per-provider allow_fail list.
+		if len(pc.AllowFail) > 0 {
+			if err := validateAllowFail(pc.AllowFail); err != nil {
+				return fmt.Errorf("providers.%s.allow_fail: %w", name, err)
+			}
+			cfg.ProviderAllowFail[name] = pc.AllowFail
+		}
+
 		// Parse per-provider [providers.X.policy] sections.
 		pp, err := buildMeasurementPolicy(&pc.Policy)
 		if err != nil {
@@ -182,17 +198,17 @@ func loadTOML(cfg *Config, path string) error {
 		}
 	}
 
-	if len(f.Policy.Enforce) > 0 {
-		known := make(map[string]bool, len(attestation.KnownFactors))
-		for _, name := range attestation.KnownFactors {
-			known[name] = true
+	// Top-level allow_fail (from toml file root or [policy] section).
+	// Provider-level takes precedence; this is the global fallback.
+	topLevelAF := f.AllowFail
+	if len(topLevelAF) == 0 {
+		topLevelAF = f.Policy.AllowFail
+	}
+	if len(topLevelAF) > 0 {
+		if err := validateAllowFail(topLevelAF); err != nil {
+			return fmt.Errorf("allow_fail: %w", err)
 		}
-		for _, name := range f.Policy.Enforce {
-			if !known[name] {
-				return fmt.Errorf("unknown enforce factor %q", name)
-			}
-		}
-		cfg.Enforced = f.Policy.Enforce
+		cfg.AllowFail = topLevelAF
 	}
 
 	policy, err := buildMeasurementPolicy(&f.Policy)
@@ -256,6 +272,29 @@ func buildGatewayMeasurementPolicy(p *PolicyConfig) (attestation.MeasurementPoli
 	}
 
 	return out, nil
+}
+
+// validateAllowFail checks that every name in the allow_fail list is a known factor.
+func validateAllowFail(names []string) error {
+	known := make(map[string]bool, len(attestation.KnownFactors))
+	for _, n := range attestation.KnownFactors {
+		known[n] = true
+	}
+	for _, n := range names {
+		if !known[n] {
+			return fmt.Errorf("unknown allow_fail factor %q", n)
+		}
+	}
+	return nil
+}
+
+// MergedAllowFail returns the allow_fail list for a provider, applying the
+// three-layer merge: per-provider TOML > global TOML > Go defaults.
+func MergedAllowFail(providerName string, cfg *Config) []string {
+	if af, ok := cfg.ProviderAllowFail[providerName]; ok {
+		return af
+	}
+	return cfg.AllowFail
 }
 
 // hasMeasurementPolicy reports whether p has any configured allowlists.

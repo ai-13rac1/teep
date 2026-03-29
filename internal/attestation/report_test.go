@@ -97,6 +97,22 @@ func factorNames(r *VerificationReport) []string {
 	return names
 }
 
+// allExcept returns KnownFactors minus the given names. This builds an
+// AllowFail list that enforces only the excluded factors.
+func allExcept(exclude ...string) []string {
+	ex := make(map[string]bool, len(exclude))
+	for _, n := range exclude {
+		ex[n] = true
+	}
+	var out []string
+	for _, n := range KnownFactors {
+		if !ex[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // BuildReport-level tests (cross-cutting concerns)
 // ---------------------------------------------------------------------------
@@ -105,7 +121,7 @@ func factorNames(r *VerificationReport) []string {
 func TestBuildReportFactorCount(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
 	if len(report.Factors) != 29 {
 		t.Errorf("factor count: got %d, want 29", len(report.Factors))
@@ -116,7 +132,7 @@ func TestBuildReportFactorCount(t *testing.T) {
 func TestBuildReportTotals(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
 	total := report.Passed + report.Failed + report.Skipped
 	if total != len(report.Factors) {
@@ -141,19 +157,19 @@ func TestBuildReportTotals(t *testing.T) {
 	}
 }
 
-// TestBuildReportEnforcedFlags verifies Enforced is set only for factors in the list.
+// TestBuildReportEnforcedFlags verifies Enforced is set for factors NOT in AllowFail.
 func TestBuildReportEnforcedFlags(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	enforcedSet := make(map[string]bool)
-	for _, name := range DefaultEnforced {
-		enforcedSet[name] = true
+	allowFailSet := make(map[string]bool)
+	for _, name := range DefaultAllowFail {
+		allowFailSet[name] = true
 	}
 
 	for _, f := range report.Factors {
-		wantEnforced := enforcedSet[f.Name]
+		wantEnforced := !allowFailSet[f.Name]
 		if f.Enforced != wantEnforced {
 			t.Errorf("factor %q: Enforced=%v, want %v", f.Name, f.Enforced, wantEnforced)
 		}
@@ -166,7 +182,7 @@ func TestBlockedReturnsTrue(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	raw.Nonce = "" // force nonce_match to fail
 
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
 	if !report.Blocked() {
 		t.Error("Blocked() returned false when enforced nonce_match is failing")
@@ -180,7 +196,7 @@ func TestBlockedFactorsReturnsFailingEnforced(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	raw.Nonce = "" // force nonce_match to fail
 
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
 	blocked := report.BlockedFactors()
 	if len(blocked) == 0 {
@@ -204,25 +220,25 @@ func TestBlockedFactorsReturnsFailingEnforced(t *testing.T) {
 }
 
 // TestBlockedFactorsReturnsNilWhenNotBlocked verifies BlockedFactors is nil
-// when no enforced factor fails.
+// when all factors are in allow_fail (nothing enforced).
 func TestBlockedFactorsReturnsNilWhenNotBlocked(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: []string{}})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: KnownFactors})
 
 	if blocked := report.BlockedFactors(); blocked != nil {
 		t.Errorf("BlockedFactors() returned %v, want nil", blocked)
 	}
 }
 
-// TestBlockedReturnsFalse verifies Blocked is false when no enforced factor fails.
+// TestBlockedReturnsFalse verifies Blocked is false when all factors are allow_fail.
 func TestBlockedReturnsFalse(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: []string{}})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: KnownFactors})
 
 	if report.Blocked() {
-		t.Error("Blocked() returned true with empty enforced list")
+		t.Error("Blocked() returned true with all factors allowed to fail")
 	}
 }
 
@@ -245,16 +261,20 @@ func TestVerificationReportMetadata(t *testing.T) {
 	}
 }
 
-func TestDefaultEnforcedIncludesSupplyChainFactors(t *testing.T) {
-	need := map[string]bool{
-		"sigstore_verification":  true,
-		"build_transparency_log": true,
+func TestDefaultAllowFailExcludesSupplyChainFactors(t *testing.T) {
+	// Supply-chain factors must be enforced, i.e. NOT in DefaultAllowFail.
+	mustEnforce := []string{
+		"sigstore_verification",
+		"build_transparency_log",
 	}
-	for _, f := range DefaultEnforced {
-		delete(need, f)
+	allowFailSet := make(map[string]bool, len(DefaultAllowFail))
+	for _, f := range DefaultAllowFail {
+		allowFailSet[f] = true
 	}
-	if len(need) != 0 {
-		t.Fatalf("DefaultEnforced missing required factors: %v", need)
+	for _, f := range mustEnforce {
+		if allowFailSet[f] {
+			t.Errorf("DefaultAllowFail should not contain %q (must be enforced)", f)
+		}
 	}
 }
 
@@ -1152,7 +1172,7 @@ func TestProvenanceTypeString(t *testing.T) {
 func TestBuildReportTier3AlwaysFail(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
-	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, Enforced: DefaultEnforced})
+	report := BuildReport(&ReportInput{Provider: "venice", Model: "m", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
 	for _, name := range []string{"cpu_gpu_chain", "measured_model_weights", "build_transparency_log"} {
 		f := findFactor(t, report, name)
@@ -1486,16 +1506,16 @@ func TestEvalE2EEUsable(t *testing.T) {
 	})
 
 	t.Run("enforced_no_api_key_promoted_to_fail", func(t *testing.T) {
-		// When e2ee_usable is enforced and there's no API key,
+		// When e2ee_usable is enforced (not in allow_fail) and there's no API key,
 		// the Skip should be promoted to Fail by BuildReport.
 		nonce := NewNonce()
 		raw := buildMinimalRaw(nonce, validSigningKey(t))
 		report := BuildReport(&ReportInput{
-			Provider: "venice",
-			Model:    "test-model",
-			Raw:      raw,
-			Nonce:    nonce,
-			Enforced: []string{"e2ee_usable"},
+			Provider:  "venice",
+			Model:     "test-model",
+			Raw:       raw,
+			Nonce:     nonce,
+			AllowFail: allExcept("e2ee_usable"),
 			E2EETest: &E2EETestResult{
 				NoAPIKey:  true,
 				APIKeyEnv: "VENICE_API_KEY",
@@ -1587,11 +1607,11 @@ func TestBuildReport_EnforcedPromotion(t *testing.T) {
 
 	t.Run("skip_promoted_to_fail", func(t *testing.T) {
 		report := BuildReport(&ReportInput{
-			Provider: "venice",
-			Model:    "test-model",
-			Raw:      raw,
-			Nonce:    nonce,
-			Enforced: []string{"event_log_integrity"},
+			Provider:  "venice",
+			Model:     "test-model",
+			Raw:       raw,
+			Nonce:     nonce,
+			AllowFail: allExcept("event_log_integrity"),
 		})
 		f := findFactor(t, report, "event_log_integrity")
 		if f.Status != Fail {
@@ -1607,10 +1627,11 @@ func TestBuildReport_EnforcedPromotion(t *testing.T) {
 
 	t.Run("skip_unchanged_without_enforcement", func(t *testing.T) {
 		report := BuildReport(&ReportInput{
-			Provider: "venice",
-			Model:    "test-model",
-			Raw:      raw,
-			Nonce:    nonce,
+			Provider:  "venice",
+			Model:     "test-model",
+			Raw:       raw,
+			Nonce:     nonce,
+			AllowFail: KnownFactors,
 		})
 		f := findFactor(t, report, "event_log_integrity")
 		if f.Status != Skip {
@@ -1632,7 +1653,7 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 		Model:           "test-model",
 		Raw:             raw,
 		Nonce:           nonce,
-		Enforced:        DefaultEnforced,
+		AllowFail:       DefaultAllowFail,
 		GatewayTDX:      &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)},
 		GatewayNonceHex: gatewayNonce.Hex(),
 		GatewayNonce:    gatewayNonce,

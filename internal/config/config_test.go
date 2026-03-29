@@ -53,12 +53,12 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.Providers) != 0 {
 		t.Errorf("Providers: got %d entries, want 0", len(cfg.Providers))
 	}
-	if len(cfg.Enforced) != len(DefaultEnforced) {
-		t.Errorf("Enforced: got %d entries, want %d", len(cfg.Enforced), len(DefaultEnforced))
+	if len(cfg.AllowFail) != len(DefaultAllowFail) {
+		t.Errorf("AllowFail: got %d entries, want %d", len(cfg.AllowFail), len(DefaultAllowFail))
 	}
-	for i, name := range DefaultEnforced {
-		if cfg.Enforced[i] != name {
-			t.Errorf("Enforced[%d]: got %q, want %q", i, cfg.Enforced[i], name)
+	for i, name := range DefaultAllowFail {
+		if cfg.AllowFail[i] != name {
+			t.Errorf("AllowFail[%d]: got %q, want %q", i, cfg.AllowFail[i], name)
 		}
 	}
 }
@@ -118,7 +118,7 @@ e2ee = false
 func TestLoadTOMLPolicy(t *testing.T) {
 	toml := `
 [policy]
-enforce = ["nonce_match", "tls_key_binding"]
+allow_fail = ["nonce_match", "tls_key_binding"]
 `
 	path := writeConfigFile(t, toml, 0o600)
 	setenv(t, "TEEP_CONFIG", path)
@@ -131,21 +131,21 @@ enforce = ["nonce_match", "tls_key_binding"]
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if len(cfg.Enforced) != 2 {
-		t.Fatalf("Enforced: got %d entries, want 2", len(cfg.Enforced))
+	if len(cfg.AllowFail) != 2 {
+		t.Fatalf("AllowFail: got %d entries, want 2", len(cfg.AllowFail))
 	}
-	if cfg.Enforced[0] != "nonce_match" {
-		t.Errorf("Enforced[0]: got %q, want %q", cfg.Enforced[0], "nonce_match")
+	if cfg.AllowFail[0] != "nonce_match" {
+		t.Errorf("AllowFail[0]: got %q, want %q", cfg.AllowFail[0], "nonce_match")
 	}
-	if cfg.Enforced[1] != "tls_key_binding" {
-		t.Errorf("Enforced[1]: got %q, want %q", cfg.Enforced[1], "tls_key_binding")
+	if cfg.AllowFail[1] != "tls_key_binding" {
+		t.Errorf("AllowFail[1]: got %q, want %q", cfg.AllowFail[1], "tls_key_binding")
 	}
 }
 
-func TestLoadTOMLUnknownEnforceFactor(t *testing.T) {
+func TestLoadTOMLUnknownAllowFailFactor(t *testing.T) {
 	toml := `
 [policy]
-enforce = ["nonce_match", "typo_factor"]
+allow_fail = ["nonce_match", "typo_factor"]
 `
 	path := writeConfigFile(t, toml, 0o600)
 	setenv(t, "TEEP_CONFIG", path)
@@ -156,7 +156,7 @@ enforce = ["nonce_match", "typo_factor"]
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for unknown enforce factor, got nil")
+		t.Fatal("expected error for unknown allow_fail factor, got nil")
 	}
 	if !strings.Contains(err.Error(), "typo_factor") {
 		t.Errorf("error should mention the unknown factor: %v", err)
@@ -228,7 +228,7 @@ mrtd_allow = ["abcd"]
 }
 
 func TestLoadTOMLEmptyPolicyKeepsDefaults(t *testing.T) {
-	// An [policy] section with no enforce list must keep the built-in defaults.
+	// A [policy] section with no allow_fail list must keep the built-in defaults.
 	toml := `
 [providers.venice]
 api_key = "k"
@@ -245,8 +245,8 @@ base_url = "https://api.venice.ai"
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if len(cfg.Enforced) != len(DefaultEnforced) {
-		t.Errorf("Enforced after TOML with no [policy]: got %d entries, want %d", len(cfg.Enforced), len(DefaultEnforced))
+	if len(cfg.AllowFail) != len(DefaultAllowFail) {
+		t.Errorf("AllowFail after TOML with no [policy]: got %d entries, want %d", len(cfg.AllowFail), len(DefaultAllowFail))
 	}
 }
 
@@ -683,11 +683,11 @@ base_url = "https://api.venice.ai"
 	}
 }
 
-// --- DefaultEnforced isolation ---
+// --- DefaultAllowFail isolation ---
 
-// TestDefaultEnforcedImmutable verifies that modifying the returned cfg.Enforced
-// slice does not alter DefaultEnforced.
-func TestDefaultEnforcedImmutable(t *testing.T) {
+// TestDefaultAllowFailImmutable verifies that modifying the returned cfg.AllowFail
+// slice does not alter DefaultAllowFail.
+func TestDefaultAllowFailImmutable(t *testing.T) {
 	unsetenv(t, "TEEP_CONFIG")
 	unsetenv(t, "TEEP_LISTEN_ADDR")
 	unsetenv(t, "VENICE_API_KEY")
@@ -700,10 +700,10 @@ func TestDefaultEnforcedImmutable(t *testing.T) {
 	}
 
 	// Mutate the returned slice.
-	cfg.Enforced[0] = "mutated"
+	cfg.AllowFail[0] = "mutated"
 
-	// DefaultEnforced must be unchanged.
-	if DefaultEnforced[0] == "mutated" {
-		t.Error("mutating cfg.Enforced affected DefaultEnforced; Load must return a copy")
+	// DefaultAllowFail must be unchanged.
+	if DefaultAllowFail[0] == "mutated" {
+		t.Error("mutating cfg.AllowFail affected DefaultAllowFail; Load must return a copy")
 	}
 }

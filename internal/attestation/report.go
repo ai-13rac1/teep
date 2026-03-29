@@ -57,14 +57,16 @@ type FactorResult struct {
 // VerificationReport holds the factor-by-factor results of an attestation
 // verification run. Produced by BuildReport.
 type VerificationReport struct {
-	Provider  string            `json:"provider"`
-	Model     string            `json:"model"`
-	Timestamp time.Time         `json:"timestamp"`
-	Factors   []FactorResult    `json:"factors"`
-	Passed    int               `json:"passed"`
-	Failed    int               `json:"failed"`
-	Skipped   int               `json:"skipped"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	Provider       string            `json:"provider"`
+	Model          string            `json:"model"`
+	Timestamp      time.Time         `json:"timestamp"`
+	Factors        []FactorResult    `json:"factors"`
+	Passed         int               `json:"passed"`
+	Failed         int               `json:"failed"`
+	Skipped        int               `json:"skipped"`
+	EnforcedFailed int               `json:"enforced_failed"`
+	AllowedFailed  int               `json:"allowed_failed"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
 // Blocked returns true if any enforced factor has failed. When Blocked is true,
@@ -103,37 +105,38 @@ func (r *VerificationReport) ReportDataBindingPassed() bool {
 	return false
 }
 
-// DefaultEnforced lists the factor names that block the proxy on failure.
-// These are the minimum checks required for E2EE security. See the plan for
-// rationale; notably tdx_reportdata_binding is critical — without it, a MITM
-// can substitute the enclave public key and intercept all E2EE traffic.
-var DefaultEnforced = []string{
-	"nonce_match",
-	"tdx_cert_chain",
-	"tdx_quote_signature",
-	"tdx_debug_disabled",
-	"signing_key_present",
-	"tdx_reportdata_binding",
-	"compose_binding",
-	"nvidia_signature",
-	"nvidia_nonce_client_bound",
-	"tdx_tcb_not_revoked",
-	"build_transparency_log",
-	"sigstore_verification",
-	"event_log_integrity",
-	"tdx_mrseam_mrtd",
+// DefaultAllowFail lists the factor names that are allowed to fail without
+// blocking the proxy. Every factor in KnownFactors that is NOT in this list
+// is enforced by default. This inversion is safer than a positive enforce
+// list: any new factor added to KnownFactors is automatically enforced
+// unless explicitly exempted here.
+var DefaultAllowFail = []string{
+	"tdx_quote_present",
+	"tdx_quote_structure",
+	"tdx_hardware_config",
+	"tdx_boot_config",
+	"intel_pcs_collateral",
+	"tdx_tcb_current",
+	"nvidia_payload_present",
+	"nvidia_claims",
+	"nvidia_nras_verified",
+	"e2ee_capable",
+	"e2ee_usable",
+	"tls_key_binding",
+	"cpu_gpu_chain",
+	"measured_model_weights",
+	"cpu_id_registry",
 	// Gateway factors (nearcloud only).
-	"gateway_nonce_match",
-	"gateway_tdx_cert_chain",
-	"gateway_tdx_quote_signature",
-	"gateway_tdx_debug_disabled",
-	"gateway_compose_binding",
-	"gateway_event_log_integrity",
-	"gateway_tdx_mrseam_mrtd",
+	"gateway_tdx_quote_present",
+	"gateway_tdx_quote_structure",
+	"gateway_tdx_hardware_config",
+	"gateway_tdx_boot_config",
+	"gateway_tdx_reportdata_binding",
+	"gateway_cpu_id_registry",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
-// Used by config validation to reject typos in the enforce policy.
+// Used by config validation to reject typos in the allow_fail list.
 var KnownFactors = []string{
 	"nonce_match", "tdx_quote_present", "tdx_quote_structure", "tdx_cert_chain",
 	"tdx_quote_signature", "tdx_debug_disabled",
@@ -184,7 +187,7 @@ type ReportInput struct {
 	Model             string
 	Raw               *RawAttestation
 	Nonce             Nonce
-	Enforced          []string
+	AllowFail         []string
 	Policy            MeasurementPolicy
 	ImageRepos        []string
 	GatewayImageRepos []string
@@ -226,20 +229,21 @@ func factor(tier, name string, status Status, detail string) []FactorResult {
 }
 
 // BuildReport runs verification factors against the input and returns a
-// complete VerificationReport. The Enforced field controls which factor names
-// result in Enforced=true. Pass DefaultEnforced for production use.
+// complete VerificationReport. The AllowFail field lists factors that are
+// allowed to fail without blocking. Every other factor is enforced.
+// Pass DefaultAllowFail for production use.
 // Gateway factors are included only for nearcloud.
 func BuildReport(in *ReportInput) *VerificationReport {
-	enforcedSet := make(map[string]bool, len(in.Enforced))
-	for _, name := range in.Enforced {
-		enforcedSet[name] = true
+	allowFailSet := make(map[string]bool, len(in.AllowFail))
+	for _, name := range in.AllowFail {
+		allowFailSet[name] = true
 	}
 
 	evaluators := buildEvaluators(in.GatewayTDX != nil)
 	var factors []FactorResult
 	for _, eval := range evaluators {
 		for _, f := range eval(in) {
-			f.Enforced = enforcedSet[f.Name]
+			f.Enforced = !allowFailSet[f.Name]
 			factors = append(factors, f)
 		}
 	}
@@ -253,26 +257,34 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	}
 
 	passed, failed, skipped := 0, 0, 0
+	enforcedFailed, allowedFailed := 0, 0
 	for _, f := range factors {
 		switch f.Status {
 		case Pass:
 			passed++
 		case Fail:
 			failed++
+			if f.Enforced {
+				enforcedFailed++
+			} else {
+				allowedFailed++
+			}
 		case Skip:
 			skipped++
 		}
 	}
 
 	return &VerificationReport{
-		Provider:  in.Provider,
-		Model:     in.Model,
-		Timestamp: time.Now(),
-		Factors:   factors,
-		Passed:    passed,
-		Failed:    failed,
-		Skipped:   skipped,
-		Metadata:  buildMetadata(in),
+		Provider:       in.Provider,
+		Model:          in.Model,
+		Timestamp:      time.Now(),
+		Factors:        factors,
+		Passed:         passed,
+		Failed:         failed,
+		Skipped:        skipped,
+		EnforcedFailed: enforcedFailed,
+		AllowedFailed:  allowedFailed,
+		Metadata:       buildMetadata(in),
 	}
 }
 

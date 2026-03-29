@@ -182,8 +182,8 @@ func extractProvider(args []string) (name string, rest []string) {
 }
 
 // runVerify parses flags, fetches attestation from the named provider, builds
-// the 20-factor report, prints it to stdout, and exits with code 1 if any
-// enforced factor failed.
+// the verification report, prints it to stdout, and exits with code 1 if any
+// enforced factor failed (i.e. a factor not in the allow_fail list).
 func runVerify(args []string) {
 	providerName, args := extractProvider(args)
 	if providerName == "" {
@@ -320,7 +320,7 @@ func runVerification(providerName, modelName, saveDir string, offline bool) *att
 		Model:             modelName,
 		Raw:               raw,
 		Nonce:             nonce,
-		Enforced:          cfg.Enforced,
+		AllowFail:         config.MergedAllowFail(providerName, cfg),
 		Policy:            mergedPolicy,
 		GatewayPolicy:     mergedGWPolicy,
 		SupplyChainPolicy: supplyChainPolicy(providerName),

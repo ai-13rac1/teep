@@ -90,7 +90,7 @@ type updateProvider struct {
 }
 
 type updatePolicy struct {
-	Enforce     []string `toml:"enforce,omitempty"`
+	AllowFail   []string `toml:"allow_fail,omitempty"`
 	MRTDAllow   []string `toml:"mrtd_allow,omitempty"`
 	MRSEAMAllow []string `toml:"mrseam_allow,omitempty"`
 	RTMR0Allow  []string `toml:"rtmr0_allow,omitempty"`
