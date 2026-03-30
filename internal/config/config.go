@@ -62,6 +62,7 @@ func ProviderDefaultAllowFail() map[string][]string {
 	}
 	return out
 }
+
 // ProviderConfig holds the TOML-parsed configuration for one provider.
 // Either APIKey or APIKeyEnv must be set; APIKeyEnv takes precedence if both
 // are present. The resolved key is exposed via the Provider struct, not here.
@@ -347,7 +348,7 @@ func MergedAllowFail(providerName string, cfg *Config) []string {
 		// AllowFail directly without calling Load().
 		af = cfg.AllowFail
 	default:
-		if paf, ok := ProviderDefaultAllowFail[providerName]; ok {
+		if paf, ok := ProviderDefaultAllowFail()[providerName]; ok {
 			af = paf
 		} else {
 			af = DefaultAllowFail
