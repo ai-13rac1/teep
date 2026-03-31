@@ -199,6 +199,9 @@ func loadTOML(cfg *Config, path string) error {
 	if err != nil {
 		return fmt.Errorf("TOML decode: %w", err)
 	}
+	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
+		return fmt.Errorf("unknown config keys: %v", undecoded)
+	}
 
 	for name := range f.Providers {
 		pc := f.Providers[name]
