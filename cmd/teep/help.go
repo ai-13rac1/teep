@@ -853,6 +853,7 @@ Factors:
   vcs_revision   VCS commit hash is embedded                     [ENFORCED]
   vcs_clean      Binary was built from a clean working tree      [ALLOWED]
   version_set    Version was set via ldflags (not "dev")         [ALLOWED]
+  commit_set     Commit was set via ldflags, matches vcs.revision [ALLOWED]
   module_path    Module path matches github.com/13rac1/teep      [ENFORCED]
   go_version     Go version is embedded                          [ENFORCED]
 

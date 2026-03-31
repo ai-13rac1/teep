@@ -69,7 +69,7 @@ func main() {
 	case "self-check":
 		runSelfCheck(os.Args[2:])
 	case "version":
-		runVersion()
+		runVersion(os.Args[2:])
 	case "-h", "--help", "help":
 		runHelp(os.Args[2:])
 	default:
