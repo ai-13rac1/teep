@@ -40,10 +40,13 @@ import (
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/defaults"
+	"github.com/13rac1/teep/internal/multi"
 	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/provider/chutes"
 	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
+	"github.com/13rac1/teep/internal/provider/phalacloud"
 	"github.com/13rac1/teep/internal/provider/venice"
 	"github.com/13rac1/teep/internal/tlsct"
 )
@@ -298,7 +301,7 @@ func fromConfig(
 			rdVerifier,
 			rekorClient,
 		)
-		p.ModelLister = neardirect.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
+		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
 		p.E2EEVersion = attestation.E2EEv2
@@ -318,15 +321,35 @@ func fromConfig(
 			rekorClient,
 			pocSigningKey,
 		)
-		p.ModelLister = neardirect.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
+		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nanogpt":
 		p.ChatPath = "/v1/chat/completions"
 		p.Attester = nanogpt.NewAttester(cp.BaseURL, cp.APIKey, offline)
-		// NanoGPT uses the same dstack REPORTDATA binding as Venice.
-		p.ReportDataVerifier = venice.ReportDataVerifier{}
+		p.ReportDataVerifier = multi.Verifier{
+			Verifiers: map[attestation.BackendFormat]provider.ReportDataVerifier{
+				attestation.FormatDstack: venice.ReportDataVerifier{},
+			},
+		}
 		p.SupplyChainPolicy = nanogpt.SupplyChainPolicy()
+	case "phalacloud":
+		p.ChatPath = "/chat/completions"
+		p.Attester = phalacloud.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.Preparer = phalacloud.NewPreparer(cp.APIKey)
+		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
+		p.ReportDataVerifier = multi.Verifier{
+			Verifiers: map[attestation.BackendFormat]provider.ReportDataVerifier{
+				attestation.FormatDstack: venice.ReportDataVerifier{},
+			},
+		}
+		p.SupplyChainPolicy = nil // no supply chain policy yet
+	case "chutes":
+		p.ChatPath = "/chat/completions"
+		p.Attester = chutes.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.Preparer = chutes.NewPreparer(cp.APIKey)
+		p.ReportDataVerifier = chutes.ReportDataVerifier{}
+		p.SupplyChainPolicy = nil // cosign+IMA model, no docker-compose
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt)", cp.Name)
+		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt, phalacloud, chutes)", cp.Name)
 	}
 	return p, nil
 }
@@ -377,8 +400,12 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		tdxResult = attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, s.cfg.Offline)
 		if prov.ReportDataVerifier != nil && tdxResult.ParseErr == nil {
 			detail, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-			tdxResult.ReportDataBindingErr = err
-			tdxResult.ReportDataBindingDetail = detail
+			if errors.Is(err, multi.ErrNoVerifier) {
+				slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+			} else {
+				tdxResult.ReportDataBindingErr = err
+				tdxResult.ReportDataBindingDetail = detail
+			}
 		}
 		tdxDur = time.Since(tdxStart)
 		slog.Debug("TDX verification complete", "provider", prov.Name, "elapsed", tdxDur)
@@ -391,6 +418,19 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
 		nvidiaDur = time.Since(nvidiaStart)
 		slog.Debug("NVIDIA verification complete", "provider", prov.Name, "elapsed", nvidiaDur)
+	} else if len(raw.GPUEvidence) > 0 {
+		slog.Debug("NVIDIA GPU direct verification starting", "provider", prov.Name, "gpus", len(raw.GPUEvidence))
+		serverNonce, err := attestation.ParseNonce(raw.Nonce)
+		if err != nil {
+			nvidiaResult = &attestation.NvidiaVerifyResult{
+				SignatureErr: fmt.Errorf("parse server nonce: %w", err),
+			}
+		} else {
+			nvidiaStart := time.Now()
+			nvidiaResult = attestation.VerifyNVIDIAGPUDirect(raw.GPUEvidence, serverNonce)
+			nvidiaDur = time.Since(nvidiaStart)
+			slog.Debug("NVIDIA GPU direct verification complete", "provider", prov.Name, "elapsed", nvidiaDur)
+		}
 	}
 
 	var nrasResult *attestation.NvidiaVerifyResult
@@ -400,6 +440,13 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, s.attestClient)
 		nrasDur = time.Since(nrasStart)
 		slog.Debug("NVIDIA NRAS verification complete", "provider", prov.Name, "elapsed", nrasDur)
+	} else if !s.cfg.Offline && len(raw.GPUEvidence) > 0 {
+		slog.Debug("NVIDIA NRAS verification starting (synthesized EAT)", "provider", prov.Name)
+		eatJSON := attestation.GPUEvidenceToEAT(raw.GPUEvidence, raw.Nonce)
+		nrasStart := time.Now()
+		nrasResult = attestation.VerifyNVIDIANRAS(ctx, eatJSON, s.attestClient)
+		nrasDur = time.Since(nrasStart)
+		slog.Debug("NVIDIA NRAS verification complete (synthesized EAT)", "provider", prov.Name, "elapsed", nrasDur)
 	}
 
 	var pocResult *attestation.PoCResult
@@ -871,7 +918,9 @@ func (s *Server) buildUpstreamBody(
 			}
 			if prov.ReportDataVerifier != nil {
 				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-				if err != nil {
+				if errors.Is(err, multi.ErrNoVerifier) {
+					slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+				} else if err != nil {
 					return nil, nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
 				}
 			}
