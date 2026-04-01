@@ -212,18 +212,17 @@ func (p *NoncePool) refresh(ctx context.Context, chuteID string) error {
 	}
 
 	// Carry over failure counts from previous pool.
+	// Build the map while holding p.mu to avoid racing with MarkFailed().
 	p.mu.Lock()
-	oldPool := p.pools[chuteID]
-	p.mu.Unlock()
-
 	oldFailures := make(map[string]int)
-	if oldPool != nil {
+	if oldPool, ok := p.pools[chuteID]; ok {
 		for _, inst := range oldPool.instances {
 			if inst.failures > 0 {
 				oldFailures[inst.instanceID] = inst.failures
 			}
 		}
 	}
+	p.mu.Unlock()
 
 	totalNonces := 0
 	for _, inst := range resp.Instances {
