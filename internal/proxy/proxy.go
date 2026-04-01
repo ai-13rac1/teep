@@ -27,11 +27,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,6 +103,7 @@ type modelStats struct {
 	errors        atomic.Int64
 	lastVerifyMs  atomic.Int64 // last verification duration in ms
 	lastRequestAt atomic.Int64 // unix timestamp
+	lastTokPerSec atomic.Int64 // tokens/sec × 10 (fixed-point, one decimal place)
 }
 
 // getModelStats returns (or creates) the modelStats for a provider/model key.
@@ -125,6 +124,15 @@ func (st *stats) getModelStats(prov, model string) *modelStats {
 	ms := &modelStats{}
 	st.models[key] = ms
 	return ms
+}
+
+// recordTokPerSec computes tokens/sec from StreamStats and stores it in modelStats.
+func recordTokPerSec(ms *modelStats, ss e2ee.StreamStats) {
+	if ss.Duration <= 0 {
+		return
+	}
+	tps := float64(ss.EffectiveTokens()) / ss.Duration.Seconds()
+	ms.lastTokPerSec.Store(int64(tps * 10)) // fixed-point ×10
 }
 
 // fmtDur formats a duration as seconds with 3 decimal places (e.g. "4.200s").
@@ -264,6 +272,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
+	s.mux.HandleFunc("GET /events", s.handleEvents)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
@@ -908,20 +917,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "e2ee session not established", http.StatusInternalServerError)
 		return
 	}
+	var ss e2ee.StreamStats
 	switch {
 	case meta != nil && meta.Session != nil && req.Stream:
-		e2ee.RelayStreamChutes(ctx, w, resp.Body, meta.Session)
+		ss = e2ee.RelayStreamChutes(ctx, w, resp.Body, meta.Session)
 	case meta != nil && meta.Session != nil:
 		e2ee.RelayNonStreamChutes(ctx, w, resp.Body, meta.Session)
 	case session != nil && req.Stream:
-		e2ee.RelayStream(ctx, w, resp.Body, session)
+		ss = e2ee.RelayStream(ctx, w, resp.Body, session)
 	case session != nil:
-		e2ee.RelayReassembledNonStream(ctx, w, resp.Body, session)
+		ss = e2ee.RelayReassembledNonStream(ctx, w, resp.Body, session)
 	case req.Stream:
-		e2ee.RelayStream(ctx, w, resp.Body, nil)
+		ss = e2ee.RelayStream(ctx, w, resp.Body, nil)
 	default:
 		e2ee.RelayNonStream(ctx, w, resp.Body, nil)
 	}
+	recordTokPerSec(ms, ss)
 	upstreamDur += time.Since(upstreamRelayStart)
 
 	// After a successful E2EE roundtrip, promote the cached report's
@@ -1061,15 +1072,18 @@ func (s *Server) handlePinnedChat(
 	// E2EE: use the session from the pinned response for decryption.
 	// When E2EE is active, upstream was forced to stream=true so the response
 	// is always SSE, matching the non-pinned E2EE path.
+	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	var ss e2ee.StreamStats
 	session := pinnedResp.Session
 	if session != nil {
 		s.stats.e2ee.Add(1)
 		defer session.Zero()
 		if req.Stream {
-			e2ee.RelayStream(ctx, w, pinnedResp.Body, session)
+			ss = e2ee.RelayStream(ctx, w, pinnedResp.Body, session)
 		} else {
-			e2ee.RelayReassembledNonStream(ctx, w, pinnedResp.Body, session)
+			ss = e2ee.RelayReassembledNonStream(ctx, w, pinnedResp.Body, session)
 		}
+		recordTokPerSec(ms, ss)
 
 		// After a successful E2EE roundtrip on the pinned path,
 		// promote e2ee_usable from Skip to Pass in the cached report.
@@ -1086,7 +1100,8 @@ func (s *Server) handlePinnedChat(
 	}
 	s.stats.plaintext.Add(1)
 	if req.Stream {
-		e2ee.RelayStream(ctx, w, pinnedResp.Body, nil)
+		ss = e2ee.RelayStream(ctx, w, pinnedResp.Body, nil)
+		recordTokPerSec(ms, ss)
 		return
 	}
 	e2ee.RelayNonStream(ctx, w, pinnedResp.Body, nil)
@@ -1307,8 +1322,49 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleIndex serves a live stats dashboard at /.
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+// dashboardData is the JSON-serializable snapshot of all dashboard stats.
+// Used by both the initial page render and the SSE /events endpoint.
+type dashboardData struct {
+	ListenAddr string              `json:"listen_addr"`
+	Uptime     string              `json:"uptime"`
+	Provider   dashboardProvider   `json:"provider"`
+	Requests   dashboardRequests   `json:"requests"`
+	Cache      dashboardCache      `json:"cache"`
+	Models     map[string]dashModel `json:"models"`
+}
+
+type dashboardProvider struct {
+	Name     string `json:"name"`
+	Upstream string `json:"upstream"`
+	E2EE     string `json:"e2ee"`
+}
+
+type dashboardRequests struct {
+	Total     int64 `json:"total"`
+	Streaming int64 `json:"streaming"`
+	NonStream int64 `json:"non_stream"`
+	E2EE      int64 `json:"e2ee"`
+	Plaintext int64 `json:"plaintext"`
+	Errors    int64 `json:"errors"`
+}
+
+type dashboardCache struct {
+	Entries  int    `json:"entries"`
+	Negative int    `json:"negative"`
+	HitRate  string `json:"hit_rate"`
+	Hits     int64  `json:"hits"`
+	Misses   int64  `json:"misses"`
+}
+
+type dashModel struct {
+	Requests    int64  `json:"requests"`
+	Errors      int64  `json:"errors"`
+	VerifyMs    string `json:"verify_ms"`
+	TokPerSec   string `json:"tok_per_sec"`
+	LastRequest string `json:"last_request"`
+}
+
+func (s *Server) buildDashboardData() dashboardData {
 	var provName, baseURL, e2eeStatus string
 	for name, p := range s.providers {
 		provName = name
@@ -1320,16 +1376,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 
-	uptime := time.Since(s.stats.startTime).Truncate(time.Second)
-	requests := s.stats.requests.Load()
-	errCount := s.stats.errors.Load()
-	streaming := s.stats.streaming.Load()
-	nonStream := s.stats.nonStream.Load()
-	e2eeCount := s.stats.e2ee.Load()
-	plainCount := s.stats.plaintext.Load()
 	hits := s.stats.cacheHits.Load()
 	misses := s.stats.cacheMisses.Load()
-
 	var hitRate string
 	if total := hits + misses; total > 0 {
 		hitRate = fmt.Sprintf("%.0f%%", float64(hits)/float64(total)*100)
@@ -1337,16 +1385,20 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		hitRate = "—"
 	}
 
-	// Per-model rows.
-	var modelRows strings.Builder
+	models := make(map[string]dashModel)
 	s.stats.modelsMu.RLock()
 	for k, m := range s.stats.models {
-		verifyMs := m.lastVerifyMs.Load()
 		var verifyStr string
-		if verifyMs > 0 {
-			verifyStr = fmt.Sprintf("%dms", verifyMs)
+		if ms := m.lastVerifyMs.Load(); ms > 0 {
+			verifyStr = fmt.Sprintf("%dms", ms)
 		} else {
 			verifyStr = "—"
+		}
+		var tokStr string
+		if tps := m.lastTokPerSec.Load(); tps > 0 {
+			tokStr = fmt.Sprintf("%.1f", float64(tps)/10)
+		} else {
+			tokStr = "—"
 		}
 		var agoStr string
 		if lastReq := m.lastRequestAt.Load(); lastReq > 0 {
@@ -1354,18 +1406,93 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		} else {
 			agoStr = "—"
 		}
-		fmt.Fprintf(&modelRows,
-			"  <tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td></tr>\n",
-			html.EscapeString(k), m.requests.Load(), m.errors.Load(), verifyStr, agoStr)
+		models[k] = dashModel{
+			Requests:    m.requests.Load(),
+			Errors:      m.errors.Load(),
+			VerifyMs:    verifyStr,
+			TokPerSec:   tokStr,
+			LastRequest: agoStr,
+		}
 	}
 	s.stats.modelsMu.RUnlock()
+
+	return dashboardData{
+		ListenAddr: s.cfg.ListenAddr,
+		Uptime:     time.Since(s.stats.startTime).Truncate(time.Second).String(),
+		Provider: dashboardProvider{
+			Name:     provName,
+			Upstream: baseURL,
+			E2EE:     e2eeStatus,
+		},
+		Requests: dashboardRequests{
+			Total:     s.stats.requests.Load(),
+			Streaming: s.stats.streaming.Load(),
+			NonStream: s.stats.nonStream.Load(),
+			E2EE:      s.stats.e2ee.Load(),
+			Plaintext: s.stats.plaintext.Load(),
+			Errors:    s.stats.errors.Load(),
+		},
+		Cache: dashboardCache{
+			Entries:  s.cache.Len(),
+			Negative: s.negCache.Len(),
+			HitRate:  hitRate,
+			Hits:     hits,
+			Misses:   misses,
+		},
+		Models: models,
+	}
+}
+
+// handleEvents streams dashboard stats as Server-Sent Events.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	send := func() {
+		b, err := json.Marshal(s.buildDashboardData())
+		if err != nil {
+			slog.Error("marshal dashboard data", "err", err)
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+
+	send() // immediate first event
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			send()
+		}
+	}
+}
+
+// handleIndex serves a live stats dashboard at /.
+// Initial data is embedded as JSON so the page renders immediately.
+// An EventSource connection to /events takes over for live updates.
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+	initial, err := json.Marshal(s.buildDashboardData())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
 <title>teep</title>
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #222; line-height: 1.6; }
@@ -1382,40 +1509,41 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 </head>
 <body>
 <h1>teep</h1>
-<p>TEE attestation proxy on <code>%s</code> &mdash; up %s</p>
+<p>TEE attestation proxy on <code id="listen-addr"></code> &mdash; up <span id="uptime"></span></p>
 
 <h2>Provider</h2>
 <table>
-  <tr><th>Name</th><td>%s</td></tr>
-  <tr><th>Upstream</th><td>%s</td></tr>
-  <tr><th>E2EE</th><td>%s</td></tr>
+  <tr><th>Name</th><td id="prov-name"></td></tr>
+  <tr><th>Upstream</th><td id="prov-upstream"></td></tr>
+  <tr><th>E2EE</th><td id="prov-e2ee"></td></tr>
 </table>
 
 <h2>Requests</h2>
 <div class="stat-grid">
 <table>
-  <tr><th>Total</th><td>%d</td></tr>
-  <tr><th>Streaming</th><td>%d</td></tr>
-  <tr><th>Non-stream</th><td>%d</td></tr>
+  <tr><th>Total</th><td id="req-total"></td></tr>
+  <tr><th>Streaming</th><td id="req-streaming"></td></tr>
+  <tr><th>Non-stream</th><td id="req-nonstream"></td></tr>
 </table>
 <table>
-  <tr><th>E2EE</th><td>%d</td></tr>
-  <tr><th>Plaintext</th><td>%d</td></tr>
-  <tr><th>Errors</th><td>%d</td></tr>
+  <tr><th>E2EE</th><td id="req-e2ee"></td></tr>
+  <tr><th>Plaintext</th><td id="req-plaintext"></td></tr>
+  <tr><th>Errors</th><td id="req-errors"></td></tr>
 </table>
 </div>
 
 <h2>Attestation Cache</h2>
 <table>
-  <tr><th>Entries</th><td>%d</td></tr>
-  <tr><th>Negative</th><td>%d</td></tr>
-  <tr><th>Hit rate</th><td>%s (%d hit, %d miss)</td></tr>
+  <tr><th>Entries</th><td id="cache-entries"></td></tr>
+  <tr><th>Negative</th><td id="cache-negative"></td></tr>
+  <tr><th>Hit rate</th><td id="cache-hitrate"></td></tr>
 </table>
 
 <h2>Models</h2>
 <table>
-  <tr><th>Model</th><th>Requests</th><th>Errors</th><th>Verify</th><th>Last request</th></tr>
-%s</table>
+  <tr><th>Model</th><th>Requests</th><th>Errors</th><th>Verify</th><th>Tok/s</th><th>Last request</th></tr>
+  <tbody id="model-rows"></tbody>
+</table>
 
 <h2>Endpoints</h2>
 <table>
@@ -1424,15 +1552,52 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
   <tr><td><code>GET /v1/tee/report</code></td><td>Cached attestation report</td></tr>
 </table>
 
-<p class="muted">Auto-refreshes every 5s. Point any OpenAI-compatible client at <code>http://%s/v1</code></p>
+<p class="muted" id="footer"></p>
+
+<script>
+function esc(s) {
+  var d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function render(d) {
+  document.getElementById("listen-addr").textContent = d.listen_addr;
+  document.getElementById("uptime").textContent = d.uptime;
+  document.getElementById("prov-name").textContent = d.provider.name;
+  document.getElementById("prov-upstream").textContent = d.provider.upstream;
+  document.getElementById("prov-e2ee").textContent = d.provider.e2ee;
+  document.getElementById("req-total").textContent = d.requests.total;
+  document.getElementById("req-streaming").textContent = d.requests.streaming;
+  document.getElementById("req-nonstream").textContent = d.requests.non_stream;
+  document.getElementById("req-e2ee").textContent = d.requests.e2ee;
+  document.getElementById("req-plaintext").textContent = d.requests.plaintext;
+  document.getElementById("req-errors").textContent = d.requests.errors;
+  document.getElementById("cache-entries").textContent = d.cache.entries;
+  document.getElementById("cache-negative").textContent = d.cache.negative;
+  document.getElementById("cache-hitrate").textContent =
+    d.cache.hit_rate + " (" + d.cache.hits + " hit, " + d.cache.misses + " miss)";
+  var tbody = document.getElementById("model-rows");
+  tbody.innerHTML = "";
+  for (var k in d.models) {
+    var m = d.models[k];
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(k) + "</td><td>" + m.requests + "</td><td>" +
+      m.errors + "</td><td>" + esc(m.verify_ms) + "</td><td>" +
+      esc(m.tok_per_sec) + "</td><td>" + esc(m.last_request) + "</td>";
+    tbody.appendChild(tr);
+  }
+  document.getElementById("footer").innerHTML =
+    "Live via SSE. Point any OpenAI-compatible client at <code>http://" + esc(d.listen_addr) + "/v1</code>";
+}
+
+render(%s);
+
+var es = new EventSource("/events");
+es.onmessage = function(e) { render(JSON.parse(e.data)); };
+es.onerror = function() { setTimeout(function() { location.reload(); }, 5000); };
+</script>
 </body>
 </html>
-`, html.EscapeString(s.cfg.ListenAddr), uptime,
-		html.EscapeString(provName), html.EscapeString(baseURL), e2eeStatus,
-		requests, streaming, nonStream,
-		e2eeCount, plainCount, errCount,
-		s.cache.Len(), s.negCache.Len(),
-		hitRate, hits, misses,
-		modelRows.String(),
-		html.EscapeString(s.cfg.ListenAddr))
+`, initial)
 }
