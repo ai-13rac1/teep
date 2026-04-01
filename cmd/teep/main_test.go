@@ -1010,6 +1010,29 @@ func TestTestE2EEChutes_MissingE2ENonce(t *testing.T) {
 	}
 }
 
+func TestTestE2EEChutes_MissingChuteID(t *testing.T) {
+	raw := &attestation.RawAttestation{
+		SigningKey: "dGVzdA==",
+		InstanceID: "inst-1",
+		E2ENonce:   "nonce-token",
+		ChuteID:    "",
+	}
+	cp := &config.Provider{APIKey: "key", BaseURL: "https://example.com"}
+	got := testE2EEChutes(context.Background(), raw, cp, "human-readable-model-name")
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !got.Attempted {
+		t.Error("Attempted should be true")
+	}
+	if got.Err == nil {
+		t.Fatal("expected error for missing chute_id")
+	}
+	if !strings.Contains(got.Err.Error(), "chute_id") {
+		t.Errorf("error should mention chute_id, got: %v", got.Err)
+	}
+}
+
 func TestDoE2EEChutesStreamTest(t *testing.T) {
 	// Generate a server-side ML-KEM-768 key pair.
 	serverDecap, err := mlkem.GenerateKey768()

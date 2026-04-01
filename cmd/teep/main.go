@@ -771,7 +771,7 @@ func testE2EEChutes(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	// result in raw.ChuteID.
 	chuteID := raw.ChuteID
 	if chuteID == "" {
-		chuteID = model // fallback for tests with manually-constructed RawAttestation
+		return &attestation.E2EETestResult{Attempted: true, Err: errors.New("chutes E2EE: chute_id absent from attestation")}
 	}
 
 	body, err := json.Marshal(map[string]any{
