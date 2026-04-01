@@ -336,11 +336,15 @@ func fromConfig(
 		p.BaseURL = chutesProvider.DefaultLLMBaseURL
 		p.ChatPath = "/v1/chat/completions"
 		p.SkipSigningKeyCache = true
+		attester := chutesProvider.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.Attester = attester
 		p.Encryptor = chutesProvider.NewE2EE()
-		p.Attester = chutesProvider.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = chutesProvider.NewPreparer(cp.APIKey, p.ChatPath, cp.BaseURL)
 		p.ReportDataVerifier = chutesProvider.ReportDataVerifier{}
 		p.SupplyChainPolicy = nil // cosign+IMA model, no docker-compose
+		p.E2EEMaterialFetcher = chutesProvider.NewNoncePool(
+			cp.BaseURL, cp.APIKey, attester.Resolver(), config.NewAttestationClient(offline),
+		)
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt, phalacloud, chutes)", cp.Name)
 	}
@@ -923,7 +927,28 @@ func (s *Server) buildUpstreamBody(
 	if raw == nil {
 		// Cache hit path: try the signing key cache before re-fetching attestation.
 		// Some providers (e.g. Chutes) need fresh instance/nonce data per request.
-		if !prov.SkipSigningKeyCache {
+
+		// Fast path: providers with a nonce pool (Chutes) can get E2EE
+		// material without full re-attestation. The pool provides a fresh
+		// instance ID, ML-KEM pubkey, and single-use nonce from cached
+		// /e2e/instances data. Full attestation (evidence + TDX verify)
+		// was already done in fetchAndVerify and is cached in the report.
+		if prov.E2EEMaterialFetcher != nil {
+			mat, err := prov.E2EEMaterialFetcher.FetchE2EEMaterial(ctx, upstreamModel)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("nonce pool: %w", err)
+			}
+			slog.DebugContext(ctx, "E2EE key exchange: using nonce pool",
+				"provider", prov.Name, "model", upstreamModel,
+				"instance_id", mat.InstanceID,
+			)
+			raw = &attestation.RawAttestation{
+				SigningKey: mat.E2EPubKey,
+				InstanceID: mat.InstanceID,
+				E2ENonce:   mat.E2ENonce,
+				ChuteID:    mat.ChuteID,
+			}
+		} else if !prov.SkipSigningKeyCache {
 			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
 				slog.DebugContext(ctx, "E2EE key exchange: using cached signing key", "provider", prov.Name, "model", upstreamModel)
 				raw = &attestation.RawAttestation{SigningKey: cachedKey}
