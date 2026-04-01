@@ -1,6 +1,7 @@
 package e2ee
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -251,7 +252,7 @@ func TestRelayStream(t *testing.T) {
 	input := fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", data)
 
 	rec := httptest.NewRecorder()
-	RelayStream(rec, strings.NewReader(input), session)
+	RelayStream(context.Background(), rec, strings.NewReader(input), session)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -274,7 +275,7 @@ func TestRelayStream(t *testing.T) {
 func TestRelayStream_NilSession(t *testing.T) {
 	input := "data: {\"choices\":[{\"delta\":{\"content\":\"plain\"}}]}\n\ndata: [DONE]\n\n"
 	rec := httptest.NewRecorder()
-	RelayStream(rec, strings.NewReader(input), nil)
+	RelayStream(context.Background(), rec, strings.NewReader(input), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -289,7 +290,7 @@ func TestRelayStream_NilSession(t *testing.T) {
 func TestRelayNonStream_NilSession(t *testing.T) {
 	input := `{"choices":[{"message":{"content":"hello"}}]}`
 	rec := httptest.NewRecorder()
-	RelayNonStream(rec, strings.NewReader(input), nil)
+	RelayNonStream(context.Background(), rec, strings.NewReader(input), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -312,7 +313,7 @@ func TestRelayNonStream_Encrypted(t *testing.T) {
 	body := nonStreamJSON(t, encrypted)
 
 	rec := httptest.NewRecorder()
-	RelayNonStream(rec, strings.NewReader(string(body)), session)
+	RelayNonStream(context.Background(), rec, strings.NewReader(string(body)), session)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -333,7 +334,7 @@ func TestRelayReassembledNonStream(t *testing.T) {
 	input := fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", data)
 
 	rec := httptest.NewRecorder()
-	RelayReassembledNonStream(rec, strings.NewReader(input), session)
+	RelayReassembledNonStream(context.Background(), rec, strings.NewReader(input), session)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -354,7 +355,7 @@ func TestRelayReassembledNonStream(t *testing.T) {
 
 func TestRelayStream_EmptyBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	RelayStream(rec, strings.NewReader(""), nil)
+	RelayStream(context.Background(), rec, strings.NewReader(""), nil)
 
 	// Empty body should produce a bad gateway error.
 	if rec.Code != http.StatusBadGateway {
