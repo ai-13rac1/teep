@@ -278,7 +278,7 @@ func New(cfg *config.Config) (*Server, error) {
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.cfg.ListenAddr,
-		Handler:           s.mux,
+		Handler:           s,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      10 * time.Minute,
@@ -301,8 +301,32 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 // ServeHTTP implements http.Handler so Server can be used with httptest.NewServer.
+// Unmatched routes are logged before returning 404.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	rec := &statusRecorder{ResponseWriter: w}
+	s.mux.ServeHTTP(rec, r)
+	if rec.status == http.StatusNotFound {
+		ctx := reqid.WithID(r.Context(), reqid.New())
+		slog.WarnContext(ctx, "unmatched route", "method", r.Method, "path", r.URL.Path)
+	}
+}
+
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+// It implements http.Flusher by delegating to the underlying writer.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // fromConfig constructs a provider.Provider from a config.Provider, attaching
