@@ -35,12 +35,31 @@ func chutesIntegrationModel() string {
 	return "deepseek-ai/DeepSeek-V3-0324-TEE"
 }
 
+// integrationChutesPlaintextConfig returns a config pointing at the live
+// Chutes API with E2EE disabled and Offline true (skips Intel PCS, NRAS, PoC
+// network calls). Used to diagnose 403s: if non-E2EE requests also fail,
+// the issue is the API key or account rather than the E2EE path.
+func integrationChutesPlaintextConfig(t *testing.T) *config.Config {
+	t.Helper()
+	return &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Offline:    true,
+		Providers: map[string]*config.Provider{
+			"chutes": {
+				Name:    "chutes",
+				BaseURL: "https://api.chutes.ai",
+				APIKey:  os.Getenv("CHUTES_API_KEY"),
+				E2EE:    false,
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+}
+
 // integrationChutesE2EEConfig returns a config pointing at the live Chutes API
 // with E2EE enabled and Offline true (skips Intel PCS, NRAS, PoC network
 // calls in the initial fetchAndVerify; buildUpstreamBody always fetches fresh
 // attestation for Chutes because SkipSigningKeyCache is true).
-//
-// Chutes always requires E2EE through the proxy — there is no plaintext mode.
 func integrationChutesE2EEConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
@@ -60,6 +79,22 @@ func integrationChutesE2EEConfig(t *testing.T) *config.Config {
 
 func TestIntegration_Chutes(t *testing.T) {
 	skipChutesIntegration(t)
+
+	t.Run("NonStream", func(t *testing.T) {
+		proxySrv := newProxyServer(t, integrationChutesPlaintextConfig(t))
+		defer proxySrv.Close()
+		resp := postChatIntegration(t, proxySrv.URL, chutesIntegrationModel(), false)
+		defer resp.Body.Close()
+		assertNonStreamResponse(t, resp)
+	})
+
+	t.Run("Streaming", func(t *testing.T) {
+		proxySrv := newProxyServer(t, integrationChutesPlaintextConfig(t))
+		defer proxySrv.Close()
+		resp := postChatIntegration(t, proxySrv.URL, chutesIntegrationModel(), true)
+		defer resp.Body.Close()
+		assertStreamResponse(t, resp)
+	})
 
 	t.Run("E2EEStreaming", func(t *testing.T) {
 		proxySrv := newProxyServer(t, integrationChutesE2EEConfig(t))
