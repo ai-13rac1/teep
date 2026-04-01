@@ -11,6 +11,7 @@ import (
 
 	"github.com/13rac1/teep/internal/jsonstrict"
 	"github.com/13rac1/teep/internal/provider"
+	"golang.org/x/sync/singleflight"
 )
 
 // modelResolver abstracts model name → chute UUID resolution for testing.
@@ -31,9 +32,9 @@ type NoncePool struct {
 	client   *http.Client
 	resolver modelResolver
 
-	mu        sync.Mutex
-	refreshMu sync.Mutex            // serializes refresh calls to prevent thundering herd
-	pools     map[string]*chutePool // keyed by chute UUID
+	mu      sync.Mutex
+	refresh singleflight.Group    // per-chute refresh dedup
+	pools   map[string]*chutePool // keyed by chute UUID
 }
 
 // chutePool holds cached instances and their remaining nonces for one chute.
@@ -76,18 +77,12 @@ func (p *NoncePool) Take(ctx context.Context, model string) (*provider.E2EEMater
 		return m, nil
 	}
 
-	// Slow path: serialize refreshes to prevent thundering herd.
-	// Multiple goroutines may reach here concurrently when the pool is empty;
-	// only the first should call the API — the rest wait and retry take().
-	p.refreshMu.Lock()
-	defer p.refreshMu.Unlock()
-
-	// Double-check after acquiring refresh lock.
-	if m := p.take(chuteID); m != nil {
-		return m, nil
-	}
-
-	if err := p.refresh(ctx, chuteID); err != nil {
+	// Slow path: use singleflight keyed by chuteID so unrelated chutes
+	// can refresh in parallel while preventing thundering herd per chute.
+	_, err, _ = p.refresh.Do(chuteID, func() (any, error) {
+		return nil, p.doRefresh(ctx, chuteID)
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -173,8 +168,8 @@ func (p *NoncePool) take(chuteID string) *provider.E2EEMaterial {
 	}
 }
 
-// refresh fetches /e2e/instances/{chute} and populates the pool.
-func (p *NoncePool) refresh(ctx context.Context, chuteID string) error {
+// doRefresh fetches /e2e/instances/{chute} and populates the pool.
+func (p *NoncePool) doRefresh(ctx context.Context, chuteID string) error {
 	instancesURL, err := url.Parse(p.baseURL + instancesPath + url.PathEscape(chuteID))
 	if err != nil {
 		return fmt.Errorf("nonce pool: parse instances URL: %w", err)
