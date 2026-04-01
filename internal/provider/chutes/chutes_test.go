@@ -341,7 +341,7 @@ func TestFetchAttestation_SendsCorrectRequests(t *testing.T) {
 }
 
 func TestPreparer_SetsAuthHeader(t *testing.T) {
-	p := chutes.NewPreparer("sk-test-123", "/chat/completions")
+	p := chutes.NewPreparer("sk-test-123", "/v1/chat/completions", "https://api.chutes.ai")
 	req, _ := http.NewRequest(http.MethodPost, "https://llm.chutes.ai/v1/chat/completions", http.NoBody)
 
 	if err := p.PrepareRequest(req, nil, nil, false); err != nil {

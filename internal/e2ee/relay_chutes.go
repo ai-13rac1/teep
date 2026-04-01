@@ -98,7 +98,10 @@ func RelayStreamChutes(ctx context.Context, w http.ResponseWriter, body io.Reade
 				headerWritten = true
 			}
 
-			fmt.Fprintf(w, "data: %s\n\n", plaintext)
+			// The decrypted plaintext is a raw fragment of the original
+			// SSE stream (including "data: " prefix and newlines).
+			// Write it verbatim — do NOT wrap in another "data: ".
+			w.Write(plaintext)
 			flusher.Flush()
 		} else if errMsg, ok := event["e2e_error"]; ok {
 			slog.ErrorContext(ctx, "chutes stream: server-side E2E error", "error", string(errMsg))

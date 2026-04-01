@@ -890,7 +890,7 @@ func TestChatPathForProvider(t *testing.T) {
 		{"nearcloud", "/v1/chat/completions"},
 		{"neardirect", "/v1/chat/completions"},
 		{"nanogpt", "/v1/chat/completions"},
-		{"chutes", "/chat/completions"},
+		{"chutes", "/v1/chat/completions"},
 		{"unknown", ""},
 	}
 	for _, tc := range tests {

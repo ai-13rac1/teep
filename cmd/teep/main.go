@@ -641,7 +641,7 @@ func chatPathForProvider(name string) string {
 	case "nearcloud", "neardirect", "nanogpt":
 		return "/v1/chat/completions"
 	case "chutes":
-		return "/chat/completions"
+		return "/v1/chat/completions"
 	default:
 		return ""
 	}
@@ -899,8 +899,18 @@ func doE2EEChutesStreamTest(req *http.Request, session *e2ee.ChutesSession) *att
 			if err != nil {
 				return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("decrypt e2e chunk %d: %w", decryptedChunks+1, err)}
 			}
-			// Validate the decrypted chunk is valid JSON.
-			if !json.Valid(plaintext) {
+			// The Chutes server encrypts full SSE lines including
+			// "data: " prefix and trailing newlines. Strip these
+			// before validating the JSON payload.
+			chunk := bytes.TrimSpace(plaintext)
+			chunk = bytes.TrimPrefix(chunk, []byte("data: "))
+			// Empty chunks (inter-event newlines) and the [DONE]
+			// sentinel are valid decrypted content, not JSON.
+			if len(chunk) == 0 || string(chunk) == "[DONE]" {
+				decryptedChunks++
+				continue
+			}
+			if !json.Valid(chunk) {
 				return &attestation.E2EETestResult{
 					Attempted: true,
 					Err:       fmt.Errorf("decrypted chunk %d is not valid JSON (prefix=%q)", decryptedChunks+1, safePrefix(string(plaintext), 64)),

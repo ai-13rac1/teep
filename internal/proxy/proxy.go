@@ -333,11 +333,12 @@ func fromConfig(
 		}
 		p.SupplyChainPolicy = nil // no supply chain policy yet
 	case "chutes":
-		p.ChatPath = "/chat/completions"
+		p.BaseURL = chutesProvider.DefaultLLMBaseURL
+		p.ChatPath = "/v1/chat/completions"
 		p.SkipSigningKeyCache = true
 		p.Encryptor = chutesProvider.NewE2EE()
 		p.Attester = chutesProvider.NewAttester(cp.BaseURL, cp.APIKey, offline)
-		p.Preparer = chutesProvider.NewPreparer(cp.APIKey, p.ChatPath)
+		p.Preparer = chutesProvider.NewPreparer(cp.APIKey, p.ChatPath, cp.BaseURL)
 		p.ReportDataVerifier = chutesProvider.ReportDataVerifier{}
 		p.SupplyChainPolicy = nil // cosign+IMA model, no docker-compose
 	default:

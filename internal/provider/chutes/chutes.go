@@ -32,6 +32,11 @@ import (
 	"github.com/13rac1/teep/internal/provider"
 )
 
+// DefaultLLMBaseURL is the Chutes OpenAI-compatible LLM inference gateway.
+// This is distinct from the platform API (api.chutes.ai) which handles
+// attestation, E2EE invoke, and management endpoints.
+const DefaultLLMBaseURL = "https://llm.chutes.ai"
+
 const (
 	// attestationPath is the Chutes API path for TEE evidence (with chute ID placeholder).
 	attestationPath = "/chutes/%s/evidence"
@@ -54,7 +59,9 @@ const (
 
 // e2eInstancesResponse is the JSON response from GET /e2e/instances/{chute}.
 type e2eInstancesResponse struct {
-	Instances []e2eInstance `json:"instances"`
+	Instances  []e2eInstance `json:"instances"`
+	NonceExpIn int           `json:"nonce_expires_in"`
+	NonceExpAt float64       `json:"nonce_expires_at"`
 }
 
 // e2eInstance is one instance entry with its ML-KEM-768 public key.
@@ -62,8 +69,6 @@ type e2eInstance struct {
 	InstanceID string   `json:"instance_id"`
 	E2EPubKey  string   `json:"e2e_pubkey"`
 	Nonces     []string `json:"nonces"`
-	NonceExpIn int      `json:"nonce_expires_in"`
-	NonceExpAt float64  `json:"nonce_expires_at"`
 }
 
 // attestationResponse is the JSON response from GET /chutes/{chute}/evidence.
@@ -264,21 +269,24 @@ func findE2EPubKey(instances []e2eInstance, instanceID string) (string, error) {
 }
 
 // Preparer injects the Chutes Authorization header and E2EE headers into
-// outgoing requests. For E2EE, it rewrites the URL to /e2e/invoke and
-// sets the required X-Chute-Id, X-Instance-Id, and X-E2E-Nonce headers.
+// outgoing requests. For E2EE, it rewrites the full URL to the platform API
+// /e2e/invoke endpoint and sets the required headers.
 type Preparer struct {
-	apiKey   string
-	chatPath string
+	apiKey     string
+	chatPath   string
+	apiBaseURL string // platform API base (e.g. https://api.chutes.ai)
 }
 
-// NewPreparer returns a Chutes Preparer configured with the given API key and chat path.
-func NewPreparer(apiKey, chatPath string) *Preparer {
-	return &Preparer{apiKey: apiKey, chatPath: chatPath}
+// NewPreparer returns a Chutes Preparer configured with the given API key,
+// chat path, and platform API base URL. The apiBaseURL is used for E2EE
+// invoke URL rewriting (the LLM inference and platform APIs use different hosts).
+func NewPreparer(apiKey, chatPath, apiBaseURL string) *Preparer {
+	return &Preparer{apiKey: apiKey, chatPath: chatPath, apiBaseURL: apiBaseURL}
 }
 
 // PrepareRequest injects the Authorization header into req. For Chutes E2EE
-// sessions, it also sets the E2EE headers and rewrites the URL path to
-// /e2e/invoke.
+// sessions, it also sets the E2EE headers and rewrites the full URL to the
+// platform API's /e2e/invoke endpoint.
 func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.ChutesE2EE, stream bool) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	if meta != nil {
@@ -288,7 +296,17 @@ func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.C
 		req.Header["X-E2E-Stream"] = []string{strconv.FormatBool(stream)}
 		req.Header["X-E2E-Path"] = []string{p.chatPath}
 		req.Header.Set("Content-Type", "application/octet-stream")
-		req.URL.Path = "/e2e/invoke"
+		// E2EE invoke is on the platform API (api.chutes.ai), not the
+		// LLM inference gateway (llm.chutes.ai). We must also clear
+		// req.Host so the Host header is derived from the new URL;
+		// http.NewRequestWithContext snapshots the original host into
+		// req.Host, which would otherwise override the URL host.
+		e2eURL, err := url.Parse(p.apiBaseURL + "/e2e/invoke")
+		if err != nil {
+			return fmt.Errorf("parse e2e invoke URL: %w", err)
+		}
+		req.URL = e2eURL
+		req.Host = e2eURL.Host
 	}
 	return nil
 }
