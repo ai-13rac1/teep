@@ -1325,11 +1325,11 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 // dashboardData is the JSON-serializable snapshot of all dashboard stats.
 // Used by both the initial page render and the SSE /events endpoint.
 type dashboardData struct {
-	ListenAddr string              `json:"listen_addr"`
-	Uptime     string              `json:"uptime"`
-	Provider   dashboardProvider   `json:"provider"`
-	Requests   dashboardRequests   `json:"requests"`
-	Cache      dashboardCache      `json:"cache"`
+	ListenAddr string               `json:"listen_addr"`
+	Uptime     string               `json:"uptime"`
+	Provider   dashboardProvider    `json:"provider"`
+	Requests   dashboardRequests    `json:"requests"`
+	Cache      dashboardCache       `json:"cache"`
 	Models     map[string]dashModel `json:"models"`
 }
 
