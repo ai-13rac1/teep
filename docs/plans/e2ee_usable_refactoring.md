@@ -13,6 +13,25 @@ and lists shared fixes that apply regardless of which option is chosen.
 
 ---
 
+## Progress
+
+The following work has been completed on the `chutes_integrity` branch as
+part of PR #33 review fixes:
+
+| Commit | Description | Plan item |
+|--------|-------------|-----------|
+| `3eaa490` | Add `e2ee_usable` to `ChutesDefaultAllowFail` and `NearcloudDefaultAllowFail` | Option C step 1 |
+| `e4b075c` | Guard `MarkE2EEUsable` against `Skipped` counter underflow; add `slog.Warn` | S2 (partial) |
+| `6de38de` | Document cache mutation race with TODO comments at both `MarkE2EEUsable` call sites | S1 (documented, not yet fixed) |
+| `2ac5f5a` | Validate Chutes `apiBaseURL` has scheme and host before E2EE URL rewrite | S3 (done) |
+| `a9850b9` | Require `ChuteID` in `testE2EEChutes` instead of falling back to model name | S4 (done) |
+
+These commits resolve P1 (chicken-and-egg blocking) by making `e2ee_usable`
+allowed-to-fail for all providers. The remaining Option C work (steps 2–4,
+6–8 and the full S1/S2 fixes) is described below.
+
+---
+
 ## Problems
 
 ### P1: Chicken-and-egg blocking (critical)
@@ -385,11 +404,9 @@ wrong enforcement point. Instead:
 
 ### Changes required
 
-1. **Add `e2ee_usable` to all provider allow_fail lists**:
-   `internal/attestation/report.go`
-   - Add `"e2ee_usable"` to `NearcloudDefaultAllowFail` (~line 163) and
-     `ChutesDefaultAllowFail` (~line 193). It's already in
-     `DefaultAllowFail` and `NeardirectDefaultAllowFail`.
+1. ~~**Add `e2ee_usable` to all provider allow_fail lists**~~: **DONE** (`3eaa490`)
+   — Added to `NearcloudDefaultAllowFail` and `ChutesDefaultAllowFail`
+   with TODO comments explaining the chicken-and-egg problem.
 
 2. **Add E2EE failure tracking**: `internal/proxy/proxy.go`
    - Add a per-provider/model E2EE failure flag to the `Server` struct.
@@ -432,6 +449,9 @@ wrong enforcement point. Instead:
    - Since `e2ee_usable` is now always allowed-to-fail, it will stay `Skip`
      (not promoted to `Fail`). `MarkE2EEUsable`'s guard
      `Status == Skip` will always be safe.
+   - Underflow guard added (`e4b075c`): `Skipped > 0` check with
+     `slog.Warn` on desync. **Partial fix** — full counter recomputation
+     (Shared Fix S2) and report cloning (Shared Fix S1) still needed.
    - Still fix the cache mutation race (see Shared Fix S1 below).
    - Still fix counter consistency (see Shared Fix S2 below).
 
@@ -474,6 +494,8 @@ wrong enforcement point. Instead:
 ## Shared fixes (apply to all options)
 
 ### S1: Cache mutation race
+
+**Status**: Documented with TODO comments (`6de38de`). **Not yet fixed.**
 
 **Problem**: `MarkE2EEUsable` (and the subsequent `cache.Put`) mutates a
 shared `*VerificationReport` pointer.
@@ -520,6 +542,9 @@ fix unnecessary.
 `cloneReport` or a `Clone` method on `VerificationReport`).
 
 ### S2: Counter recomputation
+
+**Status**: Partial fix (`e4b075c`) — added `Skipped > 0` guard with
+`slog.Warn` to prevent underflow. **Full recomputation not yet implemented.**
 
 **Problem**: `MarkE2EEUsable` manually adjusts `Passed` and `Skipped`
 counters. This is fragile — if the factor status is unexpected, counters
@@ -575,44 +600,44 @@ unnecessary.
 
 ### S3: Chutes URL validation
 
+**Status**: **DONE** (`2ac5f5a`). Validation added in `PrepareRequest`
+after `url.Parse`: rejects URLs with empty `Scheme` or `Host`. Unit test
+`TestPreparer_RejectsInvalidAPIBaseURL` covers empty, no-scheme, and
+path-only cases.
+
 **Problem**: `p.apiBaseURL + "/e2e/invoke"` can produce an invalid URL if
 `apiBaseURL` is empty or missing a scheme.
 
-**Fix**: Validate `apiBaseURL` in `NewPreparer` (or at first use). Return an
-error if `url.Parse` produces a URL with empty `Scheme` or `Host`.
-
-**File**: `internal/provider/chutes/chutes.go` — `NewPreparer` constructor
-and/or the `Prepare` method where `url.Parse(p.apiBaseURL + "/e2e/invoke")`
-is called (~line 304).
+**File**: `internal/provider/chutes/chutes.go`
 
 ### S4: ChuteID fallback
+
+**Status**: **DONE** (`a9850b9`). `testE2EEChutes` now returns an error
+when `raw.ChuteID` is empty instead of falling back to `model`. Unit test
+`TestTestE2EEChutes_MissingChuteID` covers this.
 
 **Problem**: `testE2EEChutes` falls back to `chuteID = model` when
 `raw.ChuteID` is empty. If `model` is a human-readable name (not a UUID),
 the E2EE test fails for reasons unrelated to cryptography.
 
-**Fix**: Require `raw.ChuteID` for the E2EE test. Return an error result
-when missing:
-```go
-if raw.ChuteID == "" {
-    return &attestation.E2EETestResult{
-        Attempted: true,
-        Err: errors.New("chutes E2EE: chute_id absent from attestation"),
-    }
-}
-```
-
-**File**: `cmd/teep/main.go` `testE2EEChutes` ~line 773.
+**File**: `cmd/teep/main.go` `testE2EEChutes`
 
 ---
 
 ## Recommendation
 
-**Short-term (this PR or immediate follow-up)**: Apply **Option C** plus all
-shared fixes (S1–S4). This is the least invasive path that resolves P1
-(chicken-and-egg blocking) and P5 (inconsistent enforcement), while adding
-forward-looking E2EE failure enforcement at the relay layer. It matches the
-PR author's stated desired behavior.
+**Short-term** (partially completed): Option C step 1 and shared fixes
+S3–S4 are done. S1 and S2 have partial fixes (TODOs and underflow guard).
+The remaining Option C work is:
+
+1. **S1 full fix**: Clone report before `MarkE2EEUsable` mutation (both
+   non-pinned and pinned paths).
+2. **S2 full fix**: Replace manual counter adjustment with `recomputeCounters`.
+3. **Step 2**: Add `e2eeFailed sync.Map` to `Server` struct; check it after
+   `Blocked()` gate.
+4. **Step 3**: Change relay functions to return `error` on decryption failure.
+5. **Step 4**: Post-relay enforcement — mark failed, invalidate caches.
+6. **Step 8**: Add `Delete` method to report cache and signing key cache.
 
 **Medium-term**: Evaluate **Option A** for a future refactor. Separating
 E2EE lifecycle from the report factor system is the cleanest architecture
