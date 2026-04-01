@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider/chutes"
 )
 
@@ -349,5 +350,34 @@ func TestPreparer_SetsAuthHeader(t *testing.T) {
 	}
 	if req.Header.Get("Authorization") != "Bearer sk-test-123" {
 		t.Errorf("Authorization = %q, want %q", req.Header.Get("Authorization"), "Bearer sk-test-123")
+	}
+}
+
+func TestPreparer_RejectsInvalidAPIBaseURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiBaseURL string
+	}{
+		{"empty", ""},
+		{"no_scheme", "api.chutes.ai"},
+		{"path_only", "/e2e/invoke"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := chutes.NewPreparer("key", "/v1/chat/completions", tc.apiBaseURL)
+			req, _ := http.NewRequest(http.MethodPost, "https://llm.chutes.ai/v1/chat/completions", http.NoBody)
+			meta := &e2ee.ChutesE2EE{
+				ChuteID:    "chute-uuid",
+				InstanceID: "inst-1",
+				E2ENonce:   "nonce-1",
+			}
+			err := p.PrepareRequest(req, nil, meta, true)
+			if err == nil {
+				t.Fatalf("expected error for apiBaseURL=%q", tc.apiBaseURL)
+			}
+			if !strings.Contains(err.Error(), "scheme and host") {
+				t.Errorf("error should mention scheme and host, got: %v", err)
+			}
+		})
 	}
 }

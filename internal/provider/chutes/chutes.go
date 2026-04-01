@@ -305,6 +305,9 @@ func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.C
 		if err != nil {
 			return fmt.Errorf("parse e2e invoke URL: %w", err)
 		}
+		if e2eURL.Scheme == "" || e2eURL.Host == "" {
+			return fmt.Errorf("invalid Chutes API base URL %q: must include scheme and host", p.apiBaseURL)
+		}
 		req.URL = e2eURL
 		req.Host = e2eURL.Host
 	}
