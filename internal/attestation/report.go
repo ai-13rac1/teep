@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -109,6 +110,34 @@ func (r *VerificationReport) ReportDataBindingPassed() bool {
 	return false
 }
 
+// MarkE2EEUsable updates the e2ee_usable factor to Pass after a successful
+// E2EE roundtrip in the proxy path. It adjusts the Passed/Skipped counters
+// accordingly. This must only be called when E2EE was actually used for a
+// live request and the response was successfully decrypted.
+//
+// TODO(e2ee_usable): This method manually adjusts report counters, which is
+// fragile and can desync if the factor is in an unexpected state (e.g.
+// promoted from Skip to Fail by BuildReport). The interaction between
+// report factors, proxy blocking, and live inference test factors needs
+// to be redesigned. See docs/plans/e2ee_usable_refactoring.md.
+func (r *VerificationReport) MarkE2EEUsable(detail string) {
+	for i := range r.Factors {
+		if r.Factors[i].Name == "e2ee_usable" {
+			if r.Factors[i].Status == Skip {
+				r.Factors[i].Status = Pass
+				r.Factors[i].Detail = detail
+				r.Passed++
+				if r.Skipped > 0 {
+					r.Skipped--
+				} else {
+					slog.Warn("MarkE2EEUsable: Skipped counter already zero; counters may be out of sync")
+				}
+			}
+			return
+		}
+	}
+}
+
 // DefaultAllowFail lists the factor names that are allowed to fail without
 // blocking the proxy. Every factor in KnownFactors that is NOT in this list
 // is enforced by default. This inversion is safer than a positive enforce
@@ -148,6 +177,14 @@ var NearcloudDefaultAllowFail = []string{
 	"cpu_gpu_chain",
 	"measured_model_weights",
 	"cpu_id_registry",
+	// TODO(e2ee_usable): e2ee_usable has a chicken-and-egg problem in the
+	// proxy path: the factor starts as Skip (pending live test), which
+	// BuildReport promotes to Fail when enforced, blocking the very request
+	// needed to prove E2EE works. Allowed to fail here until the
+	// interaction between report factors, proxy blocking, and live
+	// inference test factors (e2ee_usable, future tool-call test) is
+	// redesigned. See docs/plans/e2ee_usable_refactoring.md.
+	"e2ee_usable",
 	// Gateway factors (nearcloud only).
 	"gateway_tdx_hardware_config",
 	"gateway_tdx_boot_config",
@@ -165,6 +202,28 @@ var NeardirectDefaultAllowFail = []string{
 	"cpu_gpu_chain",
 	"measured_model_weights",
 	"cpu_id_registry",
+}
+
+// ChutesDefaultAllowFail is the chutes-specific default allow_fail list.
+// Chutes runs sek8s inside Intel TDX VMs and supports NVIDIA GPU attestation,
+// so core TDX and NVIDIA factors are enforced. Supply-chain and build
+// provenance factors remain allowed-to-fail until the sek8s platform
+// exposes the necessary evidence.
+var ChutesDefaultAllowFail = []string{
+	"nvidia_signature",
+	"nvidia_nras_verified",
+	"tls_key_binding",
+	"cpu_gpu_chain",
+	"measured_model_weights",
+	"build_transparency_log",
+	"cpu_id_registry",
+	"compose_binding",
+	"sigstore_verification",
+	"event_log_integrity",
+	// TODO(e2ee_usable): same chicken-and-egg problem as nearcloud; see
+	// the comment in NearcloudDefaultAllowFail and
+	// docs/plans/e2ee_usable_refactoring.md.
+	"e2ee_usable",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
@@ -298,6 +357,13 @@ type ReportInput struct {
 	// E2EETest is the result of a live E2EE test inference. Nil when
 	// the provider is not E2EE-capable or the test was not attempted.
 	E2EETest *E2EETestResult
+
+	// E2EEConfigured is true when the provider has E2EE enabled in its
+	// configuration. Used by the proxy path where E2EETest is not
+	// populated at report-build time but the provider will use E2EE
+	// for actual requests. When true and E2EETest is nil, e2ee_usable
+	// reports "pending live test" instead of "not configured".
+	E2EEConfigured bool
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +888,9 @@ func evalE2EECapable(in *ReportInput) []FactorResult {
 
 func evalE2EEUsable(in *ReportInput) []FactorResult {
 	if in.E2EETest == nil {
+		if in.E2EEConfigured {
+			return factor(TierBinding, "e2ee_usable", Skip, "E2EE configured; pending live test")
+		}
 		return factor(TierBinding, "e2ee_usable", Skip, "E2EE not configured for this provider")
 	}
 	if in.E2EETest.NoAPIKey {

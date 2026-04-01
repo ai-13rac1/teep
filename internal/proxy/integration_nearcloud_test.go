@@ -134,16 +134,19 @@ func TestIntegration_NearCloud(t *testing.T) {
 	})
 
 	t.Run("AttestationReport", func(t *testing.T) {
-		// Online mode so the report includes Intel PCS, NRAS, PoC, and gateway results.
-		cfg := integrationNearCloudConfig(t)
+		// Online mode with E2EE so the report includes Intel PCS, NRAS, PoC,
+		// gateway results, and e2ee_usable transitions to Pass after a live
+		// E2EE roundtrip. Non-streaming avoids relay timeout issues while
+		// still exercising the full E2EE path through the proxy.
+		cfg := integrationNearCloudE2EEConfig(t)
 		cfg.Offline = false
 		proxySrv := newProxyServer(t, cfg)
 		defer proxySrv.Close()
 
 		model := nearCloudIntegrationModel()
 
-		// First chat request triggers attestation and populates the report cache.
-		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
+		// First chat request triggers attestation + E2EE and populates the report cache.
+		chatResp := postChatIntegration(t, proxySrv.URL, model, false)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 

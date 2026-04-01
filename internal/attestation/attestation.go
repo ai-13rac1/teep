@@ -154,6 +154,7 @@ type RawAttestation struct {
 	// key exchange (Chutes). Carried through to the Session for header injection.
 	InstanceID string `json:"-"` // selected instance for E2EE
 	E2ENonce   string `json:"-"` // single-use nonce token from instance discovery
+	ChuteID    string `json:"-"` // resolved chute UUID (may differ from model name)
 
 	// Gateway fields — populated by providers with TEE-attested API gateways.
 	// Empty for providers without a gateway (e.g. Venice, NEAR AI direct).

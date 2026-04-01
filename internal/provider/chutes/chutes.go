@@ -32,6 +32,11 @@ import (
 	"github.com/13rac1/teep/internal/provider"
 )
 
+// DefaultLLMBaseURL is the Chutes OpenAI-compatible LLM inference gateway.
+// This is distinct from the platform API (api.chutes.ai) which handles
+// attestation, E2EE invoke, and management endpoints.
+const DefaultLLMBaseURL = "https://llm.chutes.ai"
+
 const (
 	// attestationPath is the Chutes API path for TEE evidence (with chute ID placeholder).
 	attestationPath = "/chutes/%s/evidence"
@@ -54,7 +59,9 @@ const (
 
 // e2eInstancesResponse is the JSON response from GET /e2e/instances/{chute}.
 type e2eInstancesResponse struct {
-	Instances []e2eInstance `json:"instances"`
+	Instances  []e2eInstance `json:"instances"`
+	NonceExpIn int           `json:"nonce_expires_in"`
+	NonceExpAt float64       `json:"nonce_expires_at"`
 }
 
 // e2eInstance is one instance entry with its ML-KEM-768 public key.
@@ -62,8 +69,6 @@ type e2eInstance struct {
 	InstanceID string   `json:"instance_id"`
 	E2EPubKey  string   `json:"e2e_pubkey"`
 	Nonces     []string `json:"nonces"`
-	NonceExpIn int      `json:"nonce_expires_in"`
-	NonceExpAt float64  `json:"nonce_expires_at"`
 }
 
 // attestationResponse is the JSON response from GET /chutes/{chute}/evidence.
@@ -82,26 +87,47 @@ type instanceEvidence struct {
 
 // Attester fetches attestation data from the Chutes direct API.
 type Attester struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL  string
+	apiKey   string
+	client   *http.Client
+	resolver *ModelResolver
 }
 
 // NewAttester returns a Chutes Attester configured with the given base URL
-// and API key.
+// and API key. modelsBase is the URL for /v1/models model-name resolution
+// (defaults to https://llm.chutes.ai if empty).
 func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
+	client := config.NewAttestationClient(offline...)
 	return &Attester{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		client:  config.NewAttestationClient(offline...),
+		baseURL:  baseURL,
+		apiKey:   apiKey,
+		client:   client,
+		resolver: NewModelResolver("", apiKey, client),
 	}
 }
 
+// SetModelsBase overrides the URL used for /v1/models model-name resolution.
+// Primarily for testing.
+func (a *Attester) SetModelsBase(modelsBase string) {
+	a.resolver = NewModelResolver(modelsBase, a.apiKey, a.client)
+}
+
 // FetchAttestation fetches TEE attestation from Chutes using the two-step
-// protocol: discover instances, then fetch evidence.
+// protocol: discover instances, then fetch evidence. The model parameter
+// can be a human-readable name (e.g. "deepseek-ai/DeepSeek-V3-0324-TEE")
+// or a chute UUID; names are resolved via /v1/models automatically.
 func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
+	// Resolve human-readable model name to chute UUID.
+	chuteID, err := a.resolver.Resolve(ctx, model)
+	if err != nil {
+		return nil, fmt.Errorf("chutes: resolve model: %w", err)
+	}
+	if chuteID != model {
+		slog.InfoContext(ctx, "chutes: resolved model name to chute UUID", "model", model, "chute_id", chuteID)
+	}
+
 	// Step 1: Discover instances with e2e public keys.
-	instancesURL, err := url.Parse(a.baseURL + instancesPath + url.PathEscape(model))
+	instancesURL, err := url.Parse(a.baseURL + instancesPath + url.PathEscape(chuteID))
 	if err != nil {
 		return nil, fmt.Errorf("chutes: parse instances URL: %w", err)
 	}
@@ -113,7 +139,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 
 	// Step 2: Fetch evidence with our nonce.
-	evidencePath := fmt.Sprintf(attestationPath, url.PathEscape(model))
+	evidencePath := fmt.Sprintf(attestationPath, url.PathEscape(chuteID))
 	evidenceURL, err := url.Parse(a.baseURL + evidencePath)
 	if err != nil {
 		return nil, fmt.Errorf("chutes: parse evidence URL: %w", err)
@@ -128,7 +154,12 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("chutes: fetch evidence: %w", err)
 	}
 
-	return ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	if err != nil {
+		return nil, err
+	}
+	raw.ChuteID = chuteID
+	return raw, nil
 }
 
 // ParseAttestationResponse parses the two Chutes API response bodies (instances
@@ -238,21 +269,24 @@ func findE2EPubKey(instances []e2eInstance, instanceID string) (string, error) {
 }
 
 // Preparer injects the Chutes Authorization header and E2EE headers into
-// outgoing requests. For E2EE, it rewrites the URL to /e2e/invoke and
-// sets the required X-Chute-Id, X-Instance-Id, and X-E2E-Nonce headers.
+// outgoing requests. For E2EE, it rewrites the full URL to the platform API
+// /e2e/invoke endpoint and sets the required headers.
 type Preparer struct {
-	apiKey   string
-	chatPath string
+	apiKey     string
+	chatPath   string
+	apiBaseURL string // platform API base (e.g. https://api.chutes.ai)
 }
 
-// NewPreparer returns a Chutes Preparer configured with the given API key and chat path.
-func NewPreparer(apiKey, chatPath string) *Preparer {
-	return &Preparer{apiKey: apiKey, chatPath: chatPath}
+// NewPreparer returns a Chutes Preparer configured with the given API key,
+// chat path, and platform API base URL. The apiBaseURL is used for E2EE
+// invoke URL rewriting (the LLM inference and platform APIs use different hosts).
+func NewPreparer(apiKey, chatPath, apiBaseURL string) *Preparer {
+	return &Preparer{apiKey: apiKey, chatPath: chatPath, apiBaseURL: apiBaseURL}
 }
 
 // PrepareRequest injects the Authorization header into req. For Chutes E2EE
-// sessions, it also sets the E2EE headers and rewrites the URL path to
-// /e2e/invoke.
+// sessions, it also sets the E2EE headers and rewrites the full URL to the
+// platform API's /e2e/invoke endpoint.
 func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.ChutesE2EE, stream bool) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	if meta != nil {
@@ -262,7 +296,20 @@ func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.C
 		req.Header["X-E2E-Stream"] = []string{strconv.FormatBool(stream)}
 		req.Header["X-E2E-Path"] = []string{p.chatPath}
 		req.Header.Set("Content-Type", "application/octet-stream")
-		req.URL.Path = "/e2e/invoke"
+		// E2EE invoke is on the platform API (api.chutes.ai), not the
+		// LLM inference gateway (llm.chutes.ai). We must also set
+		// req.Host to match the rewritten URL host; http.NewRequestWithContext
+		// snapshots the original host into req.Host, which would otherwise
+		// override the URL host.
+		e2eURL, err := url.Parse(p.apiBaseURL + "/e2e/invoke")
+		if err != nil {
+			return fmt.Errorf("parse e2e invoke URL: %w", err)
+		}
+		if e2eURL.Scheme == "" || e2eURL.Host == "" {
+			return fmt.Errorf("invalid Chutes API base URL %q: must include scheme and host", p.apiBaseURL)
+		}
+		req.URL = e2eURL
+		req.Host = e2eURL.Host
 	}
 	return nil
 }

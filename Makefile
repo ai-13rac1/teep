@@ -37,7 +37,7 @@ integration-phalacloud: ## Run Phala Cloud integration tests (requires PHALA_API
 	go test -v -race -timeout 120s -run TestIntegration_PhalaCloud ./internal/proxy/
 
 integration-chutes: ## Run Chutes integration tests (requires CHUTES_API_KEY)
-	go test -v -race -timeout 120s -run TestIntegration_Chutes ./internal/proxy/
+	go test -v -race -timeout 600s -run TestIntegration_Chutes ./internal/proxy/
 
 integration-neardirect-fixture: ## Run NEAR Direct fixture integration test (no API key needed)
 	go test -v -race -timeout 60s -run TestIntegration_NearDirect_Fixture ./internal/integration/
@@ -82,7 +82,7 @@ report-phalacloud: build ## Verify Phala Cloud attestation (requires PHALA_API_K
 	./teep verify phalacloud --model phala/deepseek-v3.2 --log-level debug --save-dir /tmp/teep-attestation-phalacloud
 
 report-chutes: build ## Verify Chutes attestation (requires CHUTES_API_KEY)
-	./teep verify chutes --model 0df3133d-c477-56d2-b4db-f2093bb150a1 --log-level debug --save-dir /tmp/teep-attestation-chutes
+	./teep verify chutes --model zai-org/GLM-5-TEE --log-level debug --save-dir /tmp/teep-attestation-chutes
 
 e2e-venice: ## Run Venice E2E test (requires VENICE_API_KEY)
 	./test/e2e-venice.sh

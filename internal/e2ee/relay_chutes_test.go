@@ -78,9 +78,11 @@ func TestRelayStreamChutes(t *testing.T) {
 
 	kemCtB64, streamKey := simulateServerStreamInit(t, session)
 
-	// Build OpenAI-format JSON chunks that the server would encrypt.
-	chunk1 := `{"choices":[{"delta":{"content":"Hello"}}]}`
-	chunk2 := `{"choices":[{"delta":{"content":" world"}}]}`
+	// Build OpenAI-format SSE lines that the server would encrypt.
+	// The Chutes server encrypts the full SSE line including "data: " prefix
+	// and trailing newlines; the relay writes decrypted bytes verbatim.
+	chunk1 := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"
+	chunk2 := "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n"
 	sseInput := buildChutesSSE(t, kemCtB64, streamKey, []string{chunk1, chunk2})
 	t.Logf("SSE input length: %d bytes", len(sseInput))
 
