@@ -35,10 +35,12 @@ type E2EEMaterial struct {
 // pool without full re-attestation. Used by Chutes to avoid the expensive
 // /chutes/{id}/evidence + TDX verification roundtrip on every request.
 // MarkFailed records that an instance produced an error so the pool can
-// prefer other instances.
+// prefer other instances. Invalidate discards all cached material for a
+// chute, forcing a fresh fetch on the next request.
 type E2EEMaterialFetcher interface {
 	FetchE2EEMaterial(ctx context.Context, model string) (*E2EEMaterial, error)
 	MarkFailed(chuteID, instanceID string)
+	Invalidate(chuteID string)
 }
 
 // RequestPreparer injects provider-specific headers into an outgoing upstream
