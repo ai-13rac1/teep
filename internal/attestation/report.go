@@ -166,6 +166,14 @@ var NearcloudDefaultAllowFail = []string{
 	"cpu_gpu_chain",
 	"measured_model_weights",
 	"cpu_id_registry",
+	// TODO(e2ee_usable): e2ee_usable has a chicken-and-egg problem in the
+	// proxy path: the factor starts as Skip (pending live test), which
+	// BuildReport promotes to Fail when enforced, blocking the very request
+	// needed to prove E2EE works. Allowed to fail here until the
+	// interaction between report factors, proxy blocking, and live
+	// inference test factors (e2ee_usable, future tool-call test) is
+	// redesigned. See docs/plans/e2ee_usable_refactoring.md.
+	"e2ee_usable",
 	// Gateway factors (nearcloud only).
 	"gateway_tdx_hardware_config",
 	"gateway_tdx_boot_config",
@@ -201,6 +209,10 @@ var ChutesDefaultAllowFail = []string{
 	"compose_binding",
 	"sigstore_verification",
 	"event_log_integrity",
+	// TODO(e2ee_usable): same chicken-and-egg problem as nearcloud; see
+	// the comment in NearcloudDefaultAllowFail and
+	// docs/plans/e2ee_usable_refactoring.md.
+	"e2ee_usable",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.

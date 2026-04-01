@@ -805,7 +805,7 @@ func TestMergedAllowFailNearcloudGoDefaults(t *testing.T) {
 		"tdx_quote_present", "tdx_quote_structure",
 		"intel_pcs_collateral", "tdx_tcb_current",
 		"nvidia_payload_present", "nvidia_claims", "nvidia_nras_verified",
-		"e2ee_capable", "e2ee_usable", "tls_key_binding",
+		"e2ee_capable", "tls_key_binding",
 		"gateway_tdx_quote_present", "gateway_tdx_quote_structure",
 	}
 	afSet := make(map[string]bool, len(af))
