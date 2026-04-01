@@ -730,6 +730,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// After a successful E2EE roundtrip, promote the cached report's
 	// e2ee_usable factor from Skip to Pass so that subsequent report
 	// fetches reflect the live test result.
+	//
+	// TODO(e2ee_usable): This mutates a shared *VerificationReport pointer
+	// returned by cache.Get, which can race with concurrent requests reading
+	// the same report (e.g. /v1/tee/report or parallel chat requests).
+	// The report should be deep-copied before mutation, or the e2ee_usable
+	// lifecycle should be separated from the report factor system entirely.
+	// See docs/plans/e2ee_usable_refactoring.md.
 	if e2eeActive {
 		report.MarkE2EEUsable("E2EE roundtrip succeeded via proxy")
 		s.cache.Put(prov.Name, upstreamModel, report)
@@ -869,6 +876,10 @@ func (s *Server) handlePinnedChat(
 
 		// After a successful E2EE roundtrip on the pinned path,
 		// promote e2ee_usable from Skip to Pass in the cached report.
+		//
+		// TODO(e2ee_usable): Same cache mutation race as the non-pinned
+		// path — see the comment there and
+		// docs/plans/e2ee_usable_refactoring.md.
 		if report != nil {
 			report.MarkE2EEUsable("E2EE roundtrip succeeded via pinned connection")
 			s.cache.Put(prov.Name, upstreamModel, report)
