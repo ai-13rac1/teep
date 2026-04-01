@@ -206,7 +206,7 @@ func TestParseAttestationResponse_InvalidJSON(t *testing.T) {
 
 // --- FetchAttestation integration tests ---
 
-// twoStepServer creates a test server that handles both the /e2e/instances/
+// twoStepServer creates a test server that handles the /v1/models, /e2e/instances/,
 // and /chutes/.../evidence endpoints.
 func twoStepServer(t *testing.T, instancesResp, evidenceResp string) *httptest.Server {
 	t.Helper()
@@ -215,6 +215,9 @@ func twoStepServer(t *testing.T, instancesResp, evidenceResp string) *httptest.S
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.URL.Path == "/v1/models":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data": [{"id": "test/model", "chute_id": "00000000-0000-0000-0000-000000000001"}]}`))
 		case strings.HasPrefix(r.URL.Path, "/e2e/instances/"):
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(instancesResp))
@@ -237,8 +240,9 @@ func TestFetchAttestation_Success(t *testing.T) {
 	defer srv.Close()
 
 	a := chutes.NewAttester(srv.URL, "test-key")
+	a.SetModelsBase(srv.URL)
 	nonce := attestation.NewNonce()
-	raw, err := a.FetchAttestation(context.Background(), "default", nonce)
+	raw, err := a.FetchAttestation(context.Background(), "test/model", nonce)
 	if err != nil {
 		t.Fatalf("FetchAttestation: %v", err)
 	}
@@ -248,17 +252,27 @@ func TestFetchAttestation_Success(t *testing.T) {
 	if raw.SigningKey != "dGVzdC1wdWJrZXk=" {
 		t.Errorf("SigningKey = %q, want e2e_pubkey", raw.SigningKey)
 	}
+	if raw.ChuteID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("ChuteID = %q, want resolved UUID", raw.ChuteID)
+	}
 }
 
 func TestFetchAttestation_InstancesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error": "server error"}`))
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data": [{"id": "test/model", "chute_id": "00000000-0000-0000-0000-000000000001"}]}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error": "server error"}`))
+		}
 	}))
 	defer srv.Close()
 
 	a := chutes.NewAttester(srv.URL, "test-key")
-	_, err := a.FetchAttestation(context.Background(), "default", attestation.NewNonce())
+	a.SetModelsBase(srv.URL)
+	_, err := a.FetchAttestation(context.Background(), "test/model", attestation.NewNonce())
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
 	}
@@ -277,6 +291,8 @@ func TestFetchAttestation_SendsCorrectRequests(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.URL.Path == "/v1/models":
+			_, _ = w.Write([]byte(`{"data": [{"id": "test/model", "chute_id": "00000000-0000-0000-0000-000000000001"}]}`))
 		case strings.HasPrefix(r.URL.Path, "/e2e/instances/"):
 			_, _ = w.Write([]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": []}]}`))
 		case strings.Contains(r.URL.Path, "/evidence"):
@@ -287,30 +303,36 @@ func TestFetchAttestation_SendsCorrectRequests(t *testing.T) {
 	defer srv.Close()
 
 	a := chutes.NewAttester(srv.URL, "sk-test-123")
+	a.SetModelsBase(srv.URL)
 	nonce := attestation.NewNonce()
-	_, err := a.FetchAttestation(context.Background(), "deepseek-ai/DeepSeek-V3", nonce)
+	_, err := a.FetchAttestation(context.Background(), "test/model", nonce)
 	if err != nil {
 		t.Fatalf("FetchAttestation: %v", err)
 	}
 
-	if len(requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d: %v", len(requests), requests)
+	if len(requests) != 3 {
+		t.Fatalf("expected 3 requests (models + instances + evidence), got %d: %v", len(requests), requests)
 	}
 
-	// Step 1: instances request
-	if !strings.Contains(requests[0], "/e2e/instances/") {
-		t.Errorf("first request should be instances, got: %s", requests[0])
+	// Step 0: models resolution request
+	if !strings.Contains(requests[0], "/v1/models") {
+		t.Errorf("first request should be models, got: %s", requests[0])
+	}
+
+	// Step 1: instances request (uses resolved UUID)
+	if !strings.Contains(requests[1], "/e2e/instances/") {
+		t.Errorf("second request should be instances, got: %s", requests[1])
 	}
 
 	// Step 2: evidence request with nonce
-	if !strings.Contains(requests[1], "/chutes/") || !strings.Contains(requests[1], "/evidence") {
-		t.Errorf("second request should be evidence, got: %s", requests[1])
+	if !strings.Contains(requests[2], "/chutes/") || !strings.Contains(requests[2], "/evidence") {
+		t.Errorf("third request should be evidence, got: %s", requests[2])
 	}
-	if !strings.Contains(requests[1], "nonce="+nonce.Hex()) {
-		t.Errorf("evidence request should contain nonce, got: %s", requests[1])
+	if !strings.Contains(requests[2], "nonce="+nonce.Hex()) {
+		t.Errorf("evidence request should contain nonce, got: %s", requests[2])
 	}
 
-	// Both requests should have auth
+	// All requests should have auth
 	for i, auth := range authHeaders {
 		if auth != "Bearer sk-test-123" {
 			t.Errorf("request %d Authorization = %q, want Bearer sk-test-123", i, auth)

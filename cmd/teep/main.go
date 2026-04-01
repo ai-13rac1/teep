@@ -766,6 +766,14 @@ func testE2EEChutes(ctx context.Context, raw *attestation.RawAttestation, cp *co
 		return &attestation.E2EETestResult{Attempted: true, Err: errors.New("chutes E2EE: e2e_nonce absent from attestation")}
 	}
 
+	// Use the resolved chute UUID for the X-Chute-Id header.
+	// FetchAttestation resolves model names to UUIDs and stores the
+	// result in raw.ChuteID.
+	chuteID := raw.ChuteID
+	if chuteID == "" {
+		chuteID = model // fallback for tests with manually-constructed RawAttestation
+	}
+
 	body, err := json.Marshal(map[string]any{
 		"model":    model,
 		"messages": []map[string]string{{"role": "user", "content": "Say hello"}},
@@ -790,7 +798,7 @@ func testE2EEChutes(ctx context.Context, raw *attestation.RawAttestation, cp *co
 		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("build request: %w", err)}
 	}
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
-	req.Header.Set("X-Chute-Id", model)
+	req.Header.Set("X-Chute-Id", chuteID)
 	req.Header.Set("X-Instance-Id", raw.InstanceID)
 	req.Header["X-E2E-Nonce"] = []string{raw.E2ENonce}
 	req.Header["X-E2E-Stream"] = []string{"true"}

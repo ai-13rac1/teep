@@ -25,13 +25,14 @@ func skipChutesIntegration(t *testing.T) {
 	}
 }
 
-// chutesIntegrationModel returns the chute UUID to use, defaulting to a
-// known-good model if CHUTES_E2EE_MODEL is unset.
+// chutesIntegrationModel returns the model name or chute UUID to use,
+// defaulting to a known-good TEE model if CHUTES_E2EE_MODEL is unset.
+// Supports human-readable names (resolved via /v1/models) or UUIDs.
 func chutesIntegrationModel() string {
 	if m := os.Getenv("CHUTES_E2EE_MODEL"); m != "" {
 		return m
 	}
-	return "0df3133d-c477-56d2-b4db-f2093bb150a1"
+	return "deepseek-ai/DeepSeek-V3-0324-TEE"
 }
 
 // integrationChutesE2EEConfig returns a config pointing at the live Chutes API

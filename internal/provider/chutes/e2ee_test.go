@@ -25,6 +25,7 @@ func chutesRaw(t *testing.T, pubB64, instanceID, e2eNonce string) *attestation.R
 		SigningKey: pubB64,
 		InstanceID: instanceID,
 		E2ENonce:   e2eNonce,
+		ChuteID:    "chutes-model-uuid",
 	}
 }
 
@@ -63,8 +64,8 @@ func TestChutesE2EE_EncryptRequest(t *testing.T) {
 	t.Logf("ChuteID=%q InstanceID=%q E2ENonce=%q payload_len=%d",
 		meta.ChuteID, meta.InstanceID, meta.E2ENonce, len(encPayload))
 
-	if meta.ChuteID != "chutes-model" {
-		t.Errorf("ChuteID = %q, want chutes-model", meta.ChuteID)
+	if meta.ChuteID != "chutes-model-uuid" {
+		t.Errorf("ChuteID = %q, want chutes-model-uuid", meta.ChuteID)
 	}
 	if meta.InstanceID != "inst-1" {
 		t.Errorf("InstanceID = %q, want inst-1", meta.InstanceID)
@@ -106,6 +107,22 @@ func TestChutesE2EE_EncryptRequest_MissingE2ENonce(t *testing.T) {
 	t.Logf("error (expected): %v", err)
 }
 
+func TestChutesE2EE_EncryptRequest_MissingChuteID(t *testing.T) {
+	pubB64 := mlkemModelPubB64(t)
+	raw := &attestation.RawAttestation{
+		SigningKey: pubB64,
+		InstanceID: "inst-1",
+		E2ENonce:   "nonce-1",
+		ChuteID:    "",
+	}
+	enc := chutes.NewE2EE()
+	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw)
+	if err == nil {
+		t.Fatal("expected error for missing ChuteID")
+	}
+	t.Logf("error (expected): %v", err)
+}
+
 func TestChutesE2EE_EncryptRequest_InvalidSigningKey(t *testing.T) {
 	raw := chutesRaw(t, "not-base64!", "inst-1", "nonce-1")
 	enc := chutes.NewE2EE()
@@ -116,13 +133,14 @@ func TestChutesE2EE_EncryptRequest_InvalidSigningKey(t *testing.T) {
 	t.Logf("error (expected): %v", err)
 }
 
-func TestChutesE2EE_EncryptRequest_InvalidBody(t *testing.T) {
+func TestChutesE2EE_EncryptRequest_NonJSONBody(t *testing.T) {
 	pubB64 := mlkemModelPubB64(t)
 	raw := chutesRaw(t, pubB64, "inst-1", "nonce-1")
 	enc := chutes.NewE2EE()
+	// EncryptChatRequestChutes needs valid JSON to inject e2e_response_pk,
+	// so a non-JSON body must fail.
 	_, _, _, err := enc.EncryptRequest([]byte("not json"), raw)
 	if err == nil {
-		t.Fatal("expected error for invalid body")
+		t.Fatal("expected error for non-JSON body")
 	}
-	t.Logf("error (expected): %v", err)
 }

@@ -82,26 +82,47 @@ type instanceEvidence struct {
 
 // Attester fetches attestation data from the Chutes direct API.
 type Attester struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL  string
+	apiKey   string
+	client   *http.Client
+	resolver *ModelResolver
 }
 
 // NewAttester returns a Chutes Attester configured with the given base URL
-// and API key.
+// and API key. modelsBase is the URL for /v1/models model-name resolution
+// (defaults to https://llm.chutes.ai if empty).
 func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
+	client := config.NewAttestationClient(offline...)
 	return &Attester{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		client:  config.NewAttestationClient(offline...),
+		baseURL:  baseURL,
+		apiKey:   apiKey,
+		client:   client,
+		resolver: NewModelResolver("", apiKey, client),
 	}
 }
 
+// SetModelsBase overrides the URL used for /v1/models model-name resolution.
+// Primarily for testing.
+func (a *Attester) SetModelsBase(modelsBase string) {
+	a.resolver = NewModelResolver(modelsBase, a.apiKey, a.client)
+}
+
 // FetchAttestation fetches TEE attestation from Chutes using the two-step
-// protocol: discover instances, then fetch evidence.
+// protocol: discover instances, then fetch evidence. The model parameter
+// can be a human-readable name (e.g. "deepseek-ai/DeepSeek-V3-0324-TEE")
+// or a chute UUID; names are resolved via /v1/models automatically.
 func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
+	// Resolve human-readable model name to chute UUID.
+	chuteID, err := a.resolver.Resolve(ctx, model)
+	if err != nil {
+		return nil, fmt.Errorf("chutes: resolve model: %w", err)
+	}
+	if chuteID != model {
+		slog.InfoContext(ctx, "chutes: resolved model name to chute UUID", "model", model, "chute_id", chuteID)
+	}
+
 	// Step 1: Discover instances with e2e public keys.
-	instancesURL, err := url.Parse(a.baseURL + instancesPath + url.PathEscape(model))
+	instancesURL, err := url.Parse(a.baseURL + instancesPath + url.PathEscape(chuteID))
 	if err != nil {
 		return nil, fmt.Errorf("chutes: parse instances URL: %w", err)
 	}
@@ -113,7 +134,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	}
 
 	// Step 2: Fetch evidence with our nonce.
-	evidencePath := fmt.Sprintf(attestationPath, url.PathEscape(model))
+	evidencePath := fmt.Sprintf(attestationPath, url.PathEscape(chuteID))
 	evidenceURL, err := url.Parse(a.baseURL + evidencePath)
 	if err != nil {
 		return nil, fmt.Errorf("chutes: parse evidence URL: %w", err)
@@ -128,7 +149,12 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("chutes: fetch evidence: %w", err)
 	}
 
-	return ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	if err != nil {
+		return nil, err
+	}
+	raw.ChuteID = chuteID
+	return raw, nil
 }
 
 // ParseAttestationResponse parses the two Chutes API response bodies (instances
