@@ -41,8 +41,7 @@ func TestNoncePool_Take(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &fakeResolver{id: chuteID}
-	pool := NewNoncePool(srv.URL, "test-key", nil, srv.Client())
-	pool.resolver = resolver
+	pool := NewNoncePool(srv.URL, "test-key", resolver, srv.Client())
 
 	ctx := context.Background()
 
@@ -103,8 +102,7 @@ func TestNoncePool_PrefersHealthyInstances(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &fakeResolver{id: chuteID}
-	pool := NewNoncePool(srv.URL, "test-key", nil, srv.Client())
-	pool.resolver = resolver
+	pool := NewNoncePool(srv.URL, "test-key", resolver, srv.Client())
 
 	ctx := context.Background()
 
@@ -146,8 +144,7 @@ func TestNoncePool_ExpiresNonces(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &fakeResolver{id: chuteID}
-	pool := NewNoncePool(srv.URL, "test-key", nil, srv.Client())
-	pool.resolver = resolver
+	pool := NewNoncePool(srv.URL, "test-key", resolver, srv.Client())
 
 	ctx := context.Background()
 
@@ -197,8 +194,7 @@ func TestNoncePool_Invalidate(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &fakeResolver{id: chuteID}
-	pool := NewNoncePool(srv.URL, "test-key", nil, srv.Client())
-	pool.resolver = resolver
+	pool := NewNoncePool(srv.URL, "test-key", resolver, srv.Client())
 
 	ctx := context.Background()
 
@@ -237,8 +233,7 @@ func TestNoncePool_ConcurrentTake(t *testing.T) {
 	defer srv.Close()
 
 	resolver := &fakeResolver{id: chuteID}
-	pool := NewNoncePool(srv.URL, "test-key", nil, srv.Client())
-	pool.resolver = resolver
+	pool := NewNoncePool(srv.URL, "test-key", resolver, srv.Client())
 
 	ctx := context.Background()
 	var mu sync.Mutex

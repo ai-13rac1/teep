@@ -33,9 +33,9 @@ type NoncePool struct {
 	resolver modelResolver
 
 	mu       sync.Mutex
-	refresh  singleflight.Group          // per-chute refresh dedup
-	pools    map[string]*chutePool       // keyed by chute UUID
-	failures map[string]map[string]int   // chute UUID → instance ID → failure count
+	refresh  singleflight.Group        // per-chute refresh dedup
+	pools    map[string]*chutePool     // keyed by chute UUID
+	failures map[string]map[string]int // chute UUID → instance ID → failure count
 }
 
 // chutePool holds cached instances and their remaining nonces for one chute.
@@ -52,7 +52,14 @@ type poolInstance struct {
 }
 
 // NewNoncePool creates a NoncePool that fetches from the given base URL.
+// Panics if resolver or client is nil (programmer error caught at startup).
 func NewNoncePool(baseURL, apiKey string, resolver modelResolver, client *http.Client) *NoncePool {
+	if resolver == nil {
+		panic("noncepool: resolver must not be nil")
+	}
+	if client == nil {
+		panic("noncepool: client must not be nil")
+	}
 	return &NoncePool{
 		baseURL:  baseURL,
 		apiKey:   apiKey,
