@@ -1,85 +1,63 @@
-# Dstack Integrity Chain Issues
+# Dstack Integrity Chain: In-Band Discovery Gap
 
-Many dstack-based inference providers already publish two useful artifacts with their attestation responses:
+This document analyzes the gap between teep's ability to *enforce* dstack boot-chain measurements and the ability to *maintain* those measurements reliably over time. The enforcement machinery works today. The problem is operational: no provider publishes the expected measurement values in a signed, machine-readable format that teep can consume automatically.
 
-- a TDX quote
-- a Docker Compose manifest bound into `MRCONFIGID`
+Teep currently enforces measurement allowlists when configured (see [Measurement Allowlists](../measurement_allowlists.md)), but all allowlist values must be sourced and maintained out-of-band by the teep operator. Provider infrastructure changes—firmware updates, dstack upgrades, kernel upgrades, hardware reconfigurations—silently change the expected values, with no advance notice and no authenticated channel for teep to discover the new ones.
 
-That is enough for teep to prove that the attested CVM declared a specific compose file, but it is **not** enough to prove that the CVM booted the expected dstack OS image, ran the expected kernel and root filesystem, and then faithfully executed that compose file.
+## The Problem
 
-The missing piece is the base-image trust chain:
+A TEE attestation proves that the software running inside a confidential VM matches specific measurements. Dstack-based providers (Venice, Nearcloud, Neardirect) produce Intel TDX quotes containing these measurements, and teep can verify them against operator-configured allowlists.
 
-- `MRSEAM` for the Intel TDX module version
-- `MRTD` for the TD virtual firmware image
-- `RTMR0`, `RTMR1`, and `RTMR2` for the measured boot configuration, kernel, initrd, and root filesystem
+Dstack's TDX measurement chain includes registers that identify the firmware, kernel, hardware configuration, and the docker compose manifest of the confidential VM.
 
-Without published golden values for those registers, teep can verify application-layer binding, but it cannot verify the full dstack boot process. For a security product, that is a high-severity residual risk: a malicious lower stack can declare it is using the expected compose config hash while actually running different code.
+In the case of NearAI, the docker compose manifest contents are provided in-line, which allows the images that it uses to be fully authenticated via Sigstore, even if they change dynamically. However, there is no signed release manifest that binds the usage of a specific dstack base image version and hardware configuration to expected current TDX measurement values. Unlike the docker compose manifest, no NearAI API fields provide base dstack or hardware configuration profiles in-band that can be cross-checked in Sigstore.
 
-## Affected teep validation factors
+This creates three operational problems:
 
-Base-image measurement enforcement:
+1. **Silent breakage.** When a provider updates its dstack image, kernel, or hardware configuration, measurement values change without notice. Teep fails closed, blocking inference until the operator discovers the change and updates allowlists manually.
 
-- **`tdx_quote_structure`** — enforces `MRTD` and `MRSEAM` allowlists for the
-    inference CVM when `mrtd_allow` and `mrseam_allow` are configured
-- **`gateway_tdx_quote_structure`** — enforces `MRTD` and `MRSEAM` allowlists
-    for the gateway CVM when `gateway_mrtd_allow` and `gateway_mrseam_allow`
-    are configured
+2. **Forced trade-off between safety and availability.** Operators must choose between strict enforcement (fail closed on any unexpected value, accepting unplanned outages) and relaxed enforcement (marking measurements `allow_fail`, which permits unverified infrastructure changes to pass silently).
 
-Measured-boot and runtime replay enforcement:
-
-- **`event_log_integrity`** — replays the inference CVM event log and enforces
-    `RTMR0`-`RTMR3` allowlists when configured; this gap exists when providers do
-    not publish authenticated baselines for `RTMR0`-`RTMR2`
-- **`gateway_event_log_integrity`** — replays the gateway CVM event log and
-    enforces `gateway_rtmr0_allow`-`gateway_rtmr3_allow`; this gap exists when
-    providers do not publish authenticated gateway baselines for `RTMR0`-`RTMR2`
-
-Application-layer factors that remain necessary but are not sufficient:
-
-- **`compose_binding`** — proves `MRCONFIGID` matches the published
-    `app_compose`, but does not authenticate the underlying dstack boot image,
-    kernel, or root filesystem
-- **`gateway_compose_binding`** — gateway equivalent of `compose_binding`; it
-    can pass even when the gateway lower stack is not independently authenticated
-
----
+3. **No way to distinguish upgrades from compromises.** Bootstrapping allowlist values from observed attestation reports requires trusting the environment at the time of observation. Without an authenticated source, a legitimate provider upgrade and a compromised lower stack both look the same to teep: unexpected measurement drift.
 
 ## TDX in One Page
+
+Understanding the in-band discovery gap requires knowing what TDX actually measures and why different registers have different maintenance burdens. This section provides the necessary background.
 
 Intel TDX does not know what Docker Compose is. It does not pull container images, parse YAML, or orchestrate workloads. TDX does one narrower but critical job: it measures VM state and produces a hardware-signed quote containing those measurements.
 
 The key registers are:
 
-- `MRSEAM`: identity of the Intel TDX module
-- `MRTD`: measurement of the initial TD image, effectively the virtual firmware root of trust
-- `RTMR0`: measured hardware and boot-policy configuration
-- `RTMR1`: measured kernel and boot-loader state
-- `RTMR2`: measured kernel command line, initrd, root filesystem related state
-- `RTMR3`: runtime and application-layer events, replayable from the event log
-- `MRCONFIGID`: 48-byte configuration field included in the quote
-- `REPORTDATA`: caller-bound cryptographic binding field used for nonce and key binding
+| Register | What it measures | What determines its value |
+|----------|-----------------|--------------------------|
+| `MRSEAM` | Intel TDX module identity | TDX module version and platform generation |
+| `MRTD` | Virtual firmware (OVMF) image | Dstack OS image version (deterministic per build) |
+| `RTMR0` | Hardware and boot-policy config | vCPU count, memory size, GPU count, QEMU version |
+| `RTMR1` | Linux kernel binary | Dstack image build |
+| `RTMR2` | Kernel cmdline, initrd, rootfs | Rootfs configuration per deployment |
+| `RTMR3` | Runtime events | Compose hash, instance ID, key provider (replayable from event log) |
+| `MRCONFIGID` | 48-byte config field | Set by dstack to `0x01 \|\| SHA256(app_compose)` |
+| `REPORTDATA` | Caller-bound binding field | Nonce and TLS key binding |
 
-The security meaning of those fields is not symmetric:
+The security meaning of these registers is not symmetric:
 
-- `MRSEAM`, `MRTD`, and `RTMR0-2` establish whether the **platform and guest boot chain** are trustworthy
-- `RTMR3` and `MRCONFIGID` establish whether **runtime metadata and app configuration** match what dstack reported
+- `MRSEAM`, `MRTD`, and `RTMR0`–`RTMR2` establish whether the **platform and guest boot chain** are trustworthy — the firmware, kernel, and hardware configuration that run before any application code
+- `RTMR3` and `MRCONFIGID` establish whether **runtime metadata and app configuration** match what dstack reported — the Docker Compose manifest and runtime events
 
-This distinction is the core of the gap. A correct `MRCONFIGID` does not compensate for an unverified `MRTD` or `RTMR1`.
+This distinction is the root of the maintenance problem. The application-layer registers (`RTMR3`, `MRCONFIGID`) are verified in-band from the attestation evidence itself. The boot-chain registers (`MRSEAM`, `MRTD`, `RTMR0`–`RTMR2`) must be compared against externally-sourced expected values—and those expected values are what providers do not publish.
 
 ## Full Dstack TDX Authentication
 
-dstack’s attestation model is documented in the upstream [dstack attestation guide](https://github.com/Dstack-TEE/dstack/blob/master/attestation.md) and in Phala’s operator-facing documentation, including [Trust Center Technical Details](https://docs.phala.com/dstack/trust-center-technical) and [Verify the Platform](https://docs.phala.com/phala-cloud/attestation/verify-the-platform).
-
-The intended verification story is:
+Dstack's attestation model layers application-level bindings on top of TDX's hardware measurements. The upstream [dstack attestation guide](https://github.com/Dstack-TEE/dstack/blob/master/attestation.md) and Phala's [Trust Center Technical Details](https://docs.phala.com/dstack/trust-center-technical) and [Verify the Platform](https://docs.phala.com/phala-cloud/attestation/verify-the-platform) documentation describe the intended verification story:
 
 1. build or reproduce the dstack base image
-2. derive golden values for `MRTD`, `RTMR0`, `RTMR1`, and `RTMR2` for a specific deployment shape
-3. identify the expected `MRSEAM` for the deployed TDX module version
-4. verify the quote against those golden values
-5. replay the event log to validate `RTMR3`
-6. verify that `MRCONFIGID` binds the published compose manifest to the attested TD
+2. derive expected values for firmware and boot-chain registers for a specific deployment shape
+3. identify the expected Intel TDX module version
+4. verify the quote against those expected values
+5. replay the event log to validate runtime measurements
+6. verify that the compose manifest is bound to the attested TD
 
-In other words, dstack attestation is meant to combine **base-image measurements** and **runtime/application measurements**. The compose file is only one input into that larger chain.
+In other words, dstack attestation combines **boot-chain measurements** (is this the right platform?) with **application measurements** (is this the right workload?). The compose file is only one input into that larger chain.
 
 The trust chain looks like this:
 
@@ -94,45 +72,46 @@ graph TD
     F --> H["RTMR3 event log extensions"]
     F --> I["Containers launched from compose"]
 
-    style A fill:#f66,stroke:#333
-    style B fill:#f66,stroke:#333
-    style C fill:#f96,stroke:#333
-    style D fill:#f96,stroke:#333
-    style E fill:#f96,stroke:#333
+    style A fill:#9f9,stroke:#333
+    style B fill:#9f9,stroke:#333
+    style C fill:#ff9,stroke:#333
+    style D fill:#ff9,stroke:#333
+    style E fill:#ff9,stroke:#333
     style F fill:#ff9,stroke:#333
     style G fill:#9f9,stroke:#333
     style H fill:#9f9,stroke:#333
-    style I fill:#ff9,stroke:#333
+    style I fill:#9f9,stroke:#333
 ```
 
-If teep verifies only the green part of that chain, it is trusting the yellow and orange parts without evidence.
+Green nodes are either verifiable from authoritative sources (MRSEAM from Intel, MRTD from dstack reproducible release builds, Sigstore docker image signatures) or already verified in-band (MRCONFIGID, RTMR3). Yellow nodes can be pinned from observed attestation reports, but those pins are **out-of-band and fragile** — they break without warning when a provider changes hardware configuration, kernel version, or rootfs layout.
 
-That creates several realistic failure modes:
+This diagram illustrates the core of the in-band discovery gap. Without measurement allowlists configured, teep verifies only the green nodes — application-layer bindings and compose-file docker container images. With allowlists configured, teep enforces the full chain, and can even authenticate dynamic changes to docker compose file images via online sigstore checks.
 
-- a modified TDX module could report quote contents that look valid enough for policy unless `MRSEAM` is pinned
-- a substituted firmware image could boot a different kernel while preserving the expected runtime metadata unless `MRTD` is pinned
-- a modified kernel or root filesystem could lie about orchestration behavior while still emitting the expected compose hash unless `RTMR0-2` are pinned
-- a malicious runtime could set `MRCONFIGID` to the expected compose hash and extend `RTMR3` consistently while running different code
+But the yellow nodes require externally-sourced expected values, and the lack of an authenticated delivery channel for those values creates the operational tension described in [The Problem](#the-problem) above:
 
-For teep, the consequence is direct: confidential traffic could be forwarded to a TD whose application metadata looks right, but whose lower stack is untrusted.
+- **Strict pins** cause teep to fail closed when a provider changes infrastructure, blocking inference until the operator updates allowlists
+- **Relaxed pins** (via `allow_fail`) let measurement drift pass silently, potentially masking a lower-stack compromise as a routine update
+- **Per-deployment-class variation** in RTMR0 and RTMR2 means a fleet with multiple hardware profiles needs multiple pinned values, all maintained manually
 
-## Teep Dstack Verification
+## Teep Dstack Verification Today
 
-When a provider supplies a quote, event log, and compose manifest, teep does several meaningful checks:
+When a provider supplies a quote, event log, and compose manifest, teep performs both application-layer and boot-chain verification:
 
 - verify the TDX quote structure and PCS collateral
 - verify caller binding through `REPORTDATA` where the provider-specific protocol supports it
+- enforce `MRSEAM` and `MRTD` allowlists when configured (pinnable from Intel and dstack sources respectively)
+- enforce `RTMR0`–`RTMR2` allowlists when configured (pinnable from observed reports via `--update-config`)
 - verify `MRCONFIGID` against the published compose manifest
 - replay the event log and check `RTMR3` consistency
-- inspect compose-listed images and apply repository allowlists and supply-chain checks such as Sigstore and Rekor
+- inspect compose-listed images and apply repository allowlists and supply-chain signature checks via Sigstore and Rekor
 
-Those controls matter. They provide application-layer assurance and supply-chain visibility for the images named in the compose file.
+This provides meaningful coverage of both the boot chain and the application layer. The limitation is not in teep's enforcement capability but in the **discovery and maintenance** of the values it enforces.
 
-However, if the provider does **not** publish golden values for `MRSEAM`, `MRTD`, `RTMR0`, `RTMR1`, and `RTMR2`, teep cannot actually ensure that the docker compose file is actually used: an attacker with hypervisor-level control could preserve the expected compose binding while substituting the firmware, kernel, initrd, or root filesystem.
+Because providers do not publish authenticated measurement baselines in-band, teep operators must either derive values from source (feasible for `MRSEAM` and `MRTD`, difficult for `RTMR0`–`RTMR2` without hardware specs) or bootstrap them from observation (`teep verify --update-config`). Either way, the operator bears the burden of detecting and responding to legitimate infrastructure changes, with no automated mechanism to distinguish a routine dstack upgrade from a compromised lower stack.
 
-### What Providers Must Publish
+### What Providers Should Publish In-Band
 
-To let teep authenticate the full dstack boot process, providers need to publish enough information for an operator or client to independently validate both the base image and the workload layer.
+Teep can enforce measurements today, but the enforcement is only as good as the operator's ability to source and maintain allowlist values. To make this reliable, providers should publish measurement baselines **in-band** as part of their attestation or image metadata, in a format teep can consume automatically.
 
 At minimum, a provider should publish:
 
@@ -144,11 +123,11 @@ At minimum, a provider should publish:
 6. the raw `app_compose` manifests for both gateway and model CVMs where both exist
 7. the image digests and provenance expectations for every compose-listed component image
 
-That publication set lets teep treat the quote as a full chain-of-trust object rather than an application metadata carrier.
+That publication set would let teep automatically resolve and validate measurement baselines instead of relying on operator-maintained pins.
 
-## Recommended Publication Model
+## Recommended In-Band Publication Model
 
-The cleanest approach is to publish a signed, versioned measurement manifest alongside the compose and image provenance materials.
+The cleanest approach is to publish a signed, versioned measurement manifest alongside the compose and image provenance materials. This is the key missing piece: an authenticated, machine-readable format that teep can fetch and verify without operator intervention.
 
 ### Recommended Manifest Contents
 
@@ -200,24 +179,25 @@ With authenticated measurement manifests in place, teep could:
 7. verify dstack base and compose-listed images against repository policy and Sigstore/Rekor expectations
 8. block the request if any link in that chain fails
 
-That is the end state teep needs: fail-closed verification of both the **boot image** and the **application payload**.
+That is the end state teep needs: fail-closed verification of both the **boot image** and the **application payload**, with measurement baselines that update reliably when providers roll out infrastructure changes.
 
 ## Practical Recommendations
 
 For providers:
 
-1. publish reproducible build guidance or immutable references for the dstack base image
-2. publish per-deployment-class golden values for `MRSEAM`, `MRTD`, and `RTMR0-2`
-3. publish those values in a signed, versioned machine-readable manifest
-4. bind that manifest to the same release lifecycle as the compose file and component image digests
-5. document how rollouts and measurement rotation work so verifiers can safely accept old and new values during controlled upgrades
+1. publish measurement baselines in-band as part of image metadata or an API endpoint, in a signed and machine-readable format
+2. include per-deployment-class values for `MRSEAM`, `MRTD`, `RTMR0`, `RTMR1`, and `RTMR2`
+3. bind baseline publication to the same release lifecycle as the compose file and component image digests
+4. announce measurement changes **before** rolling out infrastructure updates, so verifiers can pre-configure new allowlist values
+5. publish reproducible build guidance or immutable references for the dstack base image so that `MRTD` and `RTMR1` can be independently derived
 
 For builders using teep:
 
-1. treat compose binding as necessary but insufficient
-2. where providers do not publish authenticated baselines, pin the currently observed measurement values in teep policy for both inference and gateway hosts using `mrseam_allow`, `mrtd_allow`, `rtmr0_allow`, `rtmr1_allow`, `rtmr2_allow`, and the corresponding `gateway_mrseam_allow`, `gateway_mrtd_allow`, `gateway_rtmr0_allow`, `gateway_rtmr1_allow`, `gateway_rtmr2_allow` settings
-3. treat that pinning workflow as a stopgap that detects unexpected measurement drift, not as proof of private inference, because observed values are only truly trustworthy when they come from a reproducibly built and independently verifiable image
-4. require provider-published measurement manifests before claiming full dstack integrity
+1. configure measurement allowlists using `teep verify --update-config` (see [Measurement Allowlists](../measurement_allowlists.md) for details)
+2. cross-check `MRSEAM` against Intel-published TDX module releases and `MRTD` against dstack reproducible builds where possible
+3. pin `RTMR0`–`RTMR2` from observed values as a drift-detection measure; understand that observed-value pins detect unexpected changes but are not independently verifiable without provider-published hardware configurations
+4. treat compose binding as necessary but insufficient on its own
+5. when in-band authenticated baselines become available, prefer them over manual pinning
 
 ---
 
@@ -225,7 +205,7 @@ For builders using teep:
 
 Investigation of GitHub source code, release artifacts, and third-party verifiers
 reveals that several register values **can** be determined from public sources
-today, even though neardirect and nearcloud do not explicitly publish them.
+today, even though neardirect and nearcloud do not explicitly publish them in-band.
 
 ### MRSEAM: Fully Determinable from Intel Releases
 
