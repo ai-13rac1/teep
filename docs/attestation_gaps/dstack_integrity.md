@@ -10,7 +10,7 @@ A TEE attestation proves that the software running inside a confidential VM matc
 
 Dstack's TDX measurement chain includes registers that identify the firmware, kernel, hardware configuration, and the docker compose manifest of the confidential VM.
 
-In the case of NearAI, the docker compose manifest contents are provided in-line, which allows the images that it uses to be fully authenticated via Sigstore, even if they change dynamically. However, there is no signed release manifest that binds the usage of a specific dstack base image version and hardware configuration to expected current TDX measurement values. Unlike the docker compose manifest, no API fields  provide base dstack or hardware config profiles in-band such that they can be cross-checked in Sigstore.
+In the case of NearAI, the docker compose manifest contents are provided in-line, which allows the images that it uses to be fully authenticated via Sigstore, even if they change dynamically. However, there is no signed release manifest that binds the usage of a specific dstack base image version and hardware configuration to expected current TDX measurement values. Unlike the docker compose manifest, no NearAI API fields provide base dstack or hardware configuration profiles in-band that can be cross-checked in Sigstore.
 
 This creates three operational problems:
 
@@ -83,7 +83,7 @@ graph TD
     style I fill:#9f9,stroke:#333
 ```
 
-Green nodes are either verifiable from authoritative sources (MRSEAM from Intel, MRTD from dstack reproducible release builds, Sigstore docker image signatues) or already verified in-band (MRCONFIGID, RTMR3). Yellow nodes can be pinned from observed attestation reports, but those pins are **out-of-band and fragile** — they break without warning when a provider changes hardware configuration, kernel version, or rootfs layout.
+Green nodes are either verifiable from authoritative sources (MRSEAM from Intel, MRTD from dstack reproducible release builds, Sigstore docker image signatures) or already verified in-band (MRCONFIGID, RTMR3). Yellow nodes can be pinned from observed attestation reports, but those pins are **out-of-band and fragile** — they break without warning when a provider changes hardware configuration, kernel version, or rootfs layout.
 
 This diagram illustrates the core of the in-band discovery gap. Without measurement allowlists configured, teep verifies only the green nodes — application-layer bindings and compose-file docker container images. With allowlists configured, teep enforces the full chain, and can even authenticate dynamic changes to docker compose file images via online sigstore checks.
 
