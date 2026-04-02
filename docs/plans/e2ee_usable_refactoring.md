@@ -25,6 +25,9 @@ part of PR #33 review fixes:
 | `6de38de` | Document cache mutation race with TODO comments at both `MarkE2EEUsable` call sites | S1 (documented, not yet fixed) |
 | `2ac5f5a` | Validate Chutes `apiBaseURL` has scheme and host before E2EE URL rewrite | S3 (done) |
 | `a9850b9` | Require `ChuteID` in `testE2EEChutes` instead of falling back to model name | S4 (done) |
+| (chutes-reliability) | `ParseAttestationResponse` iterates evidence entries to match known instances | New: fleet dynamics fix |
+| (chutes-reliability) | Retry loop (up to 3 attempts) for Chutes E2EE upstream failures with instance failover | New: transport-level retry |
+| (chutes-reliability) | Integration test client timeout increased from 120s to 5 minutes | Test infra |
 
 These commits resolve P1 (chicken-and-egg blocking) by making `e2ee_usable`
 allowed-to-fail for all providers. The remaining short-term work (steps 2–4,
@@ -173,6 +176,35 @@ behavior is:
 or prevent future requests. A decryption failure is treated as a transient
 error for the current request only.
 
+### Chutes Instance Retry Loop (current state)
+
+A Chutes-specific retry loop (`chutesMaxAttempts = 3`) in
+`handleChatCompletions` wraps the body-build → upstream-request cycle. It
+handles **transport-level** failures (connection errors, HTTP 429/500-504)
+by marking the failed instance via `NoncePool.MarkFailed(chuteID,
+instanceID)`, zeroing crypto material via `zeroE2EESessions`, and retrying
+with a fresh nonce/key from a different instance.
+
+This is distinct from the plan's post-relay enforcement (step 4), which
+covers **cryptographic** failures (decryption failed after a successful HTTP
+response). The retry loop runs *before* the relay; post-relay enforcement
+runs *after* it.
+
+**Hazard — escalation gap**: When all 3 retry attempts fail, the current
+implementation returns HTTP 502 to the client but does NOT mark the
+provider+model as persistently failed. The next request will retry from
+scratch (via the nonce pool, which deprioritizes but does not remove
+failed instances). Once the E2EE state machine (long-term step 1) is
+implemented, retry exhaustion should escalate to
+`E2EETracker.MarkFailed(provider, model)` with full cache invalidation.
+See "Nonce pool failure escalation" in Future Considerations.
+
+**Hazard — retry + decryption failure interaction**: If the retry loop
+succeeds on the last attempt (transport OK) but the relay then detects a
+decryption failure, the plan's step 4 post-relay enforcement must still
+fire using the *last successful attempt's* instance info for the
+`MarkFailed` / `Invalidate` call.
+
 ---
 
 ## Short-Term Plan: Enforce E2EE at relay, not at report
@@ -215,7 +247,7 @@ wrong enforcement point. Instead:
      writing internally; adding a return value is straightforward.
 
 4. **Post-relay enforcement**: `internal/proxy/proxy.go`
-   `handleChatCompletions` (~line 733 area)
+   `handleChatCompletions` (after the relay call)
    - After the relay call, if error indicates decryption failure AND
      `e2eeActive` was true:
      ```go
@@ -226,6 +258,8 @@ wrong enforcement point. Instead:
      if prov.E2EEMaterialFetcher != nil {
          prov.E2EEMaterialFetcher.Invalidate(chuteID)
      }
+     // Zero crypto material from the current session.
+     zeroE2EESessions(session, meta)
      ```
    - Note: the nonce pool (`E2EEMaterialFetcher`) is a third cache alongside
      the report cache and signing key cache. All three must be invalidated
@@ -235,6 +269,12 @@ wrong enforcement point. Instead:
      written to the client. For streaming, the HTTP 200 was sent with the
      first chunk. This is unavoidable without buffering the entire response.
      The enforcement is *forward-looking*: block the next request.
+   - Note: this enforcement is distinct from the Chutes retry loop, which
+     handles transport-level failures *before* the relay. Post-relay
+     enforcement catches cryptographic failures (e.g. decryption failure
+     after HTTP 200) that indicate a more severe problem (possible MITM
+     or server-side E2EE breakage). See "Chutes Instance Retry Loop
+     (current state)" section above for the full picture.
 
 5. **Keep `MarkE2EEUsable` but fix it**: `internal/attestation/report.go`
    - Since `e2ee_usable` is now always allowed-to-fail, it will stay `Skip`
@@ -659,9 +699,21 @@ verify that features work correctly through the attested environment.
   fetching the full report.
 - **Nonce pool failure escalation**: The Chutes `NoncePool` tracks
   per-instance failure counts via `MarkFailed` and prefers instances with
-  fewer failures. When *all* instances for a chute have been marked failed
-  (i.e. no healthy instances remain), the proxy should escalate to
-  `E2EETracker.MarkFailed` (fail-closed for the provider+model) rather
-  than endlessly retrying bad instances. The escalation threshold and
-  recovery path (full re-attestation) should be specified when the E2EE
-  state machine is implemented.
+  fewer failures. The Chutes retry loop (`chutesMaxAttempts = 3` in
+  `handleChatCompletions`) is the concrete location where escalation
+  should occur. Two open design questions:
+  1. When all retry attempts exhaust for a single request, should this
+     immediately escalate to `E2EETracker.MarkFailed` (fail-closed for
+     the provider+model), or should it allow subsequent requests to retry
+     independently? The current implementation allows independent retry.
+  2. When all instances in the nonce pool have accumulated failures (across
+     multiple requests), should the pool itself signal "no healthy instances"
+     back to the proxy for escalation? Currently `Take` returns an error
+     only when no nonces remain, not when all instances are unhealthy.
+  The escalation threshold and recovery path (full re-attestation) should
+  be specified when the E2EE state machine is implemented.
+- **Crypto material lifecycle in retry**: `zeroE2EESessions` in
+  `internal/proxy/proxy.go` is the canonical helper for zeroing E2EE
+  crypto material between retry attempts. The plan's step 4 (post-relay
+  enforcement) and S1 (cache mutation race) should use the same pattern
+  when invalidating material after decryption failure.
