@@ -314,8 +314,8 @@ to switch back to strict enforcement.
 
 ## Related Documentation
 
-- `docs/attestation_gaps/dstack_integrity.md` — detailed analysis of the dstack
-  measurement trust chain and gaps
+- `docs/attestation_gaps/dstack_integrity.md` — analysis of the dstack
+  measurement trust chain and the in-band discovery gap
 - `teep help measurements` — CLI quick reference
 - `teep help verify` — documentation for `--update-config` and `--config-out`
 - `teep.toml.example` — example configuration file
