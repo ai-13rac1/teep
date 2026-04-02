@@ -1522,32 +1522,80 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>teep</title>
 <style>
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #222; line-height: 1.6; }
-  h1 { font-size: 1.4em; }
-  h2 { font-size: 1.1em; margin-top: 1.5em; }
-  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
+    max-width: 760px; margin: 0 auto; padding: 40px 24px;
+    background: #0d1117; color: #c9d1d9; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 {
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    font-size: 1.5em; font-weight: 600; color: #e6edf3; letter-spacing: -0.02em;
+  }
+  .subtitle { color: #8b949e; font-size: 0.9em; margin-top: 0.25em; }
+  h2 {
+    font-size: 0.75em; font-weight: 600; color: #8b949e;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-top: 2em; margin-bottom: 0.5em;
+  }
+  section {
+    background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 16px 20px;
+  }
+  code {
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    background: #21262d; padding: 2px 6px; border-radius: 4px;
+    font-size: 0.85em; color: #58a6ff;
+  }
   table { border-collapse: collapse; width: 100%%; }
-  td, th { text-align: left; padding: 4px 12px 4px 0; }
-  th { color: #666; font-weight: normal; }
-  .muted { color: #888; font-size: 0.85em; }
+  td, th {
+    text-align: left; padding: 6px 16px 6px 0;
+    font-variant-numeric: tabular-nums;
+  }
+  th { color: #8b949e; font-weight: 400; font-size: 0.9em; }
+  td { color: #e6edf3; }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-  .stat-grid table { width: auto; }
+  .model-table th {
+    border-bottom: 1px solid #30363d; padding-bottom: 8px;
+    font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .model-table td {
+    border-bottom: 1px solid #21262d; padding: 8px 16px 8px 0;
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+    font-size: 0.85em;
+  }
+  .model-table td:first-child {
+    font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; font-size: 0.9em;
+  }
+  .model-table tr:last-child td { border-bottom: none; }
+  .footer {
+    color: #484f58; font-size: 0.8em;
+    margin-top: 2em; padding-top: 1em; border-top: 1px solid #21262d;
+  }
+  .footer code { background: transparent; padding: 0; }
+  .text-green { color: #3fb950; }
+  .text-red { color: #f85149; }
 </style>
 </head>
 <body>
 <h1>teep</h1>
-<p>TEE attestation proxy on <code id="listen-addr"></code> &mdash; up <span id="uptime"></span></p>
+<p class="subtitle">TEE attestation proxy on <code id="listen-addr"></code> &mdash; up <span id="uptime"></span></p>
 
 <h2>Provider</h2>
+<section>
 <table>
   <tr><th>Name</th><td id="prov-name"></td></tr>
   <tr><th>Upstream</th><td id="prov-upstream"></td></tr>
   <tr><th>E2EE</th><td id="prov-e2ee"></td></tr>
 </table>
+</section>
 
 <h2>Requests</h2>
+<section>
 <div class="stat-grid">
 <table>
   <tr><th>Total</th><td id="req-total"></td></tr>
@@ -1560,28 +1608,35 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
   <tr><th>Errors</th><td id="req-errors"></td></tr>
 </table>
 </div>
+</section>
 
 <h2>Attestation Cache</h2>
+<section>
 <table>
   <tr><th>Entries</th><td id="cache-entries"></td></tr>
   <tr><th>Negative</th><td id="cache-negative"></td></tr>
   <tr><th>Hit rate</th><td id="cache-hitrate"></td></tr>
 </table>
+</section>
 
 <h2>Models</h2>
-<table>
+<section>
+<table class="model-table">
   <tr><th>Model</th><th>Requests</th><th>Errors</th><th>Verify</th><th>Tok/s</th><th>Last request</th></tr>
   <tbody id="model-rows"></tbody>
 </table>
+</section>
 
 <h2>Endpoints</h2>
+<section>
 <table>
   <tr><td><code>POST /v1/chat/completions</code></td><td>Proxy with TEE attestation</td></tr>
   <tr><td><code>GET /v1/models</code></td><td>List models</td></tr>
   <tr><td><code>GET /v1/tee/report</code></td><td>Cached attestation report</td></tr>
 </table>
+</section>
 
-<p class="muted" id="footer"></p>
+<p class="footer" id="footer"></p>
 
 <script>
 function esc(s) {
@@ -1595,13 +1650,17 @@ function render(d) {
   document.getElementById("uptime").textContent = d.uptime;
   document.getElementById("prov-name").textContent = d.provider.name;
   document.getElementById("prov-upstream").textContent = d.provider.upstream;
-  document.getElementById("prov-e2ee").textContent = d.provider.e2ee;
+  var e2ee = document.getElementById("prov-e2ee");
+  e2ee.textContent = d.provider.e2ee;
+  e2ee.className = d.provider.e2ee === "enabled" ? "text-green" : "text-red";
   document.getElementById("req-total").textContent = d.requests.total;
   document.getElementById("req-streaming").textContent = d.requests.streaming;
   document.getElementById("req-nonstream").textContent = d.requests.non_stream;
   document.getElementById("req-e2ee").textContent = d.requests.e2ee;
   document.getElementById("req-plaintext").textContent = d.requests.plaintext;
-  document.getElementById("req-errors").textContent = d.requests.errors;
+  var errors = document.getElementById("req-errors");
+  errors.textContent = d.requests.errors;
+  errors.className = d.requests.errors > 0 ? "text-red" : "";
   document.getElementById("cache-entries").textContent = d.cache.entries;
   document.getElementById("cache-negative").textContent = d.cache.negative;
   document.getElementById("cache-hitrate").textContent =
@@ -1611,8 +1670,9 @@ function render(d) {
   for (var k in d.models) {
     var m = d.models[k];
     var tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(k) + "</td><td>" + m.requests + "</td><td>" +
-      m.errors + "</td><td>" + esc(m.verify_ms) + "</td><td>" +
+    var errClass = m.errors > 0 ? " class=\"text-red\"" : "";
+    tr.innerHTML = "<td>" + esc(k) + "</td><td>" + m.requests + "</td><td" +
+      errClass + ">" + m.errors + "</td><td>" + esc(m.verify_ms) + "</td><td>" +
       esc(m.tok_per_sec) + "</td><td>" + esc(m.last_request) + "</td>";
     tbody.appendChild(tr);
   }
