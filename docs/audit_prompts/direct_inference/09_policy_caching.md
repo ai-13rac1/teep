@@ -57,7 +57,8 @@ Enforcement is configured via a three-layer mechanism:
 The audit MUST verify:
 - that `DefaultAllowFail` / `NeardirectDefaultAllowFail` are copied (not shared by reference) so runtime mutations cannot affect the default,
 - that the TOML `allow_fail` list **replaces** (not appends to) the default, and whether this behavior is clearly documented,
-- that unknown factor names in the TOML enforce/allow_fail list are rejected at startup by checking against [`KnownFactors`](../../../internal/attestation/report.go:93).
+- that unknown factor names in the TOML `[policy] allow_fail = [...]` list are rejected at startup by checking against [`KnownFactors`](../../../internal/attestation/report.go:93),
+- that the inverted enforcement model is clearly documented: a factor is enforced by removing it from `allow_fail`, and `allow_fail = []` enforces all factors.
 
 #### Neardirect Allowed-to-Fail Factors
 

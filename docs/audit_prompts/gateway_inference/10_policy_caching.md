@@ -59,7 +59,8 @@ Enforcement is configured via a three-layer mechanism:
 Verify:
 - that `DefaultAllowFail` / `NearcloudDefaultAllowFail` are copied (not shared by reference),
 - that the TOML `allow_fail` list **replaces** (not appends to) the default,
-- that unknown factor names in the TOML enforce/allow_fail list are rejected at startup by checking against `KnownFactors`.
+- that unknown factor names in the TOML `allow_fail` list are rejected at startup by checking against `KnownFactors`,
+- that enforcement is expressed only via the inverted `allow_fail` model: a factor is enforced by removing it from `allow_fail`, and `allow_fail = []` enforces all factors.
 
 #### Nearcloud Allowed-to-Fail Factors
 

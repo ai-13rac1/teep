@@ -132,7 +132,7 @@ Chutes providers produce TDX quotes only from the backend sek8s instances, not f
 - **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 golden values than nearcloud. These are checked via the same `tdx_mrseam_mrtd` factor. See Section 05 for measurement details.
 - **Multiple instances**: Chutes may return multiple instances (up to `MaxInstances = 256`), each producing its own TDX quote. Verify that each instance's quote is independently verified and that a single verification failure blocks the request.
 
-Primary reference: `internal/provider/chutes/fetch.go`, `internal/attestation/tdx.go`.
+Primary reference: `internal/provider/chutes/chutes.go`, `internal/attestation/tdx.go`.
 
 ## Section Deliverable
 

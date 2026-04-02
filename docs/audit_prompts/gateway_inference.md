@@ -566,7 +566,7 @@ If offline mode exists, the audit MUST state which NVIDIA checks remain active a
 
 In the gateway inference model, the model backend's attestation provides an Ed25519 public key (`signing_key`) that is bound to the model backend's TDX quote via REPORTDATA. The proxy uses this key for X25519-based E2EE (converting Ed25519 to X25519 for key exchange), encrypting request messages so that even the gateway cannot read them, and decrypting response messages that were encrypted by the model backend.
 
-> **Known divergence**: Venice uses a different E2EE protocol — secp256k1 ECDH + AES-256-GCM with a keccak256-derived REPORTDATA binding scheme. The Venice procol is actually a previous version of the nearcloud E2EE protocol, and so this section focuses on the mechanics of the latest nearcloud protocol.
+> **Known divergence**: Venice uses a different E2EE protocol — secp256k1 ECDH + AES-256-GCM with a keccak256-derived REPORTDATA binding scheme. The Venice protocol is actually a previous version of the nearcloud E2EE protocol, and so this section focuses on the mechanics of the latest nearcloud protocol.
 
 > **Known divergence: Chutes/Sek8s.** Chutes uses a completely different E2EE protocol based on post-quantum cryptography:
 >

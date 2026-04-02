@@ -147,7 +147,7 @@ The chutes attestation response includes GPU evidence via a separate endpoint (`
 - That GPU evidence count is bounded (max 64 per `MaxGPUEvidence`).
 - That a missing GPU evidence array does not cause a false pass.
 
-Primary reference: `internal/provider/chutes/policy.go`, `internal/provider/chutes/fetch.go`.
+Primary reference: `internal/provider/chutes/policy.go`, `internal/provider/chutes/chutes.go`.
 
 ## Section Deliverable
 

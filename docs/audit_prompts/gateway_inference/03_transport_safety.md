@@ -133,7 +133,7 @@ However, the following transport safety checks still apply to chutes:
 
 The audit should verify that chutes transport paths apply the same bounded-read discipline as nearcloud even though the connection lifecycle is simpler.
 
-Primary reference: `internal/provider/chutes/fetch.go`, `internal/e2ee/relay_chutes.go`.
+Primary reference: `internal/provider/chutes/chutes.go`, `internal/e2ee/relay_chutes.go`.
 
 ## Section Deliverable
 
