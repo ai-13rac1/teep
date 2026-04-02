@@ -102,6 +102,17 @@ After replay succeeds, the audit MUST verify (for both model and gateway event l
 - **Constant-time comparison for RTMR matching**: after replay, the comparison between replayed RTMR values and quoted RTMR values SHOULD use constant-time comparison.
 - **Fail-secure default for absent event log**: if the event log is absent from the attestation response, verify whether this is treated as a pass (dangerous) or a skip/fail (safe). Document behavior for both the gateway and model event logs independently.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes/sek8s providers do **not** supply event logs. The `event_log_integrity` factor returns `Skip` and is in `ChutesDefaultAllowFail`. There is no gateway CVM, so `gateway_event_log_integrity` does not apply.
+
+Sek8s validates RTMR values server-side during boot (LUKS gating), but teep has no independent event-log replay path for chutes providers. This means:
+- There is no client-verifiable mapping from individual software components to RTMR values.
+- RTMR golden values from `chutes/policy.go` are trusted as opaque measurements.
+- The audit should verify that the absence of event log data does not trigger a false pass for chutes providers — it must be `Skip`, not `Pass`.
+
+Primary reference: `internal/provider/chutes/policy.go` (`ChutesDefaultAllowFail`).
+
 ## Section Deliverable
 
 Provide:

@@ -107,6 +107,25 @@ The `tdx_hardware_config` / `gateway_tdx_hardware_config` (RTMR0) and `tdx_boot_
 
 > **Known divergence**: Venice does not have gateway TEE attestation — there is no gateway TDX quote, no gateway measurement policy, and no Tier 4 factors. These are server-side limitations that cannot be fixed in teep.
 
+> **Known divergence: Chutes/Sek8s.** Chutes uses a fundamentally different measurement model:
+>
+> **Model attestation expectations:**
+> - **MRCONFIGID is not used.** Sek8s does not bind compose hashes. The `compose_binding` factor returns `Skip`.
+> - **RTMR3 is not client-verifiable.** No event log is exposed. `event_log_integrity` returns `Skip`.
+> - **REPORTDATA** = `SHA256(nonce_hex + e2e_pubkey_base64)` — binds nonce and ML-KEM-768 public key (no signing_address or tls_fingerprint).
+> - **MRSEAM** includes TDX module versions 1.5.0d and 2.0.06 (in addition to the dstack fleet versions). Enforced via `tdx_mrseam_mrtd`.
+> - **MRTD** is a single sek8s-specific OVMF value, distinct from dstack. Enforced via `tdx_mrseam_mrtd`.
+> - **RTMR0** corresponds to the sek8s 8×H200 deployment class (fixed VM parameters for determinism).
+> - **RTMR1** is deterministic per sek8s image build.
+> - **RTMR2** is deterministic per deployment class kernel command line.
+> - MRSIGNERSEAM, MROWNER, MROWNERCONFIG are expected to be all-zeros.
+>
+> **No gateway measurement policy.** Chutes has no gateway CVM.
+>
+> **Measurement defaults** are in `internal/provider/chutes/policy.go` (`DefaultMeasurementPolicy()`). Values are pinned from observed Chutes deployments and cannot be independently reproduced without building sek8s from source.
+>
+> The audit for chutes MUST: (a) verify that MRTD/MRSEAM/RTMR0-2 allowlists are correctly populated from `internal/provider/chutes/policy.go`, (b) evaluate whether these allowlists provide sufficient assurance given the absence of compose binding, event log, and Sigstore/Rekor checks, (c) document the residual risk that golden values are observer-pinned (not independently derived). See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model.
+
 ## Required Checks
 
 ### Field Extraction and Policy Verification

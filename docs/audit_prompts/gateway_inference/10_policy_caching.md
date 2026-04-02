@@ -189,6 +189,35 @@ Verify:
 - **Defense in depth for caching**: Cache corruption or eviction must always result in re-verification.
 - **Audit trail**: Enforcement decisions logged with sufficient detail for forensic analysis.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes uses a separate enforcement configuration (`ChutesDefaultAllowFail`) with significantly more factors in allow-fail compared to nearcloud.
+
+### Chutes Enforcement Model
+
+**Enforced factors** (NOT in `ChutesDefaultAllowFail`):
+- `nonce_match`, `tdx_quote_present`, `tdx_quote_structure`, `tdx_cert_chain`, `tdx_quote_signature`, `tdx_debug_disabled`
+- `tdx_mrseam_mrtd`, `tdx_reportdata_binding`
+- `intel_pcs_collateral`, `tdx_tcb_not_revoked`, `tdx_tcb_current`
+- `e2ee_capable`, `signing_key_present`
+
+**Allow-fail factors** (in `ChutesDefaultAllowFail`):
+- `compose_binding`, `sigstore_verification`, `build_transparency_log`, `event_log_integrity`
+- `tls_key_binding`, `nvidia_signature`, `nvidia_nras_verified`, `cpu_gpu_chain`
+- `measured_model_weights`, `cpu_id_registry`, `e2ee_usable`
+
+No `gateway_*` factors exist for chutes (no gateway CVM).
+
+### Chutes Cache Model
+
+Chutes uses different caching mechanisms:
+- **Nonce pool** (`noncepool.go`): Pre-generated nonces for attestation freshness. Auditors should verify pool size bounds, nonce entropy, and that pool exhaustion fails closed.
+- **Model resolver** (`models.go`): Maps model names to chute IDs. Verify cache TTL/bounds.
+- **No SPKI pin cache**: Chutes does not use attestation-bound TLS pinning.
+- **Attestation report cache**: Chutes attestation results may be cached per chute ID. Verify TTL and cache-miss re-attestation behavior.
+
+Primary reference: `internal/provider/chutes/policy.go`, `internal/provider/chutes/noncepool.go`.
+
 ## Section Deliverable
 
 Provide:

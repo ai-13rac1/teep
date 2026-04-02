@@ -78,6 +78,40 @@ In the gateway model, a single nonce is sent to the gateway, which shares it wit
 - that nonces are never reused across attestation attempts (a new nonce per connection, not per session),
 - that the nonce is compared against the value embedded in the TDX quote's REPORTDATA field (not against a separate provider-asserted field that could be forged independently of the quote).
 
+### Chutes/Sek8s Attestation Flow Divergences
+
+Chutes uses a two-step attestation flow with different response formats and nonce mechanics:
+
+**Instances response** (`GET /e2e/instances/{chute}`):
+- JSON with `instances` array, each containing `instance_id`, `e2e_pubkey` (base64 ML-KEM-768), `nonces` array.
+- `nonce_expires_in` field specifies TTL for nonce validity.
+- Bounds: max 256 instances.
+
+**Evidence response** (`GET /chutes/{chute}/evidence?nonce={hex}`):
+- JSON with `evidence` array, each containing `quote` (base64 TDX), `gpu_evidence` array, `instance_id`, `certificate`.
+- `failed_instance_ids` array lists instances that failed to produce evidence.
+- Bounds: max 256 evidence entries, max 64 GPU evidence per instance.
+
+The audit for chutes MUST verify:
+- that the instances endpoint is fetched before the evidence endpoint (instances provide the E2EE public key and nonces),
+- strict JSON unmarshalling for both responses,
+- bounds checking on all array lengths,
+- that evidence is matched to instances by instance ID (not by array index),
+- that an instance must have a non-empty `e2e_pubkey` and at least one nonce to be selected,
+- that `failed_instance_ids` are excluded from selection,
+- that fleet changes between the instances and evidence calls are tolerated (an instance may join or leave between the two requests),
+- that no `e2e_pubkey` is used for E2EE without a corresponding verified TDX quote.
+
+**Chutes nonce mechanics:**
+- The nonce is client-generated and sent as a query parameter to the evidence endpoint.
+- The nonce appears in REPORTDATA as `SHA256(nonce_hex + e2e_pubkey_base64)` \u2014 it is verified via REPORTDATA binding, not via a separate echoed nonce field.
+- The nonce pool (`noncepool.go`) caches instances and nonces with TTL from `nonce_expires_in`. Cached nonces MUST NOT be reused across attestation attempts.
+
+**Primary files for chutes attestation audit:**
+- [`internal/provider/chutes/chutes.go`](../../../internal/provider/chutes/chutes.go)
+- [`internal/provider/chutes/noncepool.go`](../../../internal/provider/chutes/noncepool.go)
+- [`internal/provider/chutes/chutes_test.go`](../../../internal/provider/chutes/chutes_test.go)
+
 ## Go Best-Practice Audit Points
 
 - **`io.LimitReader` for body size bounding**: Verify that the attestation response body is wrapped in `io.LimitReader` before reading, not just checked after the fact. The gateway response includes dual payloads, so the limit should be higher than direct inference (≤2 MiB suggested).

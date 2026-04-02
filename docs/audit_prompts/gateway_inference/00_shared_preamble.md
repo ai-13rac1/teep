@@ -4,6 +4,8 @@ This repository implements a proxy that ensures private LLM inference by perform
 
 This is a **gateway inference** provider audit: attestation covers two layers — a gateway CVM and a model backend CVM. The primary reference provider is **nearcloud** (NearCloud / NEAR AI), which provides full dual-tier TEE attestation. **Venice** is a secondary reference: it forwards model backend attestation but does NOT provide gateway-level TEE attestation — see Section 01 for architectural divergences.
 
+**Chutes** (sek8s-based) is a third reference architecture with a fundamentally different security model — see Section 01 for full details. Key differences: (1) no gateway CVM (direct inference or gateway-wrapped), (2) no compose binding / event log / Sigstore (container verification is validator-side via cosign admission inside the TEE), (3) ML-KEM-768 E2EE instead of Ed25519/X25519, (4) different REPORTDATA scheme (`SHA256(nonce_hex + e2e_pubkey_base64)`), (5) sek8s-specific OVMF and measurement values. See `docs/attestation_gaps/sek8s_integrity.md` for the trust model analysis.
+
 ## Architectural Overview
 
 Unlike direct inference providers where the proxy connects directly to the model server, the gateway architecture interposes a TEE-attested load balancer (the "gateway") between the proxy and the model backend:
@@ -21,6 +23,8 @@ The two layers of attestation to verify are:
 - **Tier 4 (gateway):** the gateway's own TDX quote, compose binding, event log, REPORTDATA binding, and TLS certificate binding.
 
 Additionally, the model backend's attestation provides an E2EE signing key that the proxy uses to encrypt request messages and decrypt response messages, protecting header and body confidentiality even if the gateway is compromised.
+
+> **Note on Chutes/Sek8s:** For chutes, there is no Tier 4 (no gateway CVM). Additionally, Tier 1–3 checks for compose binding, event log integrity, and Sigstore/Rekor verification return `Skip` because the sek8s attestation model does not expose this data to clients. The primary client-side controls are the TDX quote, MRTD/RTMR0-2 measurement allowlists, REPORTDATA binding, and ML-KEM-768 E2EE. Sections marked as N/A for chutes should still verify that `Skip` results are correctly returned with explanatory messages.
 
 ## Threat Model Summary
 

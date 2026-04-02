@@ -122,6 +122,18 @@ Verify and report:
 - **Trust boundary clarity**: Every field within the quote is untrusted input until cryptographic verification succeeds.
 - **Defense in depth**: Passing signature verification alone does not constitute a "pass" — additional checks required.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes providers produce a single TDX quote per instance (no gateway CVM). Key differences for TDX quote verification:
+
+- **Single quote only**: No dual gateway+model verification. No `gateway_*` TDX factors exist for chutes.
+- **Two-step fetch**: The TDX quote is fetched via the evidence endpoint (`/chutes/{chute}/evidence?nonce={hex}`), separate from the instances endpoint that returns E2EE keys. The audit should verify that the evidence response is correctly parsed and that the TDX quote bytes are extracted from the response structure.
+- **Same verification code**: The TDX quote parsing, signature verification, PCK chain validation, and debug-bit checking should use the same `internal/attestation/tdx.go` code path as nearcloud. Verify this is the case.
+- **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 golden values than nearcloud. These are checked via the same `tdx_mrseam_mrtd` factor. See Section 05 for measurement details.
+- **Multiple instances**: Chutes may return multiple instances (up to `MaxInstances = 256`), each producing its own TDX quote. Verify that each instance's quote is independently verified and that a single verification failure blocks the request.
+
+Primary reference: `internal/provider/chutes/fetch.go`, `internal/attestation/tdx.go`.
+
 ## Section Deliverable
 
 Provide:

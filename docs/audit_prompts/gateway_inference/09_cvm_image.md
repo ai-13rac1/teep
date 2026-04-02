@@ -131,6 +131,27 @@ Compose binding (`MRConfigID`) provides application-layer assurance. Document:
 - **Denial-of-service**: Thousands of image references could trigger thousands of API calls. Verify bounds.
 - **Fail-secure defaults**: A new image not in the allowlist MUST be a hard failure.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes/sek8s does **not** use compose binding, Sigstore verification, or Rekor provenance checking. All three factors are in `ChutesDefaultAllowFail`:
+- `compose_binding` — `MRCONFIGID` is not used for chutes; the sek8s platform does not expose compose content in attestation responses.
+- `sigstore_verification` — no Sigstore queries are made for chutes providers.
+- `build_transparency_log` — no Rekor provenance is fetched for chutes providers.
+
+### Alternative Supply-Chain Controls in Sek8s
+
+Sek8s uses different mechanisms that are **not verifiable by teep**:
+- **Cosign admission controller**: Runs inside the TEE and verifies container image signatures at deployment time. Teep cannot observe or audit this check.
+- **LUKS boot gating**: Runtime measurements are validated against expected values during boot, with disk decryption gated on success. Teep relies on the MRTD/RTMR golden values as opaque evidence that this process completed successfully.
+- **Image digest pinning**: Sek8s Kubernetes manifests pin images by digest. Teep does not have access to these manifests.
+
+The audit should verify:
+- That the chutes attestation code path does NOT attempt to parse `app_compose` or `MRConfigID`.
+- That the absence of compose data results in `Skip` (not `Pass`) for `compose_binding`.
+- That Sigstore/Rekor code paths are not triggered for chutes providers.
+
+Primary reference: `internal/provider/chutes/policy.go`, `docs/attestation_gaps/sek8s_integrity.md`.
+
 ## Section Deliverable
 
 Provide:

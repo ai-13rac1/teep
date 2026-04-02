@@ -4,11 +4,25 @@ This repository implements a proxy that ensures private LLM inference by perform
 
 Please verify every stage of attestation for the requested provider, following this audit guide to produce a detailed report.
 
-This audit applies to gateway inference providers, where a single TEE-attested API gateway load balancer receives all client traffic and forwards it to model-specific TEE-attested inference backends. This means there are two layers of attestation to verify:
+This audit applies to gateway inference providers, where a single TEE-attested API gateway load balancer receives all client traffic and forwards it to model-specific TEE-attested inference backends. It also covers direct inference providers that use fundamentally different TEE guest stacks (sek8s/Chutes), which may appear as model backends behind a gateway or operate independently.
+
+Two reference provider architectures are covered:
+
+**NearCloud / NEAR AI (dstack-based):** A dual-tier gateway model with two layers of attestation:
 - **Tier 1–3 (model):** the model inference backend's TDX quote, NVIDIA attestation, compose binding, event log, REPORTDATA binding, and supply chain verification,
 - **Tier 4 (gateway):** the gateway's own TDX quote, compose binding, event log, REPORTDATA binding, and TLS certificate binding.
 
-Additionally, the model backend's attestation provides an E2EE signing key that the proxy uses to encrypt request messages and decrypt response messages, protecting header and body confidentiality even if the gateway is compromised.
+Additionally, the model backend's attestation provides an E2EE signing key (Ed25519) that the proxy uses to encrypt request messages and decrypt response messages, protecting header and body confidentiality even if the gateway is compromised.
+
+**Chutes (sek8s-based):** A direct inference model using Intel TDX confidential VMs running sek8s (a custom Kubernetes distribution). Key architectural differences from dstack:
+- **No gateway CVM**: Chutes does not interpose a TEE-attested gateway. The proxy connects directly to the inference instance, or receives chutes evidence via a gateway-wrapped response from another provider (e.g., NanoGPT).
+- **No compose binding**: sek8s does not use docker-compose or MRCONFIGID. Container image integrity relies on a cosign admission controller running inside the measured TEE.
+- **No client-visible event log**: RTMR3/IMA measurements are verified server-side by the Chutes validator; the event log is not exposed to clients.
+- **ML-KEM-768 E2EE**: Chutes uses post-quantum ML-KEM-768 key encapsulation + ChaCha20-Poly1305, not Ed25519/X25519/XChaCha20-Poly1305.
+- **LUKS boot gating**: Disk decryption is gated on measurement verification by the Chutes validator — VMs that fail measurement checks cannot boot.
+- **Different REPORTDATA scheme**: `SHA256(nonce_hex + e2e_pubkey_base64)` bound to TDX quote, with no signing_address or tls_fingerprint.
+
+For a detailed analysis of the sek8s integrity model and residual trust assumptions, see `docs/attestation_gaps/sek8s_integrity.md`.
 
 The report MUST cite the source code locations relevant to BOTH positive AND negative audit findings, using relative markdown links to the source locations, for human validation of audit claims.
 
@@ -107,9 +121,33 @@ Client → teep proxy → cloud-api.near.ai (gateway CVM) → model backend CVM
 
 The gateway host is fixed (not resolved via a model routing API). The proxy opens a single TLS connection to the gateway, performs attestation on that connection (receiving both gateway and model attestation in a single response), and then sends the chat request on the same connection.
 
+### Chutes/Sek8s Architecture Overview
+
+Chutes uses a fundamentally different model. There is no TEE-attested gateway; the proxy connects directly to the inference cluster or receives chutes evidence through a gateway-wrapped response from another provider:
+
+**Direct access:**
+```
+Client → teep proxy → llm.chutes.ai → sek8s TDX instance (model)
+                          ↑ HTTPS               ↑ TDX attestation
+                          ↑ no gateway TEE       ↑ ML-KEM-768 E2EE
+```
+
+**Gateway-wrapped access (e.g., via NanoGPT):**
+```
+Client → teep proxy → gateway → chutes sek8s TDX instance (model)
+                          ↑ gateway attestation may or may not be present
+                          ↑ chutes evidence in gateway-wrapped format
+```
+
+The attestation flow is two-step:
+1. **Instances endpoint** (`GET /e2e/instances/{chute}`): Returns available TEE instances with ML-KEM-768 public keys and nonces.
+2. **Evidence endpoint** (`GET /chutes/{chute}/evidence?nonce={hex}`): Returns TDX quotes and GPU evidence per instance.
+
+Teep matches evidence to instances by instance ID, then verifies the TDX quote and REPORTDATA binding.
+
 ### What Each TDX Register Measures
 
-Understanding the security semantics of each register is critical for assessing attestation completeness. The following describes the trust-chain role of each register, based on Intel TDX architecture and the dstack CVM implementation used by inference providers:
+Understanding the security semantics of each register is critical for assessing attestation completeness. The following describes the trust-chain role of each register, based on Intel TDX architecture. Register usage differs between dstack (NearCloud) and sek8s (Chutes) — differences are noted where applicable:
 
 **MRSEAM** — Measurement of the TDX module (SEAM firmware). This 48-byte hash represents the identity and integrity of the Intel TDX module running in Secure Arbitration Mode. Intel signs and guarantees TDX module integrity; the MRSEAM value should correspond to a known Intel-released TDX module version. Verification of MRSEAM ensures the TDX firmware has not been tampered with and is a recognised, trusted version. Without MRSEAM verification, an attacker who compromises the hypervisor could potentially load a modified TDX module that subverts TD isolation guarantees.
 
@@ -122,7 +160,20 @@ Understanding the security semantics of each register is critical for assessing 
 **RTMR2** — Runtime OS component measurement. RTMR2 records the kernel command line (including the rootfs hash), initrd binary, and grub configuration/modules as measured by the boot loader. Corresponds to TPM PCR[8-15]. RTMR2 can be pre-calculated from the built dstack OS image. Without RTMR2 verification, the kernel command line could be altered (e.g., to disable security features or change the root filesystem hash) without detection.
 
 **RTMR3** — Application-specific runtime measurement. In dstack's implementation, RTMR3 records application-level details including the compose hash, instance ID, app ID, and key provider. Unlike RTMR0-2, RTMR3 cannot be pre-calculated from the image alone because it contains runtime information. It is verified by replaying the event log: if replayed RTMR3 matches the quoted RTMR3, the event log content is authentic, and the compose hash, key provider, and other details can be extracted and verified from the event log entries. The existing compose binding check (MRConfigID) partially overlaps with RTMR3 for compose hash verification.
+#### Sek8s (Chutes) Register Usage Differences
 
+Sek8s uses standard Intel TDX registers, but the measurements reflect a different guest stack:
+
+| Register | Sek8s behavior | Difference from dstack |
+|----------|---------------|------------------------|
+| **MRSEAM** | Same Intel TDX module values | Fleet may include different TDX module versions (1.5.0d, 2.0.06) |
+| **MRTD** | Sek8s-specific OVMF firmware image | Different firmware image; distinct MRTD value |
+| **RTMR0** | ACPI tables, early boot; sek8s host-tools fix memory/vCPU/GPU sizing for determinism | Deterministic per deployment class (e.g., 8×H200) |
+| **RTMR1** | Kernel + initramfs per sek8s image build | Different kernel; deterministic per build |
+| **RTMR2** | Kernel command line per deployment class | Different command line; deterministic per class |
+| **RTMR3** | Runtime / IMA measurements | **Not verified by teep** — verified server-side by Chutes validator; event log not exposed to clients |
+| **MRCONFIGID** | **Not used** | Sek8s does not bind a compose hash; container verification is via cosign admission inside the TEE |
+| **REPORTDATA** | `SHA256(nonce_hex + e2e_pubkey_base64)` | Different binding scheme; no signing_address or tls_fingerprint |
 ### How Thorough Verification Should Work
 
 For complete attestation of a dstack-based CVM — applicable to BOTH the gateway CVM and the model backend CVM — the verification process should:
@@ -136,6 +187,24 @@ For complete attestation of a dstack-based CVM — applicable to BOTH the gatewa
 4. **Verify RTMR3 via event log replay**: RTMR3 contains runtime-specific measurements that cannot be pre-calculated. Replay the event log, compare the replayed RTMR3 against the quoted value, and then inspect the event log entries for expected compose hash, app ID, and key provider values.
 
 5. **Verify MRSEAM + MRTD + RTMR0-2 as a set**: These five values together form a complete chain-of-trust from the TDX module through firmware, kernel, and OS components. Verifying only a subset (e.g., only compose binding via MRConfigID + RTMR3 event log replay) leaves significant gaps where the base system could be substituted.
+
+#### Sek8s (Chutes) Verification Differences
+
+For sek8s-based CVMs, the verification process differs from dstack in several important ways:
+
+1. **No compose binding or event log replay**: Sek8s does not use MRCONFIGID for compose hashes, and the event log is not exposed to clients. Steps 4 and 5 above (RTMR3 event log replay and compose binding) are not applicable. Teep correctly returns `Skip` for `compose_binding`, `event_log_integrity`, and `sigstore_verification`.
+
+2. **MRTD, RTMR0-2 are the primary verification surface**: Since compose binding and event log replay are unavailable, the MRTD and RTMR0-2 measurement allowlists are the most important client-side controls. These are pinned from known-good Chutes deployments in `internal/provider/chutes/policy.go`.
+
+3. **MRSEAM allowlist extended for sek8s fleet**: The sek8s fleet runs TDX module versions (1.5.0d, 2.0.06) that may differ from the dstack fleet. These are included in the chutes measurement policy.
+
+4. **RTMR3 verified server-side only**: The Chutes validator verifies RTMR3 against golden baselines as part of the LUKS boot gate. Teep cannot independently replay RTMR3.
+
+5. **Container image integrity is trust-delegated**: Instead of client-verifiable compose binding + Sigstore/Rekor, sek8s relies on a cosign admission controller inside the TEE. Teep has zero visibility into which containers are running on a Chutes node. This is a documented trust assumption, not a teep deficiency.
+
+6. **Golden values pinned from observed deployments**: Sek8s measurement values are captured from live Chutes deployments and coded in Go defaults. Independent reproduction requires building sek8s from source (`chutesai/sek8s`).
+
+See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model analysis.
 
 ### Current Stopgaps and Residual Gaps
 
@@ -163,6 +232,24 @@ The `tdx_hardware_config` / `gateway_tdx_hardware_config` (RTMR0) and `tdx_boot_
 
 **The audit MUST flag the remaining residual risk** and recommend that the inference provider publish authenticated measurement baselines. See `docs/attestation_gaps/dstack_integrity.md` for the detailed analysis and recommended in-band publication model.
 
+#### Chutes/Sek8s Measurement Defaults
+
+Chutes uses a separate set of Go-coded measurement defaults, defined in `internal/provider/chutes/policy.go`:
+
+**MRSEAM** — Extended allowlist including TDX module versions 1.5.0d and 2.0.06, in addition to the dstack fleet versions. These are observed from the Chutes sek8s fleet.
+
+**MRTD** — Single value corresponding to the sek8s OVMF firmware image, distinct from dstack's OVMF.
+
+**RTMR0, RTMR1, RTMR2** — Values specific to the sek8s 8×H200 deployment class. Sek8s host-tools explicitly fix VM parameters (memory, vCPU, GPU MMIO, PCI hole sizing) to make these deterministic.
+
+**RTMR3** — Not enforced by teep. Sek8s validates RTMR3 server-side via its LUKS boot gate; the event log is not exposed to clients.
+
+**MRCONFIGID** — Not used. Sek8s does not bind compose hashes. Container image integrity depends on the cosign admission controller running inside the TEE.
+
+**Measurement bootstrapping.** The `teep verify chutes --model <model> --update-config` command captures observed sek8s measurements. Unlike dstack, there is no golden-value reproduction tooling available to teep; values are pinned from observed deployments.
+
+**Residual risk.** The sek8s measurement defaults are pinned from observed Chutes deployments and cannot be independently reproduced without building sek8s from source. Additionally, the absence of compose binding, event log replay, and Sigstore/Rekor checks means that the MRTD/RTMR0-2 allowlists are the sole client-side controls for the sek8s boot chain. See `docs/attestation_gaps/sek8s_integrity.md` for a detailed trust model analysis.
+
 ---
 
 ## Part 4 — Verification Stage Audit Checklist
@@ -177,6 +264,8 @@ The audit MUST verify:
 - that the gateway attestation endpoint returns both gateway and model attestation in a single response,
 - that there is no code path that allows connecting to an unattested alternate host.
 
+> **Known divergence: Chutes/Sek8s.** Chutes does not use a gateway architecture. The proxy uses a two-step direct attestation flow: an instances endpoint for model discovery and ML-KEM-768 key retrieval, then a separate evidence endpoint for TDX quotes. The audit for chutes MUST instead verify: (1) that the instances and evidence endpoints are constructed from hardcoded constants plus URL-encoded model identifiers, (2) that instance-to-evidence matching is by instance ID with bounds checking, (3) that failed or missing instances are handled fail-closed, (4) that response arrays are bounded (max 256 instances, max 256 evidence entries, max 64 GPU evidence per instance). When chutes evidence appears in a gateway-wrapped format (e.g., via NanoGPT), the audit MUST verify that the gateway-wrapped parsing extracts the inner chutes evidence correctly and applies all chutes-specific verification.
+
 ### 4.2 Attestation Fetch and Response Parsing
 
 Upon connection to the gateway, the attestation API MUST be queried and fully validated before any inference request is sent. A single attestation request returns a combined response containing both the gateway attestation and the model attestation.
@@ -186,6 +275,12 @@ Certificate Transparency MUST be consulted for the TLS certificate of the gatewa
 The attestation response is a JSON object that includes:
 - a `gateway_attestation` section with the gateway's own TDX quote, event log, TLS certificate fingerprint, and tcb_info (containing app_compose), and
 - a `model_attestations` array with per-model Intel TDX attestation, NVIDIA TEE attestation, signing key, and auxiliary information.
+
+> **Known divergence: Chutes/Sek8s.** Chutes uses a two-step attestation flow with different response formats:
+> 1. **Instances response** (`GET /e2e/instances/{chute}`): JSON with `instances` array (each with `instance_id`, `e2e_pubkey` as base64 ML-KEM-768, `nonces` array) and `nonce_expires_in`.
+> 2. **Evidence response** (`GET /chutes/{chute}/evidence?nonce={hex}`): JSON with `evidence` array (each with `quote` as base64 TDX, `gpu_evidence` array, `instance_id`, `certificate`) and `failed_instance_ids`.
+>
+> The audit MUST verify: (a) that the instances response is fetched and validated before the evidence request, (b) strict JSON unmarshalling for both responses, (c) bounds checking on all array lengths, (d) that evidence is matched to instances by instance ID, (e) that an instance must have a non-empty `e2e_pubkey` and at least one nonce, (f) that `failed_instance_ids` are excluded from selection, (g) that no `e2e_pubkey` is used without a corresponding verified TDX quote.
 
 The audit MUST verify the attestation response parsing path, including:
 - maximum response body size limit (to prevent memory exhaustion — per Part 1 input bounds rules; note that gateway responses are larger due to dual payloads),
@@ -213,6 +308,8 @@ In the gateway model, a single nonce is sent to the gateway, which shares it wit
 
 If cryptographic randomness fails, nonce generation MUST fail closed (no weak fallback mode). The recommended behavior is to panic or abort — never fall back to a weaker entropy source. Per Part 1 cryptographic safety rules, `crypto/rand` is the only acceptable source.
 
+> **Known divergence: Chutes/Sek8s.** Chutes uses a client-generated nonce but with a different lifecycle: (1) a fresh nonce is generated per attestation attempt, (2) the nonce is sent as a query parameter to the evidence endpoint (`?nonce={hex}`), (3) the nonce appears in REPORTDATA as `SHA256(nonce_hex + e2e_pubkey_base64)` — the nonce is verified via REPORTDATA binding, not via a separate echoed nonce field. Additionally, Chutes provides a nonce pool mechanism (`noncepool.go`) that caches instances and nonces from the instances endpoint; the audit MUST verify that cached nonces are never reused across attestation attempts and that nonce expiry (`nonce_expires_in`) is respected.
+
 ### 4.4 TDX Quote Verification (Model Backend)
 
 Signatures over the model backend's Intel TEE attestation MUST be verified for the entire certificate chain, including:
@@ -235,6 +332,8 @@ The gateway's TDX quote MUST undergo the same verification as the model backend'
 - debug bit check.
 
 The audit MUST verify that the gateway TDX verification uses the same code path / library as the model TDX verification (to avoid diverging security standards).
+
+> **Known divergence: Chutes/Sek8s.** Chutes has no gateway CVM and therefore no gateway TDX quote. When auditing chutes, skip §4.5 entirely. When chutes evidence appears in a gateway-wrapped format (e.g., via NanoGPT), the wrapping gateway’s TDX quote (if present) is verified by the wrapping provider, not by the chutes verification path.
 
 ### 4.6 TDX Measurement Fields and Policy
 
@@ -282,7 +381,15 @@ The audit MUST verify:
 - the `--update-config` bootstrapping flow and that it correctly captures both model and gateway measurements.
 
 > **Known divergence**: Venice does not have gateway TEE attestation — there is no gateway TDX quote, no gateway measurement policy, and no Tier 4 factors. Venice's `ServerVerification` field is an untrusted gateway-side claim that is parsed but NOT verified by teep. This is a server-side limitation of Venice that should be flagged in audits but not listed as a finding for teep to fix.
-
+> **Known divergence: Chutes/Sek8s.** Chutes uses a fundamentally different measurement model:
+> - **MRCONFIGID is not used.** Sek8s does not bind compose hashes. The `compose_binding` factor returns `Skip` with explanation.
+> - **RTMR3 is not client-verifiable.** No event log is exposed; `event_log_integrity` returns `Skip`.
+> - **Separate MRSEAM allowlist.** Chutes includes TDX module versions 1.5.0d and 2.0.06 not present in the dstack allowlist.
+> - **Separate MRTD value.** Sek8s OVMF firmware is distinct from dstack OVMF.
+> - **RTMR0-2 are the primary enforcement surface.** Since compose binding and event log replay are unavailable, these measurement allowlists are the sole client-side boot chain controls.
+> - **REPORTDATA binding scheme differs.** `SHA256(nonce_hex + e2e_pubkey_base64)` — no signing_address or tls_fingerprint.
+> - **No gateway measurement policy.** Chutes has no gateway CVM.
+> - The audit for chutes MUST evaluate whether the MRTD/RTMR0-2 allowlists provide sufficient assurance given the absence of compose binding, event log, and Sigstore/Rekor checks. See `docs/attestation_gaps/sek8s_integrity.md`.
 ### 4.7 CVM Image Verification — Model Backend (Compose Binding)
 
 The model backend attestation API provides a full docker compose stanza, or equivalent podman/cloud config image description, as an auxiliary portion of the attestation API response.
@@ -294,6 +401,8 @@ The audit MUST verify the exact binding format expected by the implementation (f
 The audit MUST also verify the extraction path for the app_compose field, including:
 - whether the tcb_info field supports double-encoded JSON (string-within-JSON),
 - that the extracted compose content is the raw value that was hashed, not a re-serialized version that could differ in whitespace or key ordering.
+
+> **Known divergence: Chutes/Sek8s.** Compose binding (§4.7 and §4.8) does not apply to chutes. Sek8s does not use docker-compose or MRCONFIGID. Container image integrity is enforced by a cosign admission controller running inside the measured TEE, which is not visible to teep. The `compose_binding` factor returns `Skip` with message: "chutes uses cosign image admission + IMA, not docker-compose; compose binding not applicable". When auditing chutes, skip §4.7 and §4.8 and instead verify that the `Skip` result is correctly returned and that no code path attempts compose binding for chutes quotes.
 
 ### 4.8 CVM Image Verification — Gateway (Compose Binding)
 
@@ -326,6 +435,8 @@ The audit MUST explicitly state if Sigstore/Rekor are soft-fail in default polic
 
 > NOTE: The current implementation performs Sigstore/Rekor checks only on the model backend's compose images. The audit MUST flag whether gateway compose images are also subject to these checks, and if not, report this as a gap.
 
+> **Known divergence: Chutes/Sek8s.** Sigstore/Rekor verification (§4.9) does not apply to chutes. Chutes attestation does not include container image digests or compose manifests. The `sigstore_verification` factor returns `Skip` with message: "chutes attestation does not include container image digests; cosign verification is validator-side only". The `build_transparency_log` factor also returns `Skip`. This is a structural limitation of the sek8s attestation model, not a teep deficiency. The residual risk is that teep has zero visibility into which container images are running on a Chutes node — this trust is delegated to the cosign admission controller running inside the TEE.
+
 ### 4.10 Event Log Integrity (Model Backend)
 
 If event logs are present in the model backend's attestation payload, the code MUST replay them and verify recomputed RTMR values against the model backend's quote RTMR fields.
@@ -350,6 +461,8 @@ The audit MUST verify:
 
 The audit MUST also state the exact security boundary of this check: event log replay validates internal consistency of event-log-derived RTMR values with quoted RTMR values, but does not by itself prove that RTMR values match an approved software baseline. If no baseline policy is enforced for MRTD/RTMR/MRSEAM-class measurements, that gap MUST be reported explicitly — for both gateway and model backend.
 
+> **Known divergence: Chutes/Sek8s.** Event log replay (§4.10 and §4.11) does not apply to chutes. Chutes performs RTMR verification server-side (validator-side) against a golden baseline; the event log is not exposed to clients. The `event_log_integrity` factor returns `Skip` with message: "chutes performs RTMR verification validator-side against a golden baseline; event log not exposed to clients". When auditing chutes, skip §4.10 and §4.11 and instead verify that the `Skip` result is correctly returned. The residual risk is that teep cannot independently verify RTMR3 runtime measurements for chutes.
+
 ### 4.12 Encryption Binding — Model Backend REPORTDATA
 
 The model backend's attestation report must bind channel identity and key material in a way that prevents key-substitution attacks.
@@ -369,6 +482,14 @@ The audit MUST verify:
 
 The audit MUST also verify that the model backend's REPORTDATA verifier is the shared nearai ReportDataVerifier (not a different implementation), and that a missing or unconfigured verifier fails safely (no default pass-through — per fail-closed policy).
 
+> **Known divergence: Chutes/Sek8s.** Chutes uses a completely different REPORTDATA binding scheme:
+> - `REPORTDATA[0:32]` = `SHA256(nonce_hex_string + e2e_pubkey_base64_string)` — string concatenation of the hex nonce and base64-encoded ML-KEM-768 public key, then SHA-256 hashed.
+> - `REPORTDATA[32:64]` = all zeros (no separate nonce half; the nonce is embedded in the first half).
+>
+> Key differences from nearcloud: (1) no `signing_address` or `tls_fingerprint` — the binding is nonce + public key only, (2) the nonce is included as a hex string (not raw bytes), (3) the E2EE public key is ML-KEM-768 (not Ed25519), (4) constant-time comparison via `subtle.ConstantTimeCompare` is still required.
+>
+> The chutes REPORTDATA verifier is in `internal/provider/chutes/reportdata.go` (a separate implementation from the nearai verifier). The audit for chutes MUST verify: (a) the string concatenation order is `nonce_hex + pubkey_base64` with no separator, (b) the ML-KEM-768 public key is the same key from the instances endpoint that will be used for E2EE, (c) a missing or empty `e2e_pubkey` results in a hard failure, (d) the comparison is constant-time.
+
 > NOTE: The model backend's `tls_cert_fingerprint` in REPORTDATA refers to the model backend's own TLS certificate, not the gateway's. Since the proxy connects to the gateway (not the model backend), the proxy cannot directly verify the model backend's TLS fingerprint against a live connection. The model backend's REPORTDATA binding establishes that the signing key for E2EE is bound to the attested model backend — but the TLS channel pinning is handled separately by the gateway attestation. The audit MUST document this trust delegation and note that the gateway's TLS attestation is the link that binds the live TLS connection to the overall attestation chain.
 
 ### 4.13 Encryption Binding — Gateway REPORTDATA
@@ -387,6 +508,8 @@ The audit MUST verify:
 - that failure of this check is enforced (blocks the request).
 
 The audit MUST also verify that the gateway REPORTDATA verifier is a separate implementation from the model REPORTDATA verifier (because the binding scheme differs), and that the correct verifier is used for each quote.
+
+> **Known divergence: Chutes/Sek8s.** Gateway REPORTDATA (§4.13) does not apply to chutes — there is no gateway CVM. Skip this section when auditing chutes.
 
 ### 4.14 TLS Pinning and Connection-Bound Attestation (Gateway)
 
@@ -411,6 +534,8 @@ The audit MUST verify pin-cache behavior:
 - that a cache miss always triggers full re-attestation (including both gateway and model), never a pass-through (per fail-closed policy),
 - that concurrent attestation attempts for the same (domain, SPKI) are collapsed (singleflight) with a double-check-after-winning pattern,
 - that the singleflight key includes both domain and SPKI (so a certificate rotation triggers a new attestation rather than coalescing with the old one).
+
+> **Known divergence: Chutes/Sek8s.** TLS pinning via gateway attestation (§4.14) does not apply to chutes in direct access mode — there is no attestation-bound TLS pinning to a gateway CVM. The `tls_key_binding` factor is in `ChutesDefaultAllowFail`. Chutes uses standard HTTPS to `llm.chutes.ai` with no attestation-bound SPKI pinning. The E2EE layer (ML-KEM-768) provides the primary confidentiality control instead of TLS pinning. When chutes evidence appears in a gateway-wrapped format, the TLS pinning belongs to the wrapping provider (not chutes).
 
 ### 4.15 NVIDIA TEE Verification Depth
 
@@ -442,6 +567,22 @@ If offline mode exists, the audit MUST state which NVIDIA checks remain active a
 In the gateway inference model, the model backend's attestation provides an Ed25519 public key (`signing_key`) that is bound to the model backend's TDX quote via REPORTDATA. The proxy uses this key for X25519-based E2EE (converting Ed25519 to X25519 for key exchange), encrypting request messages so that even the gateway cannot read them, and decrypting response messages that were encrypted by the model backend.
 
 > **Known divergence**: Venice uses a different E2EE protocol — secp256k1 ECDH + AES-256-GCM with a keccak256-derived REPORTDATA binding scheme. The Venice procol is actually a previous version of the nearcloud E2EE protocol, and so this section focuses on the mechanics of the latest nearcloud protocol.
+
+> **Known divergence: Chutes/Sek8s.** Chutes uses a completely different E2EE protocol based on post-quantum cryptography:
+>
+> **Key exchange:** ML-KEM-768 (NIST post-quantum KEM) instead of Ed25519/X25519 ECDH. The model backend provides an ML-KEM-768 public key (`e2e_pubkey`, base64-encoded) via the instances endpoint. The proxy encapsulates a shared secret using this public key.
+>
+> **Key derivation:** HKDF-SHA256 with the KEM ciphertext’s first 16 bytes as salt and context-specific info strings: `"e2e-req-v1"` (request encryption), `"e2e-resp-v1"` (non-streaming response), `"e2e-stream-v1"` (streaming response). Each derives a separate 32-byte ChaCha20-Poly1305 key.
+>
+> **Symmetric encryption:** ChaCha20-Poly1305 (not XChaCha20-Poly1305 — 12-byte nonce, not 24-byte). Request wire format: `[KEM_CT(1088) + nonce(12) + ciphertext + tag(16)]`, gzipped.
+>
+> **Streaming:** SSE events use `e2e_init` (KEM ciphertext) and `e2e` (encrypted chunks) event types, with independent stream key derivation. The relay implementation is in `internal/e2ee/relay_chutes.go` (completely separate from `relay.go`).
+>
+> **REPORTDATA binding of E2EE key:** The ML-KEM-768 public key is bound to the TDX quote via `REPORTDATA[0:32] = SHA256(nonce_hex + e2e_pubkey_base64)`. This prevents key substitution.
+>
+> **Nonce pool:** Chutes caches instances and nonces (`noncepool.go`) to avoid re-fetching attestation on every request. The audit MUST verify that cached nonces expire correctly, that instance failure tracking prevents reuse of failed instances, and that no E2EE key is used without a verified REPORTDATA binding.
+>
+> The audit for chutes MUST verify: (a) ML-KEM-768 encapsulation uses a standard implementation (`mlkem.Encapsulate768`), (b) fresh KEM ciphertext is generated per request, (c) HKDF info strings are distinct per direction, (d) `crypto/rand` is the sole nonce source, (e) ChaCha20-Poly1305 tag is always verified on decryption, (f) KEM shared secret and derived keys are zeroed after use.
 
 The audit MUST verify:
 - that the `signing_key` is obtained from the model backend's attestation (not the gateway's attestation),
@@ -548,6 +689,23 @@ The audit MUST evaluate whether additional factors should be enforced by default
 
 > **Known divergence**: Venice uses the global `DefaultAllowFail` (less strict than `NearcloudDefaultAllowFail`), has no gateway factors, and does not enforce `tdx_mrseam_mrtd` or `build_transparency_log` by default. Venice should have its own allowlist in the future.
 
+> **Known divergence: Chutes/Sek8s.** Chutes uses its own `ChutesDefaultAllowFail` list (defined in `internal/attestation/report.go`), which reflects the sek8s attestation model’s structural limitations. The chutes-specific allowed-to-fail factors include:
+> - `nvidia_signature` — GPU cert validation (sek8s doesn’t validate NVIDIA root the same way as dstack),
+> - `nvidia_nras_verified` — NRAS EAT not required,
+> - `tls_key_binding` — TLS cert fingerprint not included in REPORTDATA,
+> - `cpu_gpu_chain` — CPU-GPU binding not implemented,
+> - `measured_model_weights` — no weight evidence available (see `docs/attestation_gaps/model_weights.md`),
+> - `build_transparency_log` — no Rekor entries (no compose manifest),
+> - `cpu_id_registry` — Proof-of-Cloud not available for sek8s,
+> - `compose_binding` — not applicable (returns `Skip`; sek8s uses cosign admission, not docker-compose),
+> - `sigstore_verification` — not applicable (returns `Skip`; no container image digests in attestation),
+> - `event_log_integrity` — not applicable (returns `Skip`; event log not exposed to clients),
+> - `e2ee_usable` — same chicken-and-egg problem as nearcloud.
+>
+> Factors that remain **enforced** for chutes include: `nonce_match`, `tdx_quote_present`, `tdx_quote_structure`, `tdx_cert_chain`, `tdx_quote_signature`, `tdx_debug_disabled`, `tdx_mrseam_mrtd`, `tdx_reportdata_binding`, `intel_pcs_collateral`, `tdx_tcb_current`, `tdx_tcb_not_revoked`, `e2ee_capable`, `signing_key_present`.
+>
+> The audit for chutes MUST verify: (a) that Skip results for compose_binding, sigstore_verification, event_log_integrity, and build_transparency_log are correctly returned with explanatory messages, (b) that these Skip factors are in `ChutesDefaultAllowFail` and do not block traffic, (c) that the enforced factors provide adequate security despite the absence of compose/event-log/supply-chain checks, (d) that no enforced gateway factors exist (chutes has no gateway CVM).
+
 ### 5.2 Verification Cache Safety
 
 The necessary verification information MAY be cached locally so that Sigstore and Rekor do not need to be queried on every single connection attempt.
@@ -566,6 +724,8 @@ The audit MUST explicitly document each cache layer, its keys, TTLs, expiry/prun
 The audit MUST verify that cache eviction under memory pressure does not silently allow unattested connections. A cache miss MUST trigger re-attestation of BOTH gateway and model, never a pass-through. Per the fail-closed policy, any cache failure path that allows forwarding is a defect.
 
 The audit MUST also verify that the SPKI pin cache uses the gateway's domain and SPKI (since the proxy connects to the gateway, not the model backend directly).
+
+> **Known divergence: Chutes/Sek8s.** Chutes has a different caching model due to the absence of a gateway and the two-step attestation flow:\n> - **Nonce pool cache** (`noncepool.go`): Caches instances and nonces from the instances endpoint, keyed per chute, with TTL from `nonce_expires_in`. The audit MUST verify that nonce pool entries expire correctly and that a cache miss triggers a fresh instances fetch.\n> - **No SPKI pin cache**: Chutes does not use attestation-bound TLS pinning, so there is no SPKI pin cache.\n> - **Model resolver cache**: Human-readable model names are resolved to chute UUIDs with a 5-minute TTL. The audit MUST verify that a failed resolution does not serve a stale mapping.\n> - Cache eviction MUST NOT allow unattested E2EE key usage. A nonce pool miss must trigger fresh attestation before any E2EE session.
 
 ### 5.3 Negative Cache and Failure Recovery
 
@@ -652,6 +812,23 @@ The audit MUST evaluate the security properties that survive a gateway compromis
 - **Attestation relay integrity**: A compromised gateway could attempt to relay a different model backend's attestation (pointing to a compromised machine). The pinning of the gateway's own TLS certificate via its TDX quote limits this — but the model backend's TLS fingerprint is not directly verified against a live connection (since the proxy connects to the gateway). The audit MUST document whether there is a binding between the gateway and the specific model backend that prevents the gateway from routing to an unattested machine.
 
 The audit MUST quantify the residual risk and clearly state which attack scenarios are mitigated by E2EE and which are not.
+
+#### Chutes/Sek8s Trust Model
+
+The chutes trust model is fundamentally different from the gateway model. Since there is no TEE-attested gateway, the trust delegation is simpler but the trust surface is different:
+
+1. **No gateway trust**: The proxy connects to `llm.chutes.ai` via standard HTTPS. There is no attestation-bound TLS pinning. The TLS connection itself is not cryptographically bound to a TEE.
+2. **E2EE key integrity via REPORTDATA**: The ML-KEM-768 public key is bound to the TDX quote via REPORTDATA. The proxy encrypts using this key, ensuring that only the attested TEE can decrypt.
+3. **Request/response confidentiality**: ML-KEM-768 + ChaCha20-Poly1305 E2EE protects content from any intermediary, including the Chutes infrastructure itself.
+
+**Residual trust assumptions specific to chutes/sek8s** (documented in `docs/attestation_gaps/sek8s_integrity.md`):
+- **Cosign admission controller**: Teep trusts that the cosign admission webhook inside each sek8s TEE VM is correctly configured and enforcing. Teep has zero visibility into which containers are running.
+- **LUKS boot gating**: Teep trusts that the Chutes validator (`chutes-api`) correctly withholds the LUKS decryption key for VMs whose measurements do not match golden values. If the LUKS passphrase leaked, measurement-passing VMs could be substituted.
+- **Golden measurement correctness**: Teep's pinned MRTD/RTMR0-2 values are captured from observed Chutes deployments. They are only trustworthy if the deployment was running the correct sek8s image at capture time.
+- **Runtime attestation**: RTMR3/IMA verification is entirely server-side. Teep trusts that Chutes re-attests running VMs.
+- **Model weight integrity**: Depends entirely on the measured boot chain preventing unauthorized image loading. Neither watchtower verification nor cllmv per-token verification is available to teep for TEE instances.
+
+The audit for chutes MUST include a dedicated section evaluating these trust assumptions and their residual risk.
 
 ### 7.2 Report Writing
 

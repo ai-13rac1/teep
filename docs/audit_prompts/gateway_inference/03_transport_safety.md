@@ -115,6 +115,26 @@ Verify and report:
 - **Resource exhaustion prevention**: Verify that a malicious attested server cannot cause resource exhaustion by sending extremely large headers, slow responses (slowloris-style), or unbounded SSE streams.
 - **Connection isolation**: Verify that connection state from one client request cannot leak into another client's request through connection reuse, shared buffers, or cached connection metadata.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes providers do **not** use attestation-bound TLS pinning or the gateway keep-alive/close connection lifecycle. Key differences:
+
+- **No raw HTTP construction**: Chutes uses standard Go `http.Client` for all requests (instances endpoint, evidence endpoint, inference endpoint). There is no raw TLS connection management.
+- **No `Connection: keep-alive` / `Connection: close` lifecycle**: Each chutes HTTP request is independent. The attestation fetch (instances + evidence) and inference request are separate HTTP calls, not pipelined on a single TLS connection.
+- **No SPKI pinning**: Standard HTTPS with system CA verification. No `InsecureSkipVerify` override.
+- **No certificate extraction**: The chutes code path does not extract TLS peer certificates for SPKI comparison.
+- **Standard response handling**: Responses are read via `http.Response.Body` through Go's standard library.
+
+However, the following transport safety checks still apply to chutes:
+- Response body size limits (`io.LimitReader`) on attestation and inference responses.
+- SSE streaming buffer bounds for encrypted streaming (`e2e_init`, `e2e` event types).
+- Sensitive data handling (API key redaction, no inference data logging).
+- `Connection: close` header on inference requests to prevent TLS session reuse across attestation boundaries.
+
+The audit should verify that chutes transport paths apply the same bounded-read discipline as nearcloud even though the connection lifecycle is simpler.
+
+Primary reference: `internal/provider/chutes/fetch.go`, `internal/e2ee/relay_chutes.go`.
+
 ## Section Deliverable
 
 Provide:

@@ -147,6 +147,35 @@ For the pinned connection path, verify whether offline mode is honored. The offl
 - **Fail-secure defaults**: A new provider added without REPORTDATA verifier implementations cannot silently pass verification.
 - **Connection isolation**: Same TCP/TLS connection used for attestation fetch and inference.
 
+## Known Divergence: Chutes/Sek8s
+
+Chutes/sek8s uses a fundamentally different REPORTDATA scheme and has no gateway REPORTDATA, no TLS pinning, and no SPKI cache.
+
+### Chutes REPORTDATA Scheme
+
+- `REPORTDATA[0:32]` = `SHA256(nonce_hex + e2e_pubkey_base64)` — the nonce as lowercase hex string concatenated with the ML-KEM-768 public key as base64, then SHA-256 hashed.
+- `REPORTDATA[32:64]` = zero bytes.
+- The binding combines the attestation nonce AND the E2EE public key in a single commitment, unlike nearcloud which splits nonce and key binding across the two REPORTDATA halves.
+
+Audit focus:
+- Verify the concatenation format: `hex(nonce) + base64(pubkey)` with no separator.
+- Verify constant-time comparison for the first 32 bytes.
+- Verify the second half is checked to be all zeros (or document if it is not checked).
+- The `tdx_reportdata_binding` factor is enforced for chutes.
+
+Primary reference: `internal/provider/chutes/reportdata.go`.
+
+### No Gateway REPORTDATA, TLS Pinning, or SPKI Cache
+
+Chutes providers connect directly to the inference endpoint (no gateway CVM). Therefore:
+- No `gateway_tdx_reportdata_binding` factor exists.
+- No SPKI pin cache is maintained for chutes providers.
+- No `tls_key_binding` enforcement — `tls_key_binding` is in `ChutesDefaultAllowFail`.
+- Standard HTTPS is used without attestation-bound TLS pinning.
+- Certificate Transparency checks do not apply.
+
+The audit should verify that the chutes code path does not attempt to use SPKI pinning or gateway REPORTDATA logic.
+
 ## Section Deliverable
 
 Provide:

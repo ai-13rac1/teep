@@ -130,6 +130,12 @@ Track separately — do NOT treat as present controls:
 - **Fail-open semantics**: Document as known trade-off between availability and security.
 - **Trust server compromise**: Single compromised server can deny service; all 3 must cooperate for success.
 
+## Known Divergence: Chutes/Sek8s
+
+For chutes providers, `cpu_id_registry` is in `ChutesDefaultAllowFail`, making Proof-of-Cloud informational-only (same as nearcloud's default). There is no `gateway_cpu_id_registry` factor since chutes has no gateway CVM.
+
+The chutes attestation flow extracts PPID from the TDX quote's PCK certificate chain the same way as nearcloud. The audit should verify that the PoC code path is agnostic to the provider type and handles chutes attestation data correctly.
+
 ## Section Deliverable
 
 Provide:

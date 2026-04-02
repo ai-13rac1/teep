@@ -135,6 +135,20 @@ Identify which NVIDIA checks remain active offline and which are skipped:
 - **Trust boundary**: Local EAT proves evidence is well-formed and signed. NRAS proves firmware matches golden values.
 - **Input validation on binary parsing**: SPDM bounds checks prevent buffer overread.
 
+## Known Divergence: Chutes/Sek8s
+
+For chutes providers, NVIDIA attestation factors `nvidia_signature` and `nvidia_nras_verified` are both in `ChutesDefaultAllowFail`. This means:
+- Local NVIDIA EAT/SPDM verification is computed but non-blocking.
+- Remote NRAS verification is computed but non-blocking.
+- `nvidia_payload_present`, `nvidia_claims`, and `nvidia_nonce_client_bound` enforcement depends on whether they appear in the allow-fail list (verify against `ChutesDefaultAllowFail`).
+
+The chutes attestation response includes GPU evidence via a separate endpoint (`/chutes/{chute}/evidence?nonce={hex}`), which returns an array of GPU evidence objects. The audit should verify:
+- That GPU evidence parsing uses the same `nvidia_eat.go` code path as nearcloud.
+- That GPU evidence count is bounded (max 64 per `MaxGPUEvidence`).
+- That a missing GPU evidence array does not cause a false pass.
+
+Primary reference: `internal/provider/chutes/policy.go`, `internal/provider/chutes/fetch.go`.
+
 ## Section Deliverable
 
 Provide:

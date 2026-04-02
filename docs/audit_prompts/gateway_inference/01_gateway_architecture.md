@@ -79,7 +79,23 @@ Venice is a gateway provider with a fundamentally weaker security model:
 - Venice's `ServerVerification` field is an untrusted gateway-side claim that is parsed but NOT independently verified by teep,
 - Venice forwards model backend attestation (which may be produced by NearAI infrastructure), but the gateway itself is not hardware-attested,
 - The audit SHOULD document Venice's weaker gateway model as a contrast to nearcloud's full dual-tier attestation, but as these issues are server-side, they are not findings to fix in teep.
+### Known Architectural Divergence: Chutes/Sek8s
 
+Chutes uses a fundamentally different architecture from both nearcloud and Venice:
+- Chutes does NOT use a gateway architecture at all. The proxy connects directly to the inference cluster (`llm.chutes.ai`) or receives chutes evidence via a gateway-wrapped response from another provider (e.g., NanoGPT via `internal/provider/chutes_format.go`).
+- There is no `PinnedHandler`, no gateway TDX quote, no gateway compose binding, and no gateway REPORTDATA.
+- The attestation flow is **two-step**: an instances endpoint (`GET /e2e/instances/{chute}`) returns available TEE instances with ML-KEM-768 public keys, then an evidence endpoint (`GET /chutes/{chute}/evidence?nonce={hex}`) returns TDX quotes per instance.
+- Instance-to-evidence matching is by instance ID, with bounds checking (max 256 instances, max 256 evidence entries, max 64 GPU evidence per instance).
+- Model resolution uses a separate cache (`resolve.go`) that maps human-readable model names to chute UUIDs with a 5-minute TTL.
+
+**Primary files for chutes architecture audit:**
+- [`internal/provider/chutes/chutes.go`](../../../internal/provider/chutes/chutes.go) \u2014 two-step attestation flow
+- [`internal/provider/chutes/models.go`](../../../internal/provider/chutes/models.go) \u2014 TEE model discovery
+- [`internal/provider/chutes/resolve.go`](../../../internal/provider/chutes/resolve.go) \u2014 model name resolution
+- [`internal/provider/chutes/noncepool.go`](../../../internal/provider/chutes/noncepool.go) \u2014 nonce/instance caching
+- [`internal/provider/chutes_format.go`](../../../internal/provider/chutes_format.go) \u2014 gateway-wrapped format parsing
+
+When chutes evidence appears in a gateway-wrapped format, the audit MUST verify that the gateway-wrapped parsing extracts the inner chutes evidence correctly and applies all chutes-specific verification (TDX quote, REPORTDATA binding, measurement policy).
 ## Section Deliverable
 
 Provide:
