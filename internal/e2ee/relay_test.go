@@ -663,3 +663,25 @@ func TestDecryptDeltaFields_EmptyStringSkipped(t *testing.T) {
 		t.Error("expected no changes for empty string")
 	}
 }
+
+func TestEffectiveTokens(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens int
+		chunks int
+		want   int
+	}{
+		{"tokens available", 42, 10, 42},
+		{"tokens zero, falls back to chunks", 0, 10, 10},
+		{"both zero", 0, 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ss := &StreamStats{Tokens: tc.tokens, Chunks: tc.chunks}
+			got := ss.EffectiveTokens()
+			if got != tc.want {
+				t.Errorf("EffectiveTokens() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
