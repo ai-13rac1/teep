@@ -1,3 +1,8 @@
+---
+applyTo: "**"
+excludeAgent: "coding-agent"
+---
+
 # Teep Code Review Instructions
 
 Teep is a TEE attestation proxy for private LLM inference. It is **critical
@@ -26,8 +31,8 @@ for security validation.
 - All comparisons of secrets, keys, fingerprints, nonces, or hashes MUST use
   `subtle.ConstantTimeCompare`. Flag any use of `==`, `!=`, `bytes.Equal`,
   or `strings.EqualFold` on security-sensitive values.
-- Encryption MUST be authenticated (AES-GCM, not AES-CTR/CBC alone).
 - Encryption keys MUST be bound to TEE attestation.
+- Encryption MUST be used when requested; plaintext fallback is unacceptable!
 - Nonce generation MUST use `crypto/rand`. If randomness fails, the code MUST
   panic or return an error — never use a weak source.
 
@@ -51,12 +56,14 @@ for security validation.
 
 - Error returns block the request — no silent swallowing.
 - Unknown or misspelled config values MUST be rejected at startup.
-- JSON unmarshalling SHOULD use strict mode (reject unknown fields).
+- JSON unmarshalling SHOULD use strict mode (warn or reject unknown fields).
 - Malformed attestation data MUST fail the entire response, not skip elements.
 
 ## Go Conventions
 
+- Ensure Effective Go idioms and best practices are followed.
 - All new code and bug fixes require unit test coverage.
+- New providers or major features require integration test coverage.
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
 - Use `Connection: close` or equivalent to prevent TLS connection reuse
   across attestation boundaries.
