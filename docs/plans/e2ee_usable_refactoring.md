@@ -28,6 +28,9 @@ part of PR #33 review fixes:
 | (chutes-reliability) | `ParseAttestationResponse` iterates evidence entries to match known instances | New: fleet dynamics fix |
 | (chutes-reliability) | Retry loop (up to 3 attempts) for Chutes E2EE upstream failures with instance failover | New: transport-level retry |
 | (chutes-reliability) | Integration test client timeout increased from 120s to 5 minutes | Test infra |
+| `89276e6` | Validate E2EE material (pubkey + nonces) at evidence match time; fail closed on `meta != nil && meta.Session == nil`; introduce `upstreamBody` struct decoupling instance tracking from `meta` | New: pre-relay guard, interface change |
+| `db1ed0a` | Fix inaccurate comments (retry failover wording, ParseAttestationResponse doc, test comments) | Comment fixes |
+| `7c27ae0` | `CandidatesEval` tracks skipped entries; error counters on fail-closed path (`s.stats.errors`, `ms.errors`, `slog.ErrorContext`) | Step 4 (partial), observability |
 
 These commits resolve P1 (chicken-and-egg blocking) by making `e2ee_usable`
 allowed-to-fail for all providers. The remaining short-term work (steps 2–4,
@@ -185,6 +188,13 @@ by marking the failed instance via `NoncePool.MarkFailed(chuteID,
 instanceID)`, zeroing crypto material via `zeroE2EESessions`, and retrying
 with a fresh nonce/key from a different instance.
 
+`buildUpstreamBody` returns an `upstreamBody` struct that carries `Body`,
+`Session`, `Meta`, `ChuteID`, and `InstanceID`. The `ChuteID`/`InstanceID`
+fields are populated from the raw attestation (or nonce pool) and are
+independent of `meta.Session` being populated — this decoupling allows
+the retry loop to track instances for `MarkFailed` even when the
+encryptor returns `meta == nil` (e.g. in tests or non-E2EE paths).
+
 This is distinct from the plan's post-relay enforcement (step 4), which
 covers **cryptographic** failures (decryption failed after a successful HTTP
 response). The retry loop runs *before* the relay; post-relay enforcement
@@ -193,19 +203,33 @@ runs *after* it.
 **Hazard — escalation gap**: When all 3 retry attempts fail, the current
 implementation either forwards the last upstream HTTP status (if a
 response was received, e.g. repeated 503s) or returns HTTP 502 on pure
-transport errors, but in all cases does NOT mark the provider+model as
-persistently failed. The next request will retry from scratch (via the
-nonce pool, which deprioritizes but does not remove failed instances).
-Once the E2EE state machine (long-term step 1) is implemented, retry
-exhaustion should escalate to `E2EETracker.MarkFailed(provider, model)`
-with full cache invalidation.
+transport errors. Per-instance `MarkFailed` now fires on every retryable
+failure including the final attempt, so the nonce pool correctly
+deprioritizes all failed instances on subsequent requests. However, the
+provider+model pair is NOT marked as persistently failed — the next
+request will still retry from scratch. Once the E2EE state machine
+(long-term step 1) is implemented, retry exhaustion should escalate to
+`E2EETracker.MarkFailed(provider, model)` with full cache invalidation.
 See "Nonce pool failure escalation" in Future Considerations.
 
 **Hazard — retry + decryption failure interaction**: If the retry loop
 succeeds on the last attempt (transport OK) but the relay then detects a
 decryption failure, the plan's step 4 post-relay enforcement must still
 fire using the *last successful attempt's* instance info for the
-`MarkFailed` / `Invalidate` call.
+`MarkFailed` / `Invalidate` call. Instance info is available via
+`attemptChuteID` / `attemptInstanceID` (from the `upstreamBody` struct),
+not from `meta`.
+
+**Safeguard — pre-relay session guard**: A fail-closed check
+(`meta != nil && meta.Session == nil`) now runs *before* the relay
+dispatch switch. This catches a different class of failure than post-relay
+enforcement: if Chutes E2EE metadata was populated (meta is non-nil) but
+key encapsulation failed to produce a session, the guard returns HTTP 500
+instead of forwarding ciphertext as plaintext. Error counters
+(`s.stats.errors`, `ms.errors`) and `slog.ErrorContext` are incremented.
+This is complementary to post-relay enforcement — it catches
+pre-relay invariant violations, while step 4 catches post-relay
+cryptographic failures.
 
 ---
 
@@ -257,11 +281,17 @@ wrong enforcement point. Instead:
      s.cache.Delete(prov.Name, upstreamModel)
      s.signingKeyCache.Delete(prov.Name, upstreamModel)
      // Chutes nonce pool: discard cached instances/nonces for this chute.
+     // attemptChuteID comes from upstreamBody struct, not meta.
      if prov.E2EEMaterialFetcher != nil {
-         prov.E2EEMaterialFetcher.Invalidate(chuteID)
+         prov.E2EEMaterialFetcher.Invalidate(attemptChuteID)
      }
      // Zero crypto material from the current session.
      zeroE2EESessions(session, meta)
+     // Increment error counters so monitoring captures this failure.
+     s.stats.errors.Add(1)
+     if ms != nil {
+         ms.errors.Add(1)
+     }
      ```
    - Note: the nonce pool (`E2EEMaterialFetcher`) is a third cache alongside
      the report cache and signing key cache. All three must be invalidated
