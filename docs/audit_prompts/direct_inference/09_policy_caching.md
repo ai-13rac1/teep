@@ -47,33 +47,38 @@ The [`Blocked()`](../../../internal/attestation/report.go:63) method on `Verific
 
 #### Factor Configuration Mechanism
 
+Teep uses an **inverted enforcement model**: any factor NOT in the provider's `DefaultAllowFail` list is enforced by default. Adding a new factor automatically enforces it unless explicitly added to the allow-fail list. The neardirect provider uses `NeardirectDefaultAllowFail` (defined in `internal/attestation/report.go`), which is stricter than the global `DefaultAllowFail`.
+
 Enforcement is configured via a three-layer mechanism:
-1. **Hardcoded defaults** — [`DefaultEnforced`](../../../internal/attestation/report.go:76) in `report.go`, copied at startup,
-2. **TOML config file** — `[policy] enforce = [...]` overrides the default list entirely when present,
+1. **Hardcoded defaults** — `DefaultAllowFail` and provider-specific `NeardirectDefaultAllowFail` in `report.go`,
+2. **TOML config file** — `[policy] allow_fail = [...]` overrides the default allow-fail list when present,
 3. **No per-factor env var override** — individual factors cannot be toggled via environment.
 
 The audit MUST verify:
-- that `DefaultEnforced` is copied (not shared by reference) so runtime mutations cannot affect the default,
-- that the `[policy] enforce` list in TOML **replaces** (not appends to) the default, and whether this behavior is clearly documented,
-- that unknown factor names in the TOML enforce list are rejected at startup by checking against [`KnownFactors`](../../../internal/attestation/report.go:93) (the code uses a `map[string]bool` lookup for this validation in [`config.go`](../../../internal/config/config.go:140-149)).
+- that `DefaultAllowFail` / `NeardirectDefaultAllowFail` are copied (not shared by reference) so runtime mutations cannot affect the default,
+- that the TOML `allow_fail` list **replaces** (not appends to) the default, and whether this behavior is clearly documented,
+- that unknown factor names in the TOML enforce/allow_fail list are rejected at startup by checking against [`KnownFactors`](../../../internal/attestation/report.go:93).
 
-#### Expected Currently-Enforced Defaults
+#### Neardirect Allowed-to-Fail Factors
 
-Validate the actual [`DefaultEnforced`](../../../internal/attestation/report.go:76) list in code. Note that the code may include additional factors beyond this expected set:
-- `nonce_match`
-- `tdx_cert_chain`
-- `tdx_quote_signature`
-- `tdx_debug_disabled`
-- `signing_key_present`
-- `tdx_reportdata_binding`
-- `compose_binding`
-- `nvidia_signature`
-- `nvidia_nonce_match`
-- `build_transparency_log`
-- `sigstore_verification`
-- `event_log_integrity`
+The current `NeardirectDefaultAllowFail` factors are:
+- `tdx_hardware_config` — RTMR0 (varies per deployment hardware),
+- `tdx_boot_config` — RTMR1/RTMR2,
+- `e2ee_usable` — chicken-and-egg problem: starts as Skip, promoted to Fail by `BuildReport` when enforced, blocking the request needed to prove E2EE works,
+- `cpu_gpu_chain` — not yet implemented,
+- `measured_model_weights` — not yet implemented,
+- `cpu_id_registry` — Proof-of-Cloud hardware registry.
 
-Also evaluate whether controls such as `tdx_tcb_current` should be enforced by default, and document the rationale for the current enforcement boundary.
+All other factors are enforced by default for neardirect, including:
+- `nonce_match`, `tdx_quote_present`, `tdx_quote_structure`, `tdx_cert_chain`, `tdx_quote_signature`, `tdx_debug_disabled`,
+- `tdx_mrseam_mrtd` — enforces MRSEAM and MRTD allowlists,
+- `signing_key_present`, `tdx_reportdata_binding`,
+- `tdx_tcb_not_revoked`, `intel_pcs_collateral`, `tdx_tcb_current`,
+- `nvidia_payload_present`, `nvidia_signature`, `nvidia_claims`, `nvidia_nonce_client_bound`, `nvidia_nras_verified`,
+- `e2ee_capable`, `tls_key_binding`,
+- `compose_binding`, `sigstore_verification`, `build_transparency_log`, `event_log_integrity`.
+
+The audit MUST evaluate whether additional factors should be enforced and document the rationale for the current enforcement boundary.
 
 #### Complete Factor Inventory
 
@@ -162,7 +167,7 @@ Verify and report:
 ### Go (Golang) Best Practices
 
 - **Map concurrency safety**: Verify that all cache maps are protected by appropriate synchronization (`sync.Mutex`, `sync.RWMutex`, or `sync.Map`). Unsynchronized `map` access from multiple goroutines causes data races and potential panics.
-- **Slice copy for defaults**: [`DefaultEnforced`](../../../internal/attestation/report.go:76) is a package-level `var` slice. Verify that callers copy it (`append([]string(nil), DefaultEnforced...)`) rather than sharing the backing array, to prevent mutation from one caller affecting another.
+- **Slice copy for defaults**: `DefaultAllowFail` and `NeardirectDefaultAllowFail` are package-level `var` slices. Verify that callers copy them rather than sharing the backing array, to prevent mutation from one caller affecting another.
 - **Error wrapping**: Verify that errors from cache operations and enforcement checks use `%w` wrapping to preserve sentinel error matching (e.g., `errors.Is`) through the call chain.
 - **Interface usage for caching**: Check whether cache layers use interfaces that allow test substitution (mock caches for unit testing eviction behavior and race conditions).
 - **Bounded iteration**: Factor evaluation in [`BuildReport()`](../../../internal/attestation/report.go:135) iterates a fixed set of factors. Verify there is no input-controlled iteration count that could cause performance degradation.
@@ -175,7 +180,7 @@ Verify and report:
 
 ### General Security Audit Practices
 
-- **Fail-secure defaults**: If `DefaultEnforced` is empty or misconfigured, the proxy should refuse to start or refuse all traffic — never default to allowing everything.
+- **Fail-secure defaults**: With the inverted enforcement model, an empty `DefaultAllowFail` means ALL factors are enforced — verify this is the desired fail-secure behavior. If the allow-fail configuration is corrupted, the proxy should enforce everything rather than allow everything.
 - **Defense in depth for caching**: Cache corruption or eviction must always result in re-verification, never in silent trust.
 - **Trust boundary at cache boundaries**: Cached data that originated from untrusted sources (attestation responses, NRAS JWTs) must be re-validated on use if the cache format could be corrupted.
 - **Audit trail**: Verify that enforcement decisions (blocked or allowed) are logged with sufficient detail for post-incident forensic analysis, including which factors passed/failed and whether the result was from cache or fresh verification.

@@ -79,7 +79,15 @@ Verify and report:
 - Fulcio certificate provenance extraction via X.509 extension OIDs (1.3.6.1.4.1.57264.1.*),
 - accepted signer identity model: which OIDC issuer values and identity patterns are accepted by the provider configuration, and whether the check is exact-match or prefix/glob,
 - behavior when digest appears in Sigstore but the Rekor entry has a raw public key (no Fulcio cert): `HasCert: false` — verify whether this is treated as passing provenance (risky) or only as presence confirmation,
+- handling of Rekor entries that lack DSSE (Dead Simple Signing Envelope) signatures — some images have Rekor transparency log entries but no DSSE envelope signatures; the `NoDSSE` field in `ImageProvenance` controls whether this is accepted,
 - when multiple Rekor UUIDs are returned for a digest, only the first is fetched — document whether this is a risk (attacker could front-run with a valid-looking entry).
+
+For the neardirect provider, the supply chain policy (`internal/provider/neardirect/policy.go`) defines allowed images and their expected provenance:
+- `datadog/agent` — Sigstore-verified via cosign public key (not Fulcio),
+- `certbot/dns-cloudflare` — compose-binding-only (no Sigstore/Rekor provenance available),
+- `nearaidev/compose-manager` — Fulcio-signed via GitHub Actions OIDC (`https://token.actions.githubusercontent.com`), with expected source repository `nearai/compose-manager`.
+
+Each image entry specifies its expected provenance type. The audit MUST verify that the code correctly handles each type: Fulcio OIDC identity match, cosign key verification, and compose-binding-only fallback.
 
 ### Outage Behavior and Enforcement Classification
 
