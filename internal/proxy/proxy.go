@@ -934,37 +934,40 @@ func (s *Server) buildUpstreamBody(
 		// /e2e/instances data. Full attestation (evidence + TDX verify)
 		// was already done in fetchAndVerify and is cached in the report.
 		//
-		// Only accept a nonce-pool key if it matches a previously
-		// attested signing key for this provider+model. This keeps
-		// the ML-KEM public key cryptographically bound to a verified
-		// TDX quote and preserves fail-closed behavior.
+		// Only consume from the nonce pool if we already have a cached
+		// signing key. This avoids wasting nonces when the signing key
+		// cache is cold (fresh attestation is needed anyway). The pool
+		// key must match the attested key via constant-time comparison
+		// to keep ML-KEM bound to a verified TDX quote.
 		if prov.E2EEMaterialFetcher != nil {
-			mat, err := prov.E2EEMaterialFetcher.FetchE2EEMaterial(ctx, upstreamModel)
-			if err != nil {
-				return nil, nil, nil, err
-			}
 			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); !ok {
-				slog.DebugContext(ctx, "E2EE key exchange: nonce pool key rejected (no cached signing key)",
+				slog.DebugContext(ctx, "E2EE key exchange: no cached signing key; skipping nonce pool",
 					"provider", prov.Name, "model", upstreamModel,
-					"instance_id", mat.InstanceID,
-				)
-				// Fall through to fresh attestation below.
-			} else if subtle.ConstantTimeCompare([]byte(cachedKey), []byte(mat.E2EPubKey)) != 1 {
-				slog.DebugContext(ctx, "E2EE key exchange: nonce pool key mismatch; forcing fresh attestation",
-					"provider", prov.Name, "model", upstreamModel,
-					"instance_id", mat.InstanceID,
 				)
 				// Fall through to fresh attestation below.
 			} else {
-				slog.DebugContext(ctx, "E2EE key exchange: using nonce pool",
-					"provider", prov.Name, "model", upstreamModel,
-					"instance_id", mat.InstanceID,
-				)
-				raw = &attestation.RawAttestation{
-					SigningKey: mat.E2EPubKey,
-					InstanceID: mat.InstanceID,
-					E2ENonce:   mat.E2ENonce,
-					ChuteID:    mat.ChuteID,
+				mat, err := prov.E2EEMaterialFetcher.FetchE2EEMaterial(ctx, upstreamModel)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if subtle.ConstantTimeCompare([]byte(cachedKey), []byte(mat.E2EPubKey)) != 1 {
+					slog.DebugContext(ctx, "E2EE key exchange: nonce pool key mismatch; invalidating pool",
+						"provider", prov.Name, "model", upstreamModel,
+						"instance_id", mat.InstanceID,
+					)
+					prov.E2EEMaterialFetcher.Invalidate(mat.ChuteID)
+					// Fall through to fresh attestation below.
+				} else {
+					slog.DebugContext(ctx, "E2EE key exchange: using nonce pool",
+						"provider", prov.Name, "model", upstreamModel,
+						"instance_id", mat.InstanceID,
+					)
+					raw = &attestation.RawAttestation{
+						SigningKey: mat.E2EPubKey,
+						InstanceID: mat.InstanceID,
+						E2ENonce:   mat.E2ENonce,
+						ChuteID:    mat.ChuteID,
+					}
 				}
 			}
 		} else if !prov.SkipSigningKeyCache {
