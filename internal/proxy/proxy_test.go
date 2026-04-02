@@ -3194,6 +3194,9 @@ func TestChutesRetry_FailoverOnUpstream502(t *testing.T) {
 	if fetcher.markFailedCalls != 1 {
 		t.Errorf("markFailedCalls = %d, want 1 (first attempt only)", fetcher.markFailedCalls)
 	}
+	if fetcher.lastMarkedInst != "inst-A" {
+		t.Errorf("lastMarkedInst = %q, want %q (first attempt instance)", fetcher.lastMarkedInst, "inst-A")
+	}
 }
 
 // TestChutesRetry_NoRetryOnSuccess verifies that when the first Chutes E2EE

@@ -227,13 +227,13 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 			continue
 		}
 		if inst.E2EPubKey == "" {
-			slog.Info("chutes: skipping instance with empty e2e_pubkey",
+			slog.Debug("chutes: skipping instance with empty e2e_pubkey",
 				"instance_id", ar.Evidence[i].InstanceID)
 			skipped++
 			continue
 		}
 		if len(inst.Nonces) == 0 {
-			slog.Info("chutes: skipping instance with no nonces",
+			slog.Debug("chutes: skipping instance with no nonces",
 				"instance_id", ar.Evidence[i].InstanceID)
 			skipped++
 			continue
