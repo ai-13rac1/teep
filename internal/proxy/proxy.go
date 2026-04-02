@@ -164,6 +164,17 @@ func respStatusCode(resp *http.Response) int {
 	return resp.StatusCode
 }
 
+// upstreamBody holds the result of buildUpstreamBody: the encrypted (or
+// plaintext) body, any E2EE session state, and Chutes instance tracking IDs
+// for the retry loop's MarkFailed calls.
+type upstreamBody struct {
+	Body       []byte
+	Session    e2ee.Decryptor
+	Meta       *e2ee.ChutesE2EE
+	ChuteID    string // For MarkFailed (from raw attestation, not meta)
+	InstanceID string // For MarkFailed (from raw attestation, not meta)
+}
+
 // zeroE2EESessions zeroes crypto material from a failed E2EE attempt.
 func zeroE2EESessions(session e2ee.Decryptor, meta *e2ee.ChutesE2EE) {
 	if session != nil {
@@ -720,11 +731,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		upstreamBody  []byte
+		reqBody       []byte
 		session       e2ee.Decryptor
 		meta          *e2ee.ChutesE2EE
 		resp          *http.Response
 		attemptCancel context.CancelFunc
+		// Per-attempt Chutes instance tracking for MarkFailed/logging,
+		// independent of meta.Session being populated.
+		attemptChuteID    string
+		attemptInstanceID string
 	)
 
 	for attempt := range maxAttempts {
@@ -737,9 +752,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		e2eeStart := time.Now()
 
-		upstreamBody, session, meta, err = s.buildUpstreamBody(ctx, body, upstreamModel, e2eeActive, prov, freshRaw)
+		ub, buildErr := s.buildUpstreamBody(ctx, body, upstreamModel, e2eeActive, prov, freshRaw)
 		e2eeDur += time.Since(e2eeStart)
-		if err != nil {
+
+		if buildErr != nil {
+			err = buildErr
 			if attempt < maxAttempts-1 && !errors.Is(err, context.Canceled) {
 				slog.WarnContext(ctx, "chutes: E2EE body build failed, retrying",
 					"provider", prov.Name, "model", upstreamModel, "attempt", attempt+1, "err", err)
@@ -753,10 +770,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		reqBody = ub.Body
+		session = ub.Session
+		meta = ub.Meta
+		attemptChuteID = ub.ChuteID
+		attemptInstanceID = ub.InstanceID
+
 		var attemptCtx context.Context
 		attemptCtx, attemptCancel = context.WithTimeout(ctx, upstreamTimeout)
 
-		upstreamReq, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
+		upstreamReq, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(reqBody))
 		if reqErr != nil {
 			attemptCancel()
 			zeroE2EESessions(session, meta)
@@ -781,16 +804,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// Mark the instance as failed so the nonce pool deprioritises it
 		// on subsequent requests, even on the final attempt.
-		if retryable && meta != nil && prov.E2EEMaterialFetcher != nil {
-			prov.E2EEMaterialFetcher.MarkFailed(meta.ChuteID, meta.InstanceID)
+		if retryable && attemptInstanceID != "" && prov.E2EEMaterialFetcher != nil {
+			prov.E2EEMaterialFetcher.MarkFailed(attemptChuteID, attemptInstanceID)
 		}
 
 		if attempt < maxAttempts-1 && retryable {
 			attemptCancel()
-			if meta != nil {
+			if attemptInstanceID != "" {
 				slog.WarnContext(ctx, "chutes: upstream attempt failed, trying different instance",
 					"provider", prov.Name, "model", upstreamModel,
-					"instance_id", meta.InstanceID, "attempt", attempt+1,
+					"instance_id", attemptInstanceID, "attempt", attempt+1,
 					"err", err, "status", respStatusCode(resp))
 			}
 			zeroE2EESessions(session, meta)
@@ -844,6 +867,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// E2EE forces stream=true upstream (Venice/NearCloud) or uses /e2e/invoke
 	// (Chutes), so the response is always SSE. When the client requested
 	// non-streaming, reassemble the decrypted SSE chunks into a single JSON response.
+	//
+	// Fail closed: if Chutes E2EE metadata was populated (meta != nil) but
+	// the session is missing, something went wrong during key encapsulation.
+	// Forwarding the ciphertext response as plaintext would leak confidential
+	// data, so we abort.
+	if meta != nil && meta.Session == nil {
+		status = "e2ee_session_missing"
+		http.Error(w, "e2ee session not established", http.StatusInternalServerError)
+		return
+	}
 	switch {
 	case meta != nil && meta.Session != nil && req.Stream:
 		e2ee.RelayStreamChutes(ctx, w, resp.Body, meta.Session)
@@ -1034,9 +1067,6 @@ func (s *Server) handlePinnedChat(
 // When freshRaw is non-nil (cache miss path), its signing key is reused — the
 // REPORTDATA binding was already verified by fetchAndVerify. When freshRaw is
 // nil (cache hit), a fresh attestation is fetched and re-verified.
-//
-// Returns the encoded body, the session (nil for plaintext), Chutes metadata
-// (nil for non-Chutes), and any error.
 func (s *Server) buildUpstreamBody(
 	ctx context.Context,
 	rawBody []byte,
@@ -1044,12 +1074,12 @@ func (s *Server) buildUpstreamBody(
 	e2eeActive bool,
 	prov *provider.Provider,
 	freshRaw *attestation.RawAttestation,
-) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+) (*upstreamBody, error) {
 	if !e2eeActive {
 		if prov.E2EE {
-			return nil, nil, nil, fmt.Errorf("E2EE required for %s but tdx_reportdata_binding not passed; refusing plaintext", prov.Name)
+			return nil, fmt.Errorf("E2EE required for %s but tdx_reportdata_binding not passed; refusing plaintext", prov.Name)
 		}
-		return rawBody, nil, nil, nil
+		return &upstreamBody{Body: rawBody}, nil
 	}
 
 	raw := freshRaw
@@ -1115,10 +1145,10 @@ func (s *Server) buildUpstreamBody(
 			var err error
 			raw, err = prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("fetch signing key: %w", err)
+				return nil, fmt.Errorf("fetch signing key: %w", err)
 			}
 			if raw.IntelQuote == "" {
-				return nil, nil, nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
+				return nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
 			}
 			// offline=true: only REPORTDATA binding is needed here, not full
 			// online verification (Intel PCS collateral). The primary
@@ -1126,14 +1156,14 @@ func (s *Server) buildUpstreamBody(
 			// the cached report.
 			tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, nonce, true)
 			if tdxResult.ParseErr != nil {
-				return nil, nil, nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
+				return nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
 			}
 			if prov.ReportDataVerifier != nil {
 				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
 				if errors.Is(err, multi.ErrNoVerifier) {
 					slog.DebugContext(ctx, "no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
 				} else if err != nil {
-					return nil, nil, nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+					return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
 				}
 			}
 			s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
@@ -1143,14 +1173,20 @@ func (s *Server) buildUpstreamBody(
 	}
 
 	if raw.SigningKey == "" {
-		return nil, nil, nil, errors.New("attestation response missing signing_key")
+		return nil, errors.New("attestation response missing signing_key")
 	}
 
 	encrypted, session, meta, err := prov.Encryptor.EncryptRequest(rawBody, raw)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return encrypted, session, meta, nil
+	return &upstreamBody{
+		Body:       encrypted,
+		Session:    session,
+		Meta:       meta,
+		ChuteID:    raw.ChuteID,
+		InstanceID: raw.InstanceID,
+	}, nil
 }
 
 // prepareUpstreamHeaders injects auth and E2EE headers into the upstream request.

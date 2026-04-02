@@ -95,8 +95,8 @@ func TestParseAttestationResponse_MultipleInstances(t *testing.T) {
 
 	instancesBody := []byte(`{
 		"instances": [
-			{"instance_id": "inst-001", "e2e_pubkey": "key1", "nonces": []},
-			{"instance_id": "inst-002", "e2e_pubkey": "key2", "nonces": []}
+			{"instance_id": "inst-001", "e2e_pubkey": "key1", "nonces": ["n1"]},
+			{"instance_id": "inst-002", "e2e_pubkey": "key2", "nonces": ["n2"]}
 		]
 	}`)
 	evidenceBody := []byte(`{
@@ -200,10 +200,103 @@ func TestParseAttestationResponse_SkipUnknownInstance(t *testing.T) {
 	}
 }
 
+func TestParseAttestationResponse_SkipInstanceNoNonces(t *testing.T) {
+	quote := fakeQuoteBase64()
+	nonce := attestation.NewNonce()
+
+	// inst-A has no nonces — should be skipped. inst-B has nonces — selected.
+	instancesBody := []byte(`{
+		"instances": [
+			{"instance_id": "inst-A", "e2e_pubkey": "keyA", "nonces": []},
+			{"instance_id": "inst-B", "e2e_pubkey": "keyB", "nonces": ["n1"]}
+		]
+	}`)
+	evidenceBody := []byte(`{
+		"evidence": [
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-A", "certificate": ""},
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-B", "certificate": ""}
+		],
+		"failed_instance_ids": []
+	}`)
+
+	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	if err != nil {
+		t.Fatalf("ParseAttestationResponse: %v", err)
+	}
+	if raw.InstanceID != "inst-B" {
+		t.Errorf("InstanceID = %q, want inst-B (inst-A skipped: no nonces)", raw.InstanceID)
+	}
+	if raw.SigningKey != "keyB" {
+		t.Errorf("SigningKey = %q, want keyB", raw.SigningKey)
+	}
+	if raw.E2ENonce != "n1" {
+		t.Errorf("E2ENonce = %q, want n1", raw.E2ENonce)
+	}
+}
+
+func TestParseAttestationResponse_SkipInstanceEmptyPubKey(t *testing.T) {
+	quote := fakeQuoteBase64()
+	nonce := attestation.NewNonce()
+
+	// inst-A has empty pubkey — should be skipped. inst-B is valid.
+	instancesBody := []byte(`{
+		"instances": [
+			{"instance_id": "inst-A", "e2e_pubkey": "", "nonces": ["n1"]},
+			{"instance_id": "inst-B", "e2e_pubkey": "keyB", "nonces": ["n2"]}
+		]
+	}`)
+	evidenceBody := []byte(`{
+		"evidence": [
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-A", "certificate": ""},
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-B", "certificate": ""}
+		],
+		"failed_instance_ids": []
+	}`)
+
+	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	if err != nil {
+		t.Fatalf("ParseAttestationResponse: %v", err)
+	}
+	if raw.InstanceID != "inst-B" {
+		t.Errorf("InstanceID = %q, want inst-B (inst-A skipped: empty pubkey)", raw.InstanceID)
+	}
+	if raw.SigningKey != "keyB" {
+		t.Errorf("SigningKey = %q, want keyB", raw.SigningKey)
+	}
+}
+
+func TestParseAttestationResponse_AllInstancesIncomplete(t *testing.T) {
+	quote := fakeQuoteBase64()
+	nonce := attestation.NewNonce()
+
+	// Both instances are incomplete — no valid match should be possible.
+	instancesBody := []byte(`{
+		"instances": [
+			{"instance_id": "inst-A", "e2e_pubkey": "", "nonces": ["n1"]},
+			{"instance_id": "inst-B", "e2e_pubkey": "keyB", "nonces": []}
+		]
+	}`)
+	evidenceBody := []byte(`{
+		"evidence": [
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-A", "certificate": ""},
+			{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "inst-B", "certificate": ""}
+		],
+		"failed_instance_ids": []
+	}`)
+
+	_, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	if err == nil {
+		t.Fatal("expected error when all instances have incomplete E2EE material")
+	}
+	if !strings.Contains(err.Error(), "valid E2EE material") {
+		t.Errorf("error should mention valid E2EE material, got: %v", err)
+	}
+}
+
 func TestParseAttestationResponse_InvalidBase64Quote(t *testing.T) {
 	nonce := attestation.NewNonce()
 	_, err := chutes.ParseAttestationResponse(
-		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": []}]}`),
+		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": ["n1"]}]}`),
 		[]byte(`{"evidence": [{"quote": "!!!bad!!!", "gpu_evidence": [], "instance_id": "i", "certificate": ""}], "failed_instance_ids": []}`),
 		nonce,
 	)
@@ -218,7 +311,7 @@ func TestParseAttestationResponse_InvalidBase64Quote(t *testing.T) {
 func TestParseAttestationResponse_EmptyQuote(t *testing.T) {
 	nonce := attestation.NewNonce()
 	raw, err := chutes.ParseAttestationResponse(
-		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": []}]}`),
+		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": ["n1"]}]}`),
 		[]byte(`{"evidence": [{"quote": "", "gpu_evidence": [], "instance_id": "i", "certificate": ""}], "failed_instance_ids": []}`),
 		nonce,
 	)
@@ -328,7 +421,7 @@ func TestFetchAttestation_SendsCorrectRequests(t *testing.T) {
 		case r.URL.Path == "/v1/models":
 			_, _ = w.Write([]byte(`{"data": [{"id": "test/model", "chute_id": "00000000-0000-0000-0000-000000000001"}]}`))
 		case strings.HasPrefix(r.URL.Path, "/e2e/instances/"):
-			_, _ = w.Write([]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": []}]}`))
+			_, _ = w.Write([]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": ["n1"]}]}`))
 		case strings.Contains(r.URL.Path, "/evidence"):
 			quote := fakeQuoteBase64()
 			_, _ = w.Write([]byte(`{"evidence": [{"quote": "` + quote + `", "gpu_evidence": [], "instance_id": "i", "certificate": ""}], "failed_instance_ids": []}`))

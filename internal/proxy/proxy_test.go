@@ -2805,22 +2805,15 @@ func (m *mockE2EEFetcher) Invalidate(chuteID string) {
 	m.lastChuteID = chuteID
 }
 
-// passthroughEncryptor returns the body unmodified with no E2EE session,
-// allowing nonce pool tests to verify routing logic without real encryption.
-// It populates ChutesE2EE metadata from the raw attestation so the retry
-// loop can track instance IDs via MarkFailed.
+// passthroughEncryptor returns the body unmodified with no E2EE session or
+// Chutes metadata. It allows nonce pool tests to verify routing and retry
+// logic without real encryption. Instance tracking for MarkFailed is carried
+// by buildUpstreamBody's chuteID/instanceID return values (from raw), not
+// from meta.
 type passthroughEncryptor struct{}
 
-func (passthroughEncryptor) EncryptRequest(body []byte, raw *attestation.RawAttestation) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
-	var meta *e2ee.ChutesE2EE
-	if raw != nil && raw.InstanceID != "" {
-		meta = &e2ee.ChutesE2EE{
-			ChuteID:    raw.ChuteID,
-			InstanceID: raw.InstanceID,
-			E2ENonce:   raw.E2ENonce,
-		}
-	}
-	return body, nil, meta, nil
+func (passthroughEncryptor) EncryptRequest(body []byte, _ *attestation.RawAttestation) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+	return body, nil, nil, nil
 }
 
 // noopPreparer sets only Authorization, without rewriting the URL.
