@@ -198,14 +198,18 @@ func TestNoncePool_Invalidate(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, _ = pool.Take(ctx, "test-model")
+	if _, err := pool.Take(ctx, "test-model"); err != nil {
+		t.Fatalf("first Take: %v", err)
+	}
 	if callCount != 1 {
 		t.Fatalf("calls = %d, want 1", callCount)
 	}
 
 	pool.Invalidate(chuteID)
 
-	_, _ = pool.Take(ctx, "test-model")
+	if _, err := pool.Take(ctx, "test-model"); err != nil {
+		t.Fatalf("second Take after Invalidate: %v", err)
+	}
 	if callCount != 2 {
 		t.Errorf("calls = %d, want 2 (invalidated pool should refetch)", callCount)
 	}
