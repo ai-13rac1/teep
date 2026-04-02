@@ -920,6 +920,16 @@ func (s *Server) handlePinnedChat(
 	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
 		report = cached
 	}
+	// E2EE providers must always have a report to verify REPORTDATA binding.
+	// Without one (e.g. attestation cache expired while SPKI cache is live),
+	// we cannot verify the signing key is bound to the TDX quote.
+	if prov.E2EE && report == nil {
+		s.negCache.Record(prov.Name, upstreamModel)
+		slog.ErrorContext(ctx, "E2EE required but no attestation report available",
+			"provider", prov.Name, "model", upstreamModel)
+		http.Error(w, "E2EE required but no attestation report available; refusing request", http.StatusBadGateway)
+		return
+	}
 	if !s.enforceReport(ctx, w, report, prov, upstreamModel) {
 		s.negCache.Record(prov.Name, upstreamModel)
 		return
@@ -927,7 +937,7 @@ func (s *Server) handlePinnedChat(
 	// E2EE providers require REPORTDATA binding even on first request (SPKI
 	// miss). Without it a MITM can substitute the enclave public key and
 	// E2EE degrades to plaintext.
-	if prov.E2EE && report != nil && !report.ReportDataBindingPassed() {
+	if prov.E2EE && !report.ReportDataBindingPassed() {
 		s.negCache.Record(prov.Name, upstreamModel)
 		slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
 			"provider", prov.Name, "model", upstreamModel)
@@ -1058,7 +1068,9 @@ func (s *Server) enforceReport(ctx context.Context, w http.ResponseWriter,
 		return true
 	}
 	if s.cfg.Force {
-		slog.WarnContext(ctx, "--force: bypassing blocked attestation", "provider", prov.Name, "model", model)
+		slog.WarnContext(ctx, "--force: bypassing blocked attestation",
+			"provider", prov.Name, "model", model,
+			"e2ee_will_activate", report.ReportDataBindingPassed())
 		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1340,9 +1352,7 @@ func (s *Server) buildUpstreamBody(
 			}
 			if prov.ReportDataVerifier != nil {
 				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-				if errors.Is(err, multi.ErrNoVerifier) {
-					slog.DebugContext(ctx, "no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
-				} else if err != nil {
+				if err != nil {
 					return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
 				}
 			}

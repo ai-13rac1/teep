@@ -80,8 +80,9 @@ func RelayStreamChutes(ctx context.Context, w http.ResponseWriter, body io.Reade
 		// or "e2e_error" keys in the data field.
 		var event map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			slog.ErrorContext(ctx, "chutes stream: parse event JSON", "err", err, "data", SafePrefix(data, 200))
-			continue
+			slog.ErrorContext(ctx, "chutes stream: parse event JSON", "err", err, "data_len", len(data))
+			WriteSSEError(w, flusher, "chutes stream: unparseable event")
+			return stats
 		}
 
 		if initB64, ok := event["e2e_init"]; ok {

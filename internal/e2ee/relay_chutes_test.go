@@ -177,6 +177,30 @@ func TestRelayNonStreamChutes(t *testing.T) {
 	}
 }
 
+func TestRelayStreamChutes_UnparseableEvent(t *testing.T) {
+	session, err := NewChutesSession()
+	if err != nil {
+		t.Fatalf("NewChutesSession: %v", err)
+	}
+
+	// An unparseable JSON event in the E2EE stream must abort (not continue).
+	input := "data: not-valid-json!!!\n\ndata: [DONE]\n\n"
+
+	rec := httptest.NewRecorder()
+	stats := RelayStreamChutes(context.Background(), rec, strings.NewReader(input), session)
+
+	body := rec.Body.String()
+	t.Logf("unparseable event response: status=%d body=%q chunks=%d", rec.Code, body, stats.Chunks)
+
+	// Stream must abort with an SSE error, not silently continue to [DONE].
+	if !strings.Contains(body, "decryption_error") {
+		t.Error("expected decryption_error SSE event for unparseable JSON")
+	}
+	if stats.Chunks != 0 {
+		t.Errorf("chunks = %d, want 0 (stream should abort before any chunks)", stats.Chunks)
+	}
+}
+
 func TestRelayStreamChutes_DoneWithoutChunks(t *testing.T) {
 	session, err := NewChutesSession()
 	if err != nil {
