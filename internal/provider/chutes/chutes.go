@@ -168,8 +168,13 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 }
 
 // ParseAttestationResponse parses the two Chutes API response bodies (instances
-// and evidence) into a RawAttestation. The first evidence entry is matched to
-// its e2e instance to obtain the ML-KEM-768 public key.
+// and evidence) into a RawAttestation. Evidence entries are matched against the
+// instances list; the first evidence entry whose instance ID appears in the
+// instances list and whose matched instance has complete E2EE material
+// (non-empty e2e_pubkey and at least one nonce) is used. This tolerates fleet
+// changes between the two API calls (instances fetched first, then evidence),
+// where an evidence entry may reference an instance that joined or left the
+// fleet in between.
 func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
 	var instances e2eInstancesResponse
 	if err := jsonstrict.UnmarshalWarn(instancesBody, &instances, "chutes e2e instances response"); err != nil {
@@ -195,30 +200,66 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 			len(ar.Evidence), maxEvidence)
 	}
 
+	// Build instance lookup map for O(1) matching. Keyed by instance ID.
+	instanceMap := make(map[string]*e2eInstance, len(instances.Instances))
+	for i := range instances.Instances {
+		instanceMap[instances.Instances[i].InstanceID] = &instances.Instances[i]
+	}
+
 	slog.Debug("chutes: attestation received",
 		"instances", len(instances.Instances),
 		"evidence", len(ar.Evidence),
 		"failed", len(ar.FailedInstanceIDs),
 	)
 
-	// Use the first evidence entry.
-	first := ar.Evidence[0]
-
-	if len(first.GPUEvidence) > maxGPUEvidence {
-		return nil, fmt.Errorf("chutes: instance %s has %d GPU evidence entries, max %d",
-			first.InstanceID, len(first.GPUEvidence), maxGPUEvidence)
+	// Find the first evidence entry whose instance exists in the instances
+	// list AND has the E2EE material needed for a complete attestation
+	// (public key + at least one nonce). The Chutes fleet is dynamic: the
+	// /evidence response may include instances that were not (or no longer)
+	// in the /e2e/instances response, or whose E2EE material is incomplete.
+	var matched *instanceEvidence
+	var matchedInst *e2eInstance
+	skipped := 0
+	for i := range ar.Evidence {
+		inst, ok := instanceMap[ar.Evidence[i].InstanceID]
+		if !ok {
+			skipped++
+			continue
+		}
+		if inst.E2EPubKey == "" {
+			slog.Debug("chutes: skipping instance with empty e2e_pubkey",
+				"instance_id", ar.Evidence[i].InstanceID)
+			skipped++
+			continue
+		}
+		if len(inst.Nonces) == 0 {
+			slog.Debug("chutes: skipping instance with no nonces",
+				"instance_id", ar.Evidence[i].InstanceID)
+			skipped++
+			continue
+		}
+		matched = &ar.Evidence[i]
+		matchedInst = inst
+		break
+	}
+	if matched == nil {
+		return nil, fmt.Errorf("chutes: none of %d evidence entries match a known instance with valid E2EE material (%d instances available)",
+			len(ar.Evidence), len(instances.Instances))
+	}
+	if skipped > 0 {
+		slog.Info("chutes: skipped evidence entries",
+			"skipped", skipped, "used_instance", matched.InstanceID)
 	}
 
-	// Find matching e2e instance to get the public key.
-	e2ePubKey, err := findE2EPubKey(instances.Instances, first.InstanceID)
-	if err != nil {
-		return nil, err
+	if len(matched.GPUEvidence) > maxGPUEvidence {
+		return nil, fmt.Errorf("chutes: instance %s has %d GPU evidence entries, max %d",
+			matched.InstanceID, len(matched.GPUEvidence), maxGPUEvidence)
 	}
 
 	// Convert base64-encoded quote to hex for TDX verification pipeline.
 	var intelQuoteHex string
-	if first.Quote != "" {
-		quoteBytes, err := base64.StdEncoding.DecodeString(first.Quote)
+	if matched.Quote != "" {
+		quoteBytes, err := base64.StdEncoding.DecodeString(matched.Quote)
 		if err != nil {
 			return nil, fmt.Errorf("chutes: base64-decode quote: %w", err)
 		}
@@ -226,51 +267,32 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 	}
 
 	slog.Debug("chutes: attestation parsed",
-		"instance_id", first.InstanceID,
-		"gpus", len(first.GPUEvidence),
-		"has_quote", first.Quote != "",
-		"has_e2e_pubkey", e2ePubKey != "",
+		"instance_id", matched.InstanceID,
+		"gpus", len(matched.GPUEvidence),
+		"has_quote", matched.Quote != "",
+		"has_e2e_pubkey", matchedInst.E2EPubKey != "",
 	)
-
-	// Find the first available nonce token for E2EE.
-	var e2eNonce string
-	for _, inst := range instances.Instances {
-		if inst.InstanceID == first.InstanceID && len(inst.Nonces) > 0 {
-			e2eNonce = inst.Nonces[0]
-			break
-		}
-	}
 
 	return &attestation.RawAttestation{
 		BackendFormat: attestation.FormatChutes,
 		Nonce:         nonce.Hex(),
 		TEEProvider:   "TDX+NVIDIA",
-		SigningKey:    e2ePubKey,
+		SigningKey:    matchedInst.E2EPubKey,
 		SigningAlgo:   "ml-kem-768",
 		IntelQuote:    intelQuoteHex,
-		GPUEvidence:   first.GPUEvidence,
+		GPUEvidence:   matched.GPUEvidence,
 
 		TEEHardware: "intel-tdx",
 		NonceSource: "client",
 
 		CandidatesAvail: len(ar.Evidence),
-		CandidatesEval:  1,
+		CandidatesEval:  skipped + 1,
 
-		InstanceID: first.InstanceID,
-		E2ENonce:   e2eNonce,
+		InstanceID: matched.InstanceID,
+		E2ENonce:   matchedInst.Nonces[0],
 
 		RawBody: evidenceBody,
 	}, nil
-}
-
-// findE2EPubKey finds the e2e public key for the given instance ID.
-func findE2EPubKey(instances []e2eInstance, instanceID string) (string, error) {
-	for _, inst := range instances {
-		if inst.InstanceID == instanceID {
-			return inst.E2EPubKey, nil
-		}
-	}
-	return "", fmt.Errorf("chutes: instance %q not found in e2e instances", instanceID)
 }
 
 // Preparer injects the Chutes Authorization header and E2EE headers into
