@@ -32,9 +32,27 @@ part of PR #33 review fixes:
 | `db1ed0a` | Fix inaccurate comments (retry failover wording, ParseAttestationResponse doc, test comments) | Comment fixes |
 | `7c27ae0` | `CandidatesEval` tracks skipped entries; error counters on fail-closed path (`s.stats.errors`, `ms.errors`, `slog.ErrorContext`) | Step 4 (partial), observability |
 
+The following work has been completed on the `refactor-cyclomatic-complexity`
+and `e2ee_update` branches:
+
+| Commit | Description | Plan item |
+|--------|-------------|-----------|
+| `c870285` | Reduce cyclomatic complexity: extract `attestAndCache`, `enforceReport`, `relayResponse`, `doUpstreamRoundtrip`, `buildUpstreamBody`; introduce `httpError`, `attestResult`, `upstreamResult` types | Refactor (prerequisite for steps 2–4) |
+| `eba0cf3` | Security audit: block pinned E2EE when `report == nil`; abort unparseable SSE events (was `continue`); `writeStreamError` falls back to `http.Error(502)` pre-header; `ErrNoVerifier` is now a hard error | Fail-closed hardening |
+| `04f47db` | Add `StreamStats` return to relay functions (`RelayStream`, `RelayReassembledNonStream`, `RelayStreamChutes`); `ReassembleNonStream` returns `([]byte, StreamStats, error)` | Step 3 (partial: return `StreamStats`, not yet `error`) |
+| `9dd5e17` | Review findings: `enforceReport` logs `e2ee_will_activate` in `--force` path; misc strictness | Observability |
+| `261c224` | PR #41 review: preserve timing on error paths; fix SSE error handling | Error-path timing |
+| `f598a06` | Distinguish E2EE prep errors (`e2ee_failed`) from upstream transport errors (`upstream_failed`) in client responses via `httpError.status` | Step 2 (partial: error classification) |
+
 These commits resolve P1 (chicken-and-egg blocking) by making `e2ee_usable`
-allowed-to-fail for all providers. The remaining short-term work (steps 2–4,
-6–8 and the full S1/S2 fixes) is described below.
+allowed-to-fail for all providers. The cyclomatic complexity refactor
+(`c870285`) decomposed `handleChatCompletions` from complexity 57→19 by
+extracting five helper functions, which is a prerequisite for the remaining
+short-term work. The security audit (`eba0cf3`) added fail-closed paths
+that complement the plan's post-relay enforcement design. Relay functions
+now return `StreamStats` (`04f47db`) — a stepping stone toward returning
+`error` (step 3). The remaining short-term work (steps 2–4, 6–8 and the
+full S1/S2 fixes) is described below.
 
 ---
 
@@ -54,20 +72,20 @@ Venice and NearDirect are unaffected because `e2ee_usable` appears in their
 `allow_fail` lists (`DefaultAllowFail` and `NeardirectDefaultAllowFail`).
 
 **Code path** (proxy non-pinned):
-1. `handleChatCompletions` calls `fetchAndVerify` on cache miss
-   (`internal/proxy/proxy.go` ~line 605)
-2. `fetchAndVerify` calls `BuildReport` with `E2EEConfigured: prov.E2EE`
-   and `E2EETest: nil` (~line 520)
+1. `handleChatCompletions` calls `attestAndCache` on cache miss
+   (`internal/proxy/proxy.go` line 695→line 791)
+2. `attestAndCache` calls `fetchAndVerify` which calls `BuildReport` with
+   `E2EEConfigured: prov.E2EE` and `E2EETest: nil` (line 476→line 537)
 3. `evalE2EEUsable` returns `Skip "E2EE configured; pending live test"`
-   (`internal/attestation/report.go` ~line 869)
-4. `BuildReport` promotes enforced `Skip` → `Fail (enforced)` (~line 380)
-5. `report.Blocked()` returns `true` → request rejected (~line 617)
-6. `MarkE2EEUsable` is never reached (~line 734)
+   (`internal/attestation/report.go` line 889)
+4. `BuildReport` promotes enforced `Skip` → `Fail (enforced)` (line 386)
+5. `enforceReport` checks `report.Blocked()` → request rejected (line 1069)
+6. `MarkE2EEUsable` is never reached (line 852)
 
 **Code path** (proxy pinned, NearCloud):
 Same issue: the report is built with `E2EEConfigured=true` and `E2EETest=nil`
-inside the pinned handler's attestation path. `Blocked()` fires before the
-E2EE relay at ~line 810.
+inside the pinned handler's attestation path. `enforceReport` fires before the
+E2EE relay at line 948.
 
 ### P2: Cache mutation race
 
@@ -81,13 +99,13 @@ callers. This means:
 - `report.Passed++` and `report.Skipped--` are non-atomic int mutations.
 
 **Locations**:
-- Non-pinned path: `internal/proxy/proxy.go` ~line 734
-- Pinned path: `internal/proxy/proxy.go` ~line 873
+- Non-pinned path: `internal/proxy/proxy.go` line 852
+- Pinned path: `internal/proxy/proxy.go` line 994
 
 ### P3: Counter desync risk
 
 `MarkE2EEUsable()` manually adjusts `Passed` and `Skipped` counters
-(`internal/attestation/report.go` ~line 116-127):
+(`internal/attestation/report.go` line 123):
 
 ```go
 func (r *VerificationReport) MarkE2EEUsable(detail string) {
@@ -131,8 +149,8 @@ is never corrected. If the guard were removed without also adjusting the
 - `evalE2EEUsable` evaluates the test result and produces a clean factor
 
 **Proxy path** (`internal/proxy/proxy.go`):
-- `fetchAndVerify` passes `E2EETest: nil, E2EEConfigured: prov.E2EE` to
-  `BuildReport`
+- `attestAndCache` calls `fetchAndVerify` which passes
+  `E2EETest: nil, E2EEConfigured: prov.E2EE` to `BuildReport`
 - `e2ee_usable` starts as `Skip` (or `Fail` if enforced)
 - After a successful relay, `MarkE2EEUsable` patches the cached report
 
@@ -163,14 +181,21 @@ behavior is:
 - **Streaming** (`RelayStream`/`relaySSELine` in `internal/e2ee/relay.go`):
   Writes an SSE error event `{"error":{"message":"stream decryption failed",
   "type":"decryption_error"}}` and ends the stream. The HTTP 200 status has
-  already been sent, so no status code change is possible.
+  already been sent, so no status code change is possible. Now returns
+  `StreamStats` (since `04f47db`).
 
 - **Non-streaming** (`RelayReassembledNonStream` in `internal/e2ee/relay.go`):
-  Returns HTTP 502 "response decryption failed".
+  Returns HTTP 502 "response decryption failed". Now returns `StreamStats`
+  (since `04f47db`). `ReassembleNonStream` returns `([]byte, StreamStats, error)`.
 
 - **Chutes streaming** (`RelayStreamChutes` in
-  `internal/e2ee/relay_chutes.go`): Returns HTTP 502 if failure occurs before
-  first chunk; writes SSE error event via `WriteSSEError` if after headers.
+  `internal/e2ee/relay_chutes.go`): Uses the extracted `writeStreamError`
+  helper (since `eba0cf3`): returns HTTP 502 if failure occurs before first
+  chunk; writes SSE error event via `WriteSSEError` if after headers.
+  Unparseable SSE events now **abort the stream** (was `continue` —
+  security audit fix in `eba0cf3`). Logs `data_len` instead of raw event
+  data. Init and chunk processing extracted into `handleChutesInit` and
+  `handleChutesChunk` helpers (since `c870285`). Returns `StreamStats`.
 
 - **Chutes non-streaming** (`RelayNonStreamChutes`): Returns HTTP 502
   "response decryption failed".
@@ -179,21 +204,38 @@ behavior is:
 or prevent future requests. A decryption failure is treated as a transient
 error for the current request only.
 
+**Progress toward step 3**: Relay functions now return `StreamStats` (since
+`04f47db`), which is a structural prerequisite for returning `error`.
+`StreamStats` has `Chunks`, `Tokens`, and `Duration` fields; adding an
+`Error` field or changing the return to `(StreamStats, error)` is the
+remaining work.
+
 ### Chutes Instance Retry Loop (current state)
 
-A Chutes-specific retry loop (`chutesMaxAttempts = 3`) in
-`handleChatCompletions` wraps the body-build → upstream-request cycle. It
-handles **transport-level** failures (connection errors, HTTP 429/500-504)
-by marking the failed instance via `NoncePool.MarkFailed(chuteID,
-instanceID)`, zeroing crypto material via `zeroE2EESessions`, and retrying
-with a fresh nonce/key from a different instance.
+The Chutes-specific retry loop (`chutesMaxAttempts = 3`) now lives in
+the extracted `doUpstreamRoundtrip` function (line 1137, since `c870285`),
+rather than inline in `handleChatCompletions`. It wraps the
+body-build → upstream-request cycle. It handles **transport-level** failures
+(connection errors, HTTP 429/500-504) by marking the failed instance via
+`NoncePool.MarkFailed(chuteID, instanceID)`, zeroing crypto material via
+`zeroE2EESessions`, and retrying with a fresh nonce/key from a different
+instance.
 
-`buildUpstreamBody` returns an `upstreamBody` struct that carries `Body`,
-`Session`, `Meta`, `ChuteID`, and `InstanceID`. The `ChuteID`/`InstanceID`
-fields are populated from the raw attestation (or nonce pool) and are
-independent of `meta.Session` being populated — this decoupling allows
-the retry loop to track instances for `MarkFailed` even when the
-encryptor returns `meta == nil` (e.g. in tests or non-E2EE paths).
+`doUpstreamRoundtrip` returns `(*upstreamResult, error)`. The `upstreamResult`
+struct (line 1125) carries `Resp`, `Session`, `Meta`, `Cancel`, `E2EEDur`,
+and `UpstreamDur`. On error it returns an `httpError` (line 1114) with a
+`status` field that distinguishes E2EE preparation errors (`"e2ee_failed"`,
+HTTP 500) from transport errors (`"upstream_failed"`, HTTP 502). The caller
+(`handleChatCompletions`) maps these to different client messages:
+`"failed to prepare encrypted request"` vs `"upstream request failed"`
+(since `f598a06`).
+
+`buildUpstreamBody` (line 1273) returns an `upstreamBody` struct (line 181)
+that carries `Body`, `Session`, `Meta`, `ChuteID`, and `InstanceID`. The
+`ChuteID`/`InstanceID` fields are populated from the raw attestation (or
+nonce pool) and are independent of `meta.Session` being populated — this
+decoupling allows the retry loop to track instances for `MarkFailed` even
+when the encryptor returns `meta == nil` (e.g. in tests or non-E2EE paths).
 
 This is distinct from the plan's post-relay enforcement (step 4), which
 covers **cryptographic** failures (decryption failed after a successful HTTP
@@ -201,10 +243,9 @@ response). The retry loop runs *before* the relay; post-relay enforcement
 runs *after* it.
 
 **Hazard — escalation gap**: When all 3 retry attempts fail, the current
-implementation either forwards the last upstream HTTP status (if a
-response was received, e.g. repeated 503s) or returns HTTP 502 on pure
-transport errors. Per-instance `MarkFailed` now fires on every retryable
-failure including the final attempt, so the nonce pool correctly
+implementation returns an `httpError` with `"upstream_failed"` status.
+Per-instance `MarkFailed` now fires on every retryable failure including the
+final attempt (within `doUpstreamRoundtrip`), so the nonce pool correctly
 deprioritizes all failed instances on subsequent requests. However, the
 provider+model pair is NOT marked as persistently failed — the next
 request will still retry from scratch. Once the E2EE state machine
@@ -221,15 +262,21 @@ fire using the *last successful attempt's* instance info for the
 not from `meta`.
 
 **Safeguard — pre-relay session guard**: A fail-closed check
-(`meta != nil && meta.Session == nil`) now runs *before* the relay
-dispatch switch. This catches a different class of failure than post-relay
-enforcement: if Chutes E2EE metadata was populated (meta is non-nil) but
-key encapsulation failed to produce a session, the guard returns HTTP 500
-instead of forwarding ciphertext as plaintext. Error counters
-(`s.stats.errors`, `ms.errors`) and `slog.ErrorContext` are incremented.
-This is complementary to post-relay enforcement — it catches
-pre-relay invariant violations, while step 4 catches post-relay
-cryptographic failures.
+(`meta != nil && meta.Session == nil`) runs in `handleChatCompletions`
+*before* the relay dispatch switch (line ~841). This catches a different
+class of failure than post-relay enforcement: if Chutes E2EE metadata
+was populated (meta is non-nil) but key encapsulation failed to produce
+a session, the guard returns HTTP 500 instead of forwarding ciphertext
+as plaintext. Error counters (`s.stats.errors`, `ms.errors`) and
+`slog.ErrorContext` are incremented. This is complementary to post-relay
+enforcement — it catches pre-relay invariant violations, while step 4
+catches post-relay cryptographic failures.
+
+**Safeguard — pinned E2EE nil report block**: The pinned (NearCloud) path
+now blocks when `prov.E2EE && report == nil` (since `eba0cf3`, line ~932).
+Without a report, the signing key cannot be verified as bound to the TDX
+quote, so E2EE would degrade to plaintext. This records a negative cache
+entry and returns HTTP 502.
 
 ---
 
@@ -262,18 +309,26 @@ wrong enforcement point. Instead:
    - Add a per-provider/model E2EE failure flag to the `Server` struct.
      This can be a simple concurrent map: `e2eeFailed sync.Map` keyed by
      `cacheKey{provider, model}`.
-   - In `handleChatCompletions`, after the `Blocked()` check, if
+   - In `handleChatCompletions`, after `enforceReport` (line 1069), if
      `e2eeFailed.Load(key)` returns true, return 502 with a message like
      "E2EE previously failed; re-attestation required".
+   - **Partial progress** (`f598a06`): `doUpstreamRoundtrip` already
+     classifies errors via `httpError.status` (`"e2ee_failed"` for
+     build/prep errors, `"upstream_failed"` for transport errors), and
+     `handleChatCompletions` maps these to distinct client messages. The
+     remaining work is to persist these classifications across requests
+     via the `e2eeFailed` map.
 
 3. **Relay error detection**: `internal/e2ee/relay.go` and
    `internal/e2ee/relay_chutes.go`
    - Modify relay functions to return `error` (nil on success, non-nil on
-     decryption failure). The current `void` signatures already handle HTTP
-     writing internally; adding a return value is straightforward.
+     decryption failure). The current signatures return `StreamStats`
+     (since `04f47db`) but not `error`; changing to `(StreamStats, error)`
+     is straightforward. Callers already handle the `StreamStats` return
+     via `relayResponse` (line 1092), which would propagate the error up.
 
 4. **Post-relay enforcement**: `internal/proxy/proxy.go`
-   `handleChatCompletions` (after the relay call)
+   `handleChatCompletions` (after the `relayResponse` call at line ~848)
    - After the relay call, if error indicates decryption failure AND
      `e2eeActive` was true:
      ```go
@@ -343,7 +398,7 @@ wrong enforcement point. Instead:
 shared `*VerificationReport` pointer.
 
 **Fix**: Clone the report before mutating. Apply in both non-pinned
-(~line 734) and pinned (~line 873) paths.
+(line 852) and pinned (line 994) paths.
 
 ```go
 // Deep-copy report before mutation.
@@ -450,15 +505,23 @@ when `raw.ChuteID` is empty instead of falling back to `model`. Unit test
 ### Short-term remaining work
 
 S3–S4 are done. S1 and S2 have partial fixes (TODOs and underflow guard).
-The remaining short-term work is:
+The cyclomatic complexity refactor (`c870285`) extracted the key functions
+that remaining steps plug into. The remaining short-term work is:
 
 1. **S1 full fix**: Clone report before `MarkE2EEUsable` mutation (both
-   non-pinned and pinned paths).
+   non-pinned at line 852 and pinned at line 994).
 2. **S2 full fix**: Replace manual counter adjustment with `recomputeCounters`.
-3. **Step 2**: Add `e2eeFailed sync.Map` to `Server` struct; check it after
-   `Blocked()` gate.
-4. **Step 3**: Change relay functions to return `error` on decryption failure.
+3. **Step 2 full fix**: Add `e2eeFailed sync.Map` to `Server` struct;
+   check it in `handleChatCompletions` after `enforceReport` (line 1069).
+   `httpError.status` already classifies E2EE vs transport errors; persist
+   this across requests.
+4. **Step 3**: Change relay functions from returning `StreamStats` to
+   `(StreamStats, error)`. `relayResponse` (line 1092) propagates the new
+   return to `handleChatCompletions`.
 5. **Step 4**: Post-relay enforcement — mark failed, invalidate caches.
+   The `doUpstreamRoundtrip` / `handleChatCompletions` split (since
+   `c870285`) means this logic goes in `handleChatCompletions` after the
+   `relayResponse` call.
 6. **Step 8**: Add `Delete` method to report cache and signing key cache.
 
 ### Short-term tradeoffs
@@ -478,7 +541,8 @@ The remaining short-term work is:
   informational `MarkE2EEUsable` call to be correct.
 - **Con**: For streaming responses, the first decryption failure is already
   partially relayed to the client. Enforcement is forward-looking only.
-- **Con**: The relay signature change (returning `error`) is still needed.
+- **Con**: The relay signature change (returning `error` alongside `StreamStats`)
+  is still needed.
 
 ---
 
@@ -608,18 +672,19 @@ verify that features work correctly through the attested environment.
      `E2EETestResult` as a standalone type for the verify path.
 
 3. **Proxy non-pinned path**: `internal/proxy/proxy.go` `handleChatCompletions`
-   - After `report.Blocked()` check (~line 617), add E2EE state check:
+   - After `enforceReport` (line 1069), add E2EE state check:
      if `e2eeTracker.Get(prov.Name, model) == Failed`, block with 502.
-   - After successful relay (~line 733), call
-     `e2eeTracker.MarkActive(prov.Name, model)`.
-   - Remove all `MarkE2EEUsable` calls.
+   - After successful relay (line ~848, via `relayResponse` at line 1092),
+     call `e2eeTracker.MarkActive(prov.Name, model)`.
+   - Remove all `MarkE2EEUsable` calls (line 852 non-pinned, line 994 pinned).
    - Remove `E2EEConfigured` and `E2EETest` from `ReportInput` construction.
 
 4. **Relay error propagation**: `internal/e2ee/relay.go` and
    `internal/e2ee/relay_chutes.go`
-   - Change relay functions to return an `error` indicating whether
-     decryption failed. Currently they write directly to
-     `http.ResponseWriter` and return nothing.
+   - Change relay functions from returning `StreamStats` to
+     `(StreamStats, error)` indicating whether decryption failed. The
+     `relayResponse` helper (line 1092) dispatches to all relay functions
+     and would propagate the error to `handleChatCompletions`.
    - In `handleChatCompletions`, if the relay reports a decryption failure
      AND E2EE was active, call `e2eeTracker.MarkFailed(prov.Name, model)`
      and `s.cache.Delete(prov.Name, model)` and
@@ -628,6 +693,10 @@ verify that features work correctly through the attested environment.
      `prov.E2EEMaterialFetcher.Invalidate(chuteID)` to discard cached
      nonces. The nonce pool is a third cache that must be invalidated
      alongside the report cache and signing key cache.
+   - Note: `doUpstreamRoundtrip` (line 1137) already handles pre-relay
+     errors including E2EE prep failures. Post-relay enforcement in
+     `handleChatCompletions` handles the complementary case of
+     cryptographic failure after a successful HTTP response.
 
 5. **Report endpoint**: `internal/proxy/proxy.go` report handler
    - Include E2EE state (Pending/Active/Failed) in the JSON report as a
@@ -732,8 +801,8 @@ verify that features work correctly through the attested environment.
 - **Nonce pool failure escalation**: The Chutes `NoncePool` tracks
   per-instance failure counts via `MarkFailed` and prefers instances with
   fewer failures. The Chutes retry loop (`chutesMaxAttempts = 3` in
-  `handleChatCompletions`) is the concrete location where escalation
-  should occur. Two open design questions:
+  `doUpstreamRoundtrip`, line 1137) is the concrete location where
+  escalation should occur. Two open design questions:
   1. When all retry attempts exhaust for a single request, should this
      immediately escalate to `E2EETracker.MarkFailed` (fail-closed for
      the provider+model), or should it allow subsequent requests to retry
@@ -745,7 +814,9 @@ verify that features work correctly through the attested environment.
   The escalation threshold and recovery path (full re-attestation) should
   be specified when the E2EE state machine is implemented.
 - **Crypto material lifecycle in retry**: `zeroE2EESessions` in
-  `internal/proxy/proxy.go` is the canonical helper for zeroing E2EE
-  crypto material between retry attempts. The plan's step 4 (post-relay
-  enforcement) and S1 (cache mutation race) should use the same pattern
-  when invalidating material after decryption failure.
+  `internal/proxy/proxy.go` (line 190) is the canonical helper for zeroing
+  E2EE crypto material between retry attempts. It is called at four points
+  in `doUpstreamRoundtrip` (lines 1200, 1208, 1233, 1248) covering all
+  error and retry paths. The plan's step 4 (post-relay enforcement) and
+  S1 (cache mutation race) should use the same pattern when invalidating
+  material after decryption failure.
