@@ -3,6 +3,7 @@ package attestation
 import (
 	"context"
 	"crypto/x509"
+	_ "embed"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -22,6 +23,28 @@ import (
 // RetryHTTPSGetter wrapping SimpleHTTPSGetter is used. Tests set this
 // to a fixture-backed getter.
 var TDXCollateralGetter trust.HTTPSGetter
+
+//go:embed certs/intel_sgx_root_ca.pem
+var intelSGXRootCAPEM []byte
+
+// intelSGXRootPool is the Intel SGX Root CA used to verify TDX PCK
+// certificate chains. Providing this explicitly avoids the go-tdx-guest
+// library's "Using embedded Intel certificate" warning on every call.
+var intelSGXRootPool = mustParseCertPool(intelSGXRootCAPEM)
+
+func mustParseCertPool(pemBytes []byte) *x509.CertPool {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		panic("attestation: no PEM block in Intel SGX Root CA")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		panic("attestation: parse Intel SGX Root CA: " + err.Error())
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return pool
+}
 
 // TDXVerifyResult holds the structured outcome of TDX quote parsing and
 // verification. Fields are populated even on partial failure so the report
@@ -227,6 +250,7 @@ func VerifyTDXQuote(ctx context.Context, hexQuote string, nonce Nonce, offline b
 	opts := &tdxverify.Options{
 		GetCollateral:    false,
 		CheckRevocations: false,
+		TrustedRoots:     intelSGXRootPool,
 	}
 	if verifyErr := tdxverify.TdxQuote(quoteAny, opts); verifyErr != nil {
 		// The verify library does cert chain + signature in one call.
@@ -251,6 +275,7 @@ func VerifyTDXQuote(ctx context.Context, hexQuote string, nonce Nonce, offline b
 			GetCollateral:    true,
 			CheckRevocations: true,
 			Getter:           getter,
+			TrustedRoots:     intelSGXRootPool,
 		}
 		if err := tdxverify.TdxQuoteContext(ctx, quoteAny, collateralOpts); err != nil {
 			result.CollateralErr = fmt.Errorf("intel PCS collateral: %w", err)

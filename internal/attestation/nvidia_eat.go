@@ -21,7 +21,7 @@ import (
 	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
-//go:embed testdata/nvidia_device_identity_root_ca.pem
+//go:embed certs/nvidia_device_identity_root_ca.pem
 var nvidiaRootCAPEM []byte
 
 // nvidiaRootCAFingerprint is the SHA-256 fingerprint of the NVIDIA Device
