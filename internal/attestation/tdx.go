@@ -254,16 +254,16 @@ func VerifyTDXQuote(ctx context.Context, hexQuote string, nonce Nonce, offline b
 		}
 		if err := tdxverify.TdxQuoteContext(ctx, quoteAny, collateralOpts); err != nil {
 			result.CollateralErr = fmt.Errorf("intel PCS collateral: %w", err)
-			slog.DebugContext(ctx, "TDX collateral verification failed (non-fatal for cert chain)", "err", err)
+			slog.DebugContext(ctx, "TDX collateral verification failed", "err", err)
 		} else {
 			tcbLevel, _, err := tdxverify.SupportedTcbLevelsFromCollateral(quoteAny, collateralOpts)
 			if err != nil {
 				result.CollateralErr = fmt.Errorf("TCB level extraction: %w", err)
-				slog.DebugContext(ctx, "TCB level extraction failed", "err", err)
+				slog.DebugContext(ctx, "TDX TCB level extraction failed", "err", err)
 			} else {
 				result.TcbStatus = tcbLevel.TcbStatus
 				result.AdvisoryIDs = tcbLevel.AdvisoryIDs
-				slog.DebugContext(ctx, "TCB level extracted", "status", tcbLevel.TcbStatus, "date", tcbLevel.TcbDate, "advisories", tcbLevel.AdvisoryIDs)
+				slog.DebugContext(ctx, "TDX TCB level extracted", "status", tcbLevel.TcbStatus, "date", tcbLevel.TcbDate, "advisories", tcbLevel.AdvisoryIDs)
 			}
 		}
 	}
@@ -271,11 +271,11 @@ func VerifyTDXQuote(ctx context.Context, hexQuote string, nonce Nonce, offline b
 	// Extract PPID/FMSPC from PCK certificate (informational, non-fatal).
 	ppid, fmspc, err := extractPCKExtensions(quoteAny)
 	if err != nil {
-		slog.DebugContext(ctx, "PPID extraction failed (non-fatal)", "err", err)
+		slog.DebugContext(ctx, "TDX PPID extraction failed (non-fatal)", "err", err)
 	} else {
 		result.PPID = ppid
 		result.FMSPC = fmspc
-		slog.DebugContext(ctx, "PCK extensions extracted", "ppid", ppid, "fmspc", fmspc)
+		slog.DebugContext(ctx, "TDX PCK extensions extracted", "ppid", ppid, "fmspc", fmspc)
 	}
 
 	return result
