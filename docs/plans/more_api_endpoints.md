@@ -64,11 +64,46 @@ No dependencies. All other phases depend on this.
    - **phalacloud**: `EmbeddingsPath = "/embeddings"` (no `/v1/` prefix, consistent with `ChatPath = "/chat/completions"`)
    - **chutes**: `EmbeddingsPath = "/v1/embeddings"` (for `X-E2E-Path` threading)
 
-4. Raise the default body limit from 10 MiB to **25 MiB** for all endpoints (chat/VL, embeddings, images, audio). The primary use case for teep is trusted local inference; if teep is exposed to untrusted input, operators can enforce their own limits on their use of the local API proxy. A future streaming refactor (neardirect `io.Copy` via pinned `tls.Conn`, and eventually chunked encryption for Chutes/nearcloud) can further reduce memory pressure, but should not block usability now.
+4. Raise the default body limit from 10 MiB to **50 MiB** for all endpoints (chat/VL, embeddings, images, audio). The primary use case for teep is trusted local inference; if teep is exposed to untrusted input, operators can enforce their own limits on their use of the local API proxy. A future streaming refactor (neardirect `io.Copy` via pinned `tls.Conn`, and eventually chunked encryption for Chutes/nearcloud) can further reduce memory pressure, but should not block usability now.
 
-5. Parameterize `doUpstreamRoundtrip` to accept the endpoint path as an argument instead of reading `prov.ChatPath`. Today `proxy.go:1468` hardcodes `prov.BaseURL + prov.ChatPath` as the upstream URL. Each new handler must pass its endpoint-specific path (e.g., `prov.EmbeddingsPath`). Same for `PinnedRequest` construction — all `handlePinned*` functions pass the correct path field rather than hardcoding `prov.ChatPath`.
+5. Parameterize `doUpstreamRoundtrip` to accept the endpoint path via a struct instead of reading `prov.ChatPath`. Today `proxy.go:1468` hardcodes `prov.BaseURL + prov.ChatPath` as the upstream URL. Replace the loose parameters with an `upstreamRequest` struct:
 
-6. Add unit tests for new route dispatch and 404 for unregistered paths.
+   ```go
+   type upstreamRequest struct {
+       Body          []byte
+       UpstreamModel string
+       EndpointPath  string                       // e.g. "/v1/chat/completions", "/v1/embeddings"
+       E2EEActive    bool
+       Raw           *attestation.RawAttestation
+       Stream        bool
+   }
+   ```
+
+   URL construction becomes `prov.BaseURL + ureq.EndpointPath`. Named fields at the call site make adding `EndpointPath` self-documenting. `relayWithRetry` forwards `EndpointPath` down to `doUpstreamRoundtrip`. Same for `PinnedRequest` construction — all `handlePinned*` functions pass the correct path field rather than hardcoding `prov.ChatPath`.
+
+6. **Handler factory.** The flow from `resolveModel` through `attestAndCache` and `relayWithRetry` is identical for all endpoint types (~130 lines). Rather than duplicating this core across separate `handleEmbeddings`, `handleAudioTranscriptions`, `handleImagesGenerations` handlers, extract a common `handleEndpoint` factory:
+
+   ```go
+   type endpointConfig struct {
+       path       func(*provider.Provider) string // e.g. func(p) { return p.EmbeddingsPath }
+       bodyLimit  int64
+       parseModel func(*http.Request, []byte) (model string, stream bool, err error)
+   }
+
+   func (s *Server) handleEndpoint(ep endpointConfig) http.HandlerFunc { ... }
+   ```
+
+   Registration:
+   ```go
+   s.mux.HandleFunc("POST /v1/chat/completions", s.handleEndpoint(chatConfig))
+   s.mux.HandleFunc("POST /v1/embeddings", s.handleEndpoint(embeddingsConfig))
+   s.mux.HandleFunc("POST /v1/audio/transcriptions", s.handleEndpoint(audioConfig))
+   s.mux.HandleFunc("POST /v1/images/generations", s.handleEndpoint(imagesConfig))
+   ```
+
+   The `parseModel` function varies per endpoint: JSON endpoints extract `model` from the body; audio extracts `model` from `r.FormValue`. Per-endpoint guards (e.g., multipart E2EE rejection for audio) go in `parseModel` or as a guard function on the config. The existing `handleChatCompletions` should be migrated to this factory to avoid drift.
+
+7. Add unit tests for new route dispatch and 404 for unregistered paths.
 
 ---
 
@@ -78,19 +113,24 @@ Depends on Phase 1.
 
 The Chutes `/e2e/invoke` tunnel requires an `X-E2E-Path` header naming the TEE-internal endpoint. Today the Chutes Preparer at `chutes.go` uses `p.chatPath` (a struct field set once at construction time), which does not vary per-request. This must be made dynamic.
 
-7. Add `TargetPath string` to the `e2ee.ChutesE2EE` struct (in `internal/e2ee/chutes.go` or wherever `ChutesE2EE` is defined).
+8. **Add `path string` to the `RequestPreparer.PrepareRequest` interface.** The endpoint path is a property of the request being made, not the provider configuration. Current interface:
 
-8. **Bind `TargetPath` at encryption time, not as an afterthought.** Add `targetPath string` as a required parameter to `RequestEncryptor.EncryptRequest` (or to a Chutes-specific variant) so that the path is bound when the body is encrypted. This ensures correctly-encrypted data cannot be misrouted to the wrong TEE-internal endpoint by a handler that forgets to set the path later. For non-Chutes encryptors (Venice, NearCloud), the parameter is unused.
+   ```go
+   PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool) error
+   ```
 
-9. In **every** Chutes relay path (existing chat handler AND new handlers), set `meta.TargetPath` unconditionally before calling `prov.Preparer.PrepareRequest`:
-   - chat completions: `meta.TargetPath = prov.ChatPath`
-   - embeddings: `meta.TargetPath = prov.EmbeddingsPath`
-   - audio transcriptions: `meta.TargetPath = prov.AudioPath`
-   - image generations: `meta.TargetPath = prov.ImagesPath`
+   Proposed:
+   ```go
+   PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool, path string) error
+   ```
 
-10. In `internal/provider/chutes/chutes.go` `PrepareRequest`: **require** `meta.TargetPath` to be non-empty and use it for `X-E2E-Path`. Return an error if `TargetPath` is missing. Do **not** fall back to configured `chatPath` — missing routing metadata must fail-closed so non-chat requests cannot be silently misrouted to the chat endpoint.
+   The handler factory (Phase 1 step 6) passes the resolved endpoint path to `PrepareRequest` on every call. The Chutes Preparer uses `path` for its `X-E2E-Path` header instead of the stored `chatPath` field — remove `chatPath` from Chutes Preparer construction entirely. Non-Chutes preparers (Venice, NearCloud, Phalacloud) ignore the parameter.
 
-11. Unit tests for the chutes preparer must cover both explicit `TargetPath` routing for each endpoint type AND rejection when `TargetPath` is empty.
+   This is cleaner than stuffing routing info into the `ChutesE2EE` metadata struct: the data flow is explicit (handler knows the path, passes it through to the preparer), and there is no `TargetPath` field to forget to set.
+
+9. In `internal/provider/chutes/chutes.go` `PrepareRequest`: **require** `path` to be non-empty. Return an error if it is missing. Do **not** fall back to any default — missing routing metadata must fail-closed so non-chat requests cannot be silently misrouted to the chat endpoint.
+
+10. Unit tests for the chutes preparer must cover both explicit path routing for each endpoint type AND rejection when path is empty.
 
 ---
 
@@ -98,16 +138,16 @@ The Chutes `/e2e/invoke` tunnel requires an `X-E2E-Path` header naming the TEE-i
 
 Depends on Phases 1–2.
 
-12. Implement `handleEmbeddings` in `internal/proxy/proxy.go`:
+11. Implement `handleEmbeddings` in `internal/proxy/proxy.go`:
     - Parse JSON body; require `model` field (`{"model": "...", "input": ...}`).
     - `resolveModel` → check `prov.EmbeddingsPath != ""`, else 400.
     - Same attestation path as chat: `attestAndCache` for standard providers; `handlePinnedEmbeddings` (parallel to `handlePinnedChat`) for pinned providers — passes `Path: prov.EmbeddingsPath` to `PinnedHandler.HandlePinned`.
     - Non-streaming relay only (embeddings have no SSE stream).
     - Pass `prov.EmbeddingsPath` to `doUpstreamRoundtrip` (not `prov.ChatPath`).
-    - E2EE required: for chutes, `TargetPath` is bound at encryption time per Phase 2 step 8; for neardirect, TLS-level; nearcloud is gated per the nearcloud non-chat E2EE gate (not wired until verified).
+    - E2EE required: for chutes, endpoint path is passed through `PrepareRequest` per Phase 2 step 8; for neardirect, TLS-level; nearcloud is gated per the nearcloud non-chat E2EE gate (not wired until verified).
     - Verify upstream response matches OpenAI embeddings spec: `{"object": "list", "data": [{"object": "embedding", "embedding": [...], "index": 0}], "model": "...", "usage": {...}}`.
 
-13. Integration tests (use **model names**, not chute UUIDs, to exercise full resolution path):
+12. Integration tests (use **model names**, not chute UUIDs, to exercise full resolution path):
     - `internal/integration/embeddings_neardirect_test.go` — `Qwen/Qwen3-Embedding-0.6B`
     - `internal/integration/embeddings_chutes_test.go` — `Qwen/Qwen3-Embedding-8B` (exercises model name → chute ID resolution via `llm.chutes.ai`)
     - `internal/integration/embeddings_phalacloud_test.go` — `qwen/qwen3-embedding-8b` (expected fail-closed; documents current state)
@@ -121,9 +161,9 @@ Depends on Phase 1 body limit only.
 
 VL models use `/v1/chat/completions` verbatim — no new handler needed.
 
-14. Both neardirect `Qwen/Qwen3-VL-30B-A3B-Instruct` and chutes `Qwen/Qwen3.5-397B-A17B-TEE` route through the existing handler. The chutes model name is resolved via `llm.chutes.ai` like any other model. Verify the chutes Preparer does not mis-classify a VL (chat) request as requiring a non-chat path.
+13. Both neardirect `Qwen/Qwen3-VL-30B-A3B-Instruct` and chutes `Qwen/Qwen3.5-397B-A17B-TEE` route through the existing handler. The chutes model name is resolved via `llm.chutes.ai` like any other model. Verify the chutes Preparer does not mis-classify a VL (chat) request as requiring a non-chat path.
 
-15. Integration tests (use **model names** to exercise full resolution):
+14. Integration tests (use **model names** to exercise full resolution):
     - `internal/integration/vl_neardirect_test.go` — `Qwen/Qwen3-VL-30B-A3B-Instruct`
     - `internal/integration/vl_chutes_test.go` — `Qwen/Qwen3.5-397B-A17B-TEE` (exercises model name → chute ID resolution)
     - Use a small inline base64 PNG test image (< 1 MiB) in the test body.
@@ -134,9 +174,9 @@ VL models use `/v1/chat/completions` verbatim — no new handler needed.
 
 Depends on Phase 1.
 
-16. Implement `handleAudioTranscriptions` in `internal/proxy/proxy.go`:
+15. Implement `handleAudioTranscriptions` in `internal/proxy/proxy.go`:
     - Body is `multipart/form-data` (audio file + `model` field). Extract `model` from the form; do NOT parse as JSON.
-    - 25 MiB body limit.
+    - 50 MiB body limit.
     - Pinned handler path for neardirect: `Path: prov.AudioPath`.
     - No chutes audio in scope (Whisper not listed on chutes).
     - **Multipart E2EE guard (fail-closed):** Non-pinned E2EE providers (Chutes, nearcloud) require body encryption, which does not support multipart. The handler must explicitly reject these with an error:
@@ -151,7 +191,7 @@ Depends on Phase 1.
       Without this, adding Chutes audio later would silently try to JSON-unmarshal multipart data.
     - E2EE: neardirect provides TLS-level. nearcloud E2EE over multipart requires investigation (flag as ⚠️ further research — encrypting raw multipart form data at app layer is non-trivial).
 
-17. Integration test: `internal/integration/audio_neardirect_test.go` — `openai/whisper-large-v3`.
+16. Integration test: `internal/integration/audio_neardirect_test.go` — `openai/whisper-large-v3`.
 
 ---
 
@@ -159,13 +199,13 @@ Depends on Phase 1.
 
 Depends on Phase 1.
 
-18. Implement `handleImagesGenerations` in `internal/proxy/proxy.go`:
+17. Implement `handleImagesGenerations` in `internal/proxy/proxy.go`:
     - JSON body: `{"model": "...", "prompt": "...", "n": 1, ...}`.
     - Non-streaming JSON relay.
     - Pass `prov.ImagesPath` to `doUpstreamRoundtrip` and `PinnedRequest`.
     - Verify upstream response matches OpenAI images spec.
 
-19. Integration test: `internal/integration/images_neardirect_test.go` — `black-forest-labs/FLUX.2-klein-4B`.
+18. Integration test: `internal/integration/images_neardirect_test.go` — `black-forest-labs/FLUX.2-klein-4B`.
 
 ---
 
@@ -173,22 +213,21 @@ Depends on Phase 1.
 
 Depends on Phase 1; research required first.
 
-20. **Research step**: Determine what HTTP path near.ai uses for `Qwen/Qwen3-Reranker-0.6B` (likely `/v1/rerank` Cohere-style, or may route through `/v1/embeddings`). Check live API or near.ai docs.
+19. **Research step**: Determine what HTTP path near.ai uses for `Qwen/Qwen3-Reranker-0.6B` (likely `/v1/rerank` Cohere-style, or may route through `/v1/embeddings`). Check live API or near.ai docs.
 
-21. If `/v1/rerank`: add `RerankPath` to Provider, register `POST /v1/rerank`, implement `handleRerank` following the same pattern as `handleEmbeddings`.
+20. If `/v1/rerank`: add `RerankPath` to Provider, register `POST /v1/rerank`, implement `handleRerank` following the same pattern as `handleEmbeddings`.
 
-22. If near.ai routes reranking through `/v1/embeddings`: no new proxy endpoint; configure `EmbeddingsPath` and route through `handleEmbeddings`.
+21. If near.ai routes reranking through `/v1/embeddings`: no new proxy endpoint; configure `EmbeddingsPath` and route through `handleEmbeddings`.
 
-23. Integration test: neardirect `Qwen/Qwen3-Reranker-0.6B`.
+22. Integration test: neardirect `Qwen/Qwen3-Reranker-0.6B`.
 
 ---
 
 ## Relevant Files
 
-- `internal/provider/provider.go` — add `EmbeddingsPath`, `AudioPath`, `ImagesPath` to `Provider`
-- `internal/proxy/proxy.go` — new handlers, routes, `fromConfig` path wiring, body limit
-- `internal/e2ee/chutes.go` — add `TargetPath` to `ChutesE2EE` struct
-- `internal/provider/chutes/chutes.go` — Preparer uses `meta.TargetPath`
+- `internal/provider/provider.go` — add `EmbeddingsPath`, `AudioPath`, `ImagesPath` to `Provider`; add `path string` to `RequestPreparer.PrepareRequest` interface
+- `internal/proxy/proxy.go` — handler factory, `upstreamRequest` struct, routes, `fromConfig` path wiring, body limit
+- `internal/provider/chutes/chutes.go` — Preparer uses `path` parameter for `X-E2E-Path`; remove stored `chatPath` field
 - `internal/provider/chutes/resolve.go` — verify UUID pass-through handles VL chute
 - `internal/provider/neardirect/pinned.go` — verify `PinnedRequest.Path` is already forwarded unchanged (no change expected)
 - `internal/provider/nearcloud/pinned.go` — same
