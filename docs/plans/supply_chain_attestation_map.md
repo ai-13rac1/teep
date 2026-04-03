@@ -9,20 +9,20 @@ All dstack providers use `DstackBaseMeasurementPolicy()` which provides:
 - **MRTD**: 2 dstack-nvidia image versions (0.5.4.1, 0.5.5)
 - **RTMR**: Provider-specific (hardware + OS + application configuration)
 
-### Venice ([venice/policy.go](internal/provider/venice/policy.go))
+### Venice ([venice/policy.go](../../internal/provider/venice/policy.go))
 - **SupplyChainPolicy** → Delegates to neardirect (same container images)
 - **Images** (3 total, all ModelTier):
   1. `datadog/agent` (Sigstore signing required, fingerprint verified)
   2. `certbot/dns-cloudflare` (ComposeBindingOnly)
   3. `nearaidev/compose-manager` (FulcioSigned, GitHub Actions OIDC)
 
-### Neardirect ([neardirect/policy.go](internal/provider/neardirect/policy.go))
+### Neardirect ([neardirect/policy.go](../../internal/provider/neardirect/policy.go))
 - **SupplyChainPolicy** (used by Venice too):
   - `datadog/agent`: Sigstore + fingerprint verification
   - `certbot/dns-cloudflare`: ComposeBindingOnly (digest pinned in compose)
   - `nearaidev/compose-manager`: Fulcio-signed, GitHub Actions build
 
-### Nearcloud ([nearcloud/policy.go](internal/provider/nearcloud/policy.go))
+### Nearcloud ([nearcloud/policy.go](../../internal/provider/nearcloud/policy.go))
 - **SupplyChainPolicy**: Extends neardirect with gateway images:
   - Model tier: inherits Venice/neardirect policy
   - Gateway tier additions (6 total):
@@ -35,14 +35,14 @@ All dstack providers use `DstackBaseMeasurementPolicy()` which provides:
   - All Fulcio images use NoDSSE=true (DSSE envelope has no signatures as of 2026-03)
   - All use GitHub OIDC issuer
 
-### NanoGPT ([nanogpt/policy.go](internal/provider/nanogpt/policy.go))
+### NanoGPT ([nanogpt/policy.go](../../internal/provider/nanogpt/policy.go))
 - **SupplyChainPolicy**: ComposeBindingOnly for all (10 images):
   - Security relies on MRConfigID binding to compose manifest
   - Uses tag-based references, NOT @sha256 pinning
   - All are ModelTier only
-  - Images: alpine, dstacktee/*, haproxy, lmsysorg/sglang, mondaylord/vllm, phalanetwork/vllm, python, redis, vllm/vllm
+  - Images: alpine, dstacktee/dstack-ingress, dstacktee/vllm-proxy, haproxy, lmsysorg/sglang, mondaylord/vllm-openai, phalanetwork/vllm-proxy, python, redis, vllm/vllm-openai
 
-### Chutes ([chutes/policy.go](internal/provider/chutes/policy.go))
+### Chutes ([chutes/policy.go](../../internal/provider/chutes/policy.go))
 - **NO SupplyChainPolicy** (returns nil)
 - Uses cosign image admission + IMA instead of docker-compose binding
 - Supply chain verification is validator-side only
@@ -50,7 +50,7 @@ All dstack providers use `DstackBaseMeasurementPolicy()` which provides:
 
 ## Compose Binding Verification
 
-### How It Works ([internal/attestation/compose.go](internal/attestation/compose.go))
+### How It Works ([internal/attestation/compose.go](../../internal/attestation/compose.go))
 
 1. **VerifyComposeBinding(appCompose, mrConfigID)**:
    - Calculates SHA-256 hash of raw app_compose JSON
@@ -89,7 +89,7 @@ All dstack providers use `DstackBaseMeasurementPolicy()` which provides:
 - `evalCPUGPUChain`, `evalMeasuredModelWeights`: Stub factors (not implemented)
 - `evalEventLogIntegrity`: TDX event log replay verification
 
-### Supply Chain Policy Type ([internal/attestation/report.go](internal/attestation/report.go), line 1628)
+### Supply Chain Policy Type ([internal/attestation/report.go](../../internal/attestation/report.go), line 1628)
 
 ```go
 type SupplyChainPolicy struct {
@@ -114,7 +114,7 @@ type ProvenanceType int
 // ComposeBindingOnly: NOT in Sigstore, security via compose pinning
 ```
 
-### Build Transparency Log Evaluation ([evalBuildTransparencyLog](internal/attestation/report.go), line 1001)
+### Build Transparency Log Evaluation ([evalBuildTransparencyLog](../../internal/attestation/report.go), line 1001)
 
 Flow:
 1. **checkImageRepoPolicy**: Validate all model/gateway image repos against policy
@@ -165,7 +165,10 @@ ChutesDefaultAllowFail    // includes compose_binding, build_transparency_log
 
 2. **Fail-Closed**:
    - Policy violation = policy check FAIL (not SKIP)
-   - Missing policy → no enforcement
+   - Missing `SupplyChainPolicy` skips policy-driven enforcement (for example,
+     repo/image allowlist and signer-identity rules), but does **not** disable
+     all supply-chain checks; some transparency-log presence checks may still
+     run and FAIL
    - Enforced factors promoted from Skip → Fail
 
 3. **Constant-Time Compose Binding**:
@@ -188,12 +191,12 @@ ChutesDefaultAllowFail    // includes compose_binding, build_transparency_log
 
 ### Two Parallel Code Paths
 
-**1. VERIFY COMMAND PATH** ([cmd/teep/main.go](cmd/teep/main.go#L607-L618))
+**1. VERIFY COMMAND PATH** ([cmd/teep/main.go](../../cmd/teep/main.go#L607-L618))
 - `supplyChainPolicy(providerName)` function is called at attestation build time
 - Returns hardcoded provider-specific policy via switch statement
 - Passed to `BuildReport(&ReportInput{SupplyChainPolicy: ...})`
 
-**2. PROXY PATH** ([internal/proxy/proxy.go](internal/proxy/proxy.go#L370-L450))
+**2. PROXY PATH** ([internal/proxy/proxy.go](../../internal/proxy/proxy.go#L370-L450))
 - `fromConfig()` wires Provider struct during proxy initialization
 - Calls provider-specific `SupplyChainPolicy()` function in switch statement
 - Stores in `Provider.SupplyChainPolicy` field
@@ -202,14 +205,14 @@ ChutesDefaultAllowFail    // includes compose_binding, build_transparency_log
 ### Provider Wiring Sources
 
 All provider-specific policies are hardcoded in `policy.go` files:
-- [internal/provider/venice/policy.go](internal/provider/venice/policy.go#L27)
-- [internal/provider/neardirect/policy.go](internal/provider/neardirect/policy.go#L27)
-- [internal/provider/nanogpt/policy.go](internal/provider/nanogpt/policy.go#L36)
-- [internal/provider/nearcloud/pinned.go](internal/provider/nearcloud/pinned.go#L423) (calls SupplyChainPolicy())
+- [internal/provider/venice/policy.go](../../internal/provider/venice/policy.go#L27)
+- [internal/provider/neardirect/policy.go](../../internal/provider/neardirect/policy.go#L27)
+- [internal/provider/nanogpt/policy.go](../../internal/provider/nanogpt/policy.go#L36)
+- [internal/provider/nearcloud/pinned.go](../../internal/provider/nearcloud/pinned.go#L423) (calls SupplyChainPolicy())
 
 ### ReportInput Field
 
-[attestation.ReportInput struct](internal/attestation/report.go#L328-L360) contains:
+[attestation.ReportInput struct](../../internal/attestation/report.go#L328-L360) contains:
 ```go
 SupplyChainPolicy *SupplyChainPolicy
 ```
@@ -219,7 +222,7 @@ Both paths (verify/proxy) populate this before calling `BuildReport()`.
 ### CONFIG INTEGRATION STATUS
 
 **HARDCODED ONLY** - No config.toml integration exists today:
-- Zero matches for "SupplyChainPolicy" in [internal/config/](internal/config/) 
+- Zero matches for "SupplyChainPolicy" in [internal/config/](../../internal/config/) 
 - No `config.MergedSupplyChainPolicy()` equivalent (unlike measurement policies)
 - Phalacloud returns nil in both paths (awaiting implementation)
 - Chutes returns nil in both paths (uses cosign/IMA instead)

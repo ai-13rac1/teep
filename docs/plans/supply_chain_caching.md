@@ -15,10 +15,9 @@ This plan adds:
    hasn't changed).
 3. Global image-digest caching (skip Sigstore/Rekor re-verification for images
    pinned by `@sha256:` digest).
-4. `--update-config` expansion to capture supply chain observations.
-5. A new `--merge-config` flag that unions hardcoded, configured, and observed
-   values.
-6. `--offline` mode awareness of pinned vs. absent hash values.
+4. `--update-config` expansion to capture supply chain observations and write
+   the full merged policy (hardcoded + configured + observed).
+5. `--offline` mode awareness of pinned vs. absent hash values.
 
 **Scope**: dstack providers only (venice, neardirect, nearcloud, nanogpt).
 Chutes (cosign/IMA) and phalacloud are out of scope; they use different supply
@@ -54,17 +53,24 @@ digests over time. This cache is global because a given `sha256:<digest>` is
 the same image regardless of which provider uses it.
 
 **Eviction**: No TTL. Entries live for the process lifetime. Both caches are
-bounded by max entry count (e.g., 1000) with LRU eviction, matching existing
-cache patterns in the codebase (`proxy.go` report cache, SPKI cache).
+bounded by max entry count (e.g., 1000). When a cache is full, evict the
+oldest inserted entry. This is closer to the current codebase cache patterns
+than LRU: the existing report/SPKI caches use TTL-based retention plus
+oldest-entry-style eviction at capacity, not recency tracking.
 
 **Fail-closed**: A cache miss always triggers full online verification.
 A previous failure result is cached (negative cache) to avoid retrying known
 failures within the same process. Cache eviction never results in silent
 pass-through.
 
+**Config-change invalidation**: The compose policy cache does not monitor for
+config file changes. If the user edits the image allowlist or other config
+fields, a process restart is required for the change to take effect. This is
+consistent with the existing config-load-once-at-startup pattern.
+
 ### 1b. Config-File Cache (Persistent Across Runs)
 
-Verified values written to `teep.toml` by `--update-config` or `--merge-config`:
+Verified values written to `teep.toml` by `--update-config`:
 
 | Config field | Scope | Purpose |
 |-------|-------|-------|
@@ -232,14 +238,17 @@ Three-layer merge matching the existing `MergedMeasurementPolicy()` pattern:
 
 **Rationale for replace-not-merge on images**: If a user pins a specific image
 list, they likely want exactly that list. Silently merging in hardcoded images
-that the user deliberately removed would violate least surprise. However,
-`--merge-config` (see Section 5) explicitly unions all three sources.
+that the user deliberately removed would violate least surprise.
 
 ---
 
 ## 4. `--update-config` Expansion
 
 Extends the existing `UpdateConfig()` flow in `internal/config/update.go`.
+`--update-config` now writes the **full merged policy** (hardcoded defaults +
+existing config + observed values), not just observations. This makes the
+output a self-contained config that does not depend on hardcoded defaults,
+which is useful for auditing, forking, and offline deployments.
 
 **Currently captures**: TDX measurements (MRSEAM, MRTD, RTMR0-2, gateway
 variants).
@@ -250,71 +259,28 @@ struct):
 | Field | Source | When captured |
 |-------|--------|---------------|
 | Compose hash | `sha256(raw.AppCompose)` | Always (from attestation response) |
-| Image repos | `ExtractImageRepositories(dockerCompose)` | Always |
+| Image repos | `ExtractImageRepositories(dockerCompose)` | Only for `@sha256:`-pinned images under the current implementation |
 | Image digests | `ExtractImageDigests(dockerCompose)` | Only for `@sha256:`-pinned images |
 | Provenance type | From Rekor/Sigstore results | After successful verification |
+
+**Note**: Under the current implementation, `ExtractImageRepositories` does
+not extract repositories from tag-based Compose `image:` entries. That means
+tag-based manifests do not produce repository observations here, and any repo
+allowlist enforcement described in this plan applies only to digest-pinned
+images unless a separate tag-based extractor is added.
 
 **Behavior**:
 - Only writes observed values to config if attestation is not blocked (existing
   guard — prevents pinning untrustworthy values).
 - Adds new compose hash to `compose_hashes` (deduplicating).
 - Adds new verified digests to `pinned_digests` (deduplicating).
-- Does **not** modify the image allowlist (images section). Image allowlists
-  are structural policy, not observed values.
+- **Writes the effective image allowlist**: union of hardcoded Go defaults,
+  existing config values, and any newly observed images. This makes the
+  resulting config self-contained.
+- **Writes the full merged measurement policy**: union of hardcoded + config +
+  observed values (extending the current behavior that only adds observed).
 
 **Full --update-config example output** (extending current behavior):
-
-```toml
-[providers.neardirect]
-base_url = "https://completions.near.ai"
-api_key_env = "NEARAI_API_KEY"
-
-[providers.neardirect.policy]
-mrseam_allow = ["49b66faa451d19ebb..."]
-mrtd_allow = ["b24d3b24e9e3c160..."]
-rtmr0_allow = ["bc122d143ab76856..."]
-rtmr1_allow = ["c0445b704e4c4813..."]
-rtmr2_allow = ["564622c7ddc55a53..."]
-
-[providers.neardirect.supply_chain]
-compose_hashes = [
-  "sha256:e3b0c44298fc1c14...",
-]
-pinned_digests = [
-  "sha256:1234567890abcdef...",
-  "sha256:fedcba0987654321...",
-]
-```
-
----
-
-## 5. `--merge-config` (New Flag)
-
-`teep verify PROVIDER --model MODEL --merge-config`
-
-**Purpose**: Produce a config file that is the union of all three sources:
-hardcoded Go defaults, existing config file values, and freshly observed
-attestation values.
-
-**Difference from `--update-config`**:
-
-| Behavior | `--update-config` | `--merge-config` |
-|----------|-------------------|-------------------|
-| Image allowlist | Not written (policy, not observation) | Written: union of hardcoded + config + observed |
-| Compose hashes | Adds observed to existing | Adds observed to existing |
-| Pinned digests | Adds observed to existing | Adds observed to existing |
-| Measurement policy | Adds observed to existing | Writes merged (hardcoded + config + observed) |
-| Use case | Pin observations incrementally | Export full effective config |
-
-**Key behavior**: `--merge-config` writes the image allowlist because it is
-meant to produce a self-contained config that does not depend on hardcoded
-defaults. This is useful for:
-- Auditing the effective policy.
-- Forking/customizing the policy (e.g., removing an image the user doesn't
-  expect, or adding a new one).
-- Offline deployments where hardcoded defaults may change across teep versions.
-
-**Merge-config output example** (full self-contained config):
 
 ```toml
 [providers.neardirect]
@@ -360,7 +326,7 @@ source_repos = ["nearai/compose-manager", "https://github.com/nearai/compose-man
 
 ---
 
-## 6. `--offline` Behavior
+## 5. `--offline` Behavior
 
 ### With pinned hashes in config
 
@@ -374,10 +340,11 @@ When `--offline` is set and the config file contains `compose_hashes` and/or
   extract images from compose. For each image:
   - If image digest is in `pinned_digests` → Sigstore verification passes
     (treated as pinned, not skipped).
-  - If image digest is NOT pinned → Sigstore verification is skipped
+  - If image digest is NOT pinned → Sigstore verification is not performed
     (offline), but image repo must still match the configured image allowlist.
-    Factor result: `Skip` (allowed to fail in offline mode per existing
-    `OnlineFactors` mechanism).
+    The factor becomes non-enforced (allowed to fail) via the existing
+    `OnlineFactors` / `WithOfflineAllowFail` mechanism. The factor may still
+    evaluate as `Fail`, but it will not block the request.
 
 ### Without pinned hashes in config
 
@@ -389,8 +356,15 @@ When `--offline` is set and no `compose_hashes` or `pinned_digests` exist:
   that requires no network access.
 - Supply chain factors that require online access (`build_transparency_log`,
   `sigstore_verification`) are added to `allow_fail` via the existing
-  `OnlineFactors` mechanism, so they degrade to `Skip (allowed)` instead of
-  `Fail (enforced)`.
+  `OnlineFactors` / `WithOfflineAllowFail` mechanism. This makes them
+  non-enforced (allowed to fail) — the factor may still evaluate as `Fail` or
+  `Skip`, but it will not block the request.
+
+**Note**: `WithOfflineAllowFail` adds factor names to the `allow_fail` list;
+it does not change the factor evaluation result itself. A factor that evaluates
+as `Fail` remains `Fail` — it just becomes non-enforced, so it does not block.
+A factor that evaluates as `Skip` stays `Skip` and is not promoted to `Fail`
+because it is non-enforced.
 
 ### Summary table
 
@@ -399,12 +373,12 @@ When `--offline` is set and no `compose_hashes` or `pinned_digests` exist:
 | Online, cache hit | Cached → skip re-eval | Cached → skip Sigstore | N/A (compose validated) |
 | Online, cache miss | Full eval | Full Sigstore/Rekor | Checked against allowlist |
 | Offline, pinned hash | Pinned → pass | Pinned → pass | N/A (compose validated) |
-| Offline, unpinned hash | Skip (allow-fail) | Skip (allow-fail) | Checked against allowlist |
-| Offline, no config | Skip (allow-fail) | Skip (allow-fail) | Checked against allowlist |
+| Offline, unpinned hash | Fail (non-enforced) | Fail (non-enforced) | Checked against allowlist |
+| Offline, no config | Fail (non-enforced) | Fail (non-enforced) | Checked against allowlist |
 
 ---
 
-## 7. Implementation Phases
+## 6. Implementation Phases
 
 ### Phase 1: Config Structure and Parsing
 
@@ -462,7 +436,8 @@ ComposePolicyCache  — key: sha256 hex string, value: policy result
 ImageSigstoreCache  — key: sha256 hex string, value: Sigstore/Rekor result
 ```
 
-Both should follow the existing LRU+bounded pattern used by the SPKI cache.
+Both should follow the existing bounded cache pattern: oldest-entry eviction
+at capacity, matching the report/SPKI cache designs.
 
 **Cache consultation points**:
 - `evalBuildTransparencyLog()` — check image Sigstore cache before calling
@@ -473,39 +448,25 @@ Both should follow the existing LRU+bounded pattern used by the SPKI cache.
 *Depends on*: Phase 1 (to know which digests are in `pinned_digests`).
 *Parallel with*: Phase 3 (update.go changes are independent).
 
-### Phase 3: --update-config Supply Chain Capture
+### Phase 3: --update-config Full Merged Output
 
-Extend `UpdateConfig()` to capture observed compose hashes and image digests.
+Extend `UpdateConfig()` to capture observed supply chain values **and** write
+the full merged policy (hardcoded + config + observed).
 
 **Files to modify**:
 - `internal/config/update.go` — Add `ObservedSupplyChain` struct; extend
-  `UpdateConfig()` to merge compose hashes and pinned digests into
-  `[providers.X.supply_chain]`. Add `updateSupplyChain` type with TOML tags.
-- `internal/config/update_test.go` — Test merge/dedup logic for compose hashes
-  and pinned digests.
+  `UpdateConfig()` to merge compose hashes, pinned digests, and the full
+  image allowlist into `[providers.X.supply_chain]`. Add `updateSupplyChain`
+  type with TOML tags.
+- `internal/config/update_test.go` — Test merge/dedup logic for compose hashes,
+  pinned digests, and three-way image allowlist union.
 - `cmd/teep/main.go` — Extract compose hash and verified digests from report
-  metadata and Sigstore results; pass to `UpdateConfig()`.
+  metadata and Sigstore results; load hardcoded defaults; pass all to
+  `UpdateConfig()`.
 
 *Depends on*: Phase 1 (config types).
 
-### Phase 4: --merge-config Flag
-
-Add the new CLI flag and merge-all-sources logic.
-
-**Files to modify**:
-- `cmd/teep/main.go` — Add `--merge-config` flag to `verify` command. When
-  set, call new `MergeConfig()` function instead of `UpdateConfig()`.
-- `internal/config/update.go` — Add `MergeConfig()` that:
-  1. Loads config file.
-  2. Loads hardcoded defaults (`SupplyChainPolicy()`, `DefaultMeasurementPolicy()`).
-  3. Merges observed values.
-  4. Unions all image allowlists (hardcoded + config + observed).
-  5. Writes merged result.
-- `internal/config/update_test.go` — Test three-way merge for images.
-
-*Depends on*: Phase 1, Phase 3.
-
-### Phase 5: --offline Pinned Hash Support
+### Phase 4: --offline Pinned Hash Support
 
 Wire up offline mode to consult config-file pinned hashes.
 
@@ -515,47 +476,51 @@ Wire up offline mode to consult config-file pinned hashes.
   and digests before skipping. If pinned hash matches, return `Pass` with
   detail "pinned in config" instead of `Skip`.
 - `internal/attestation/report_test.go` — Test offline+pinned pass, offline
-  +unpinned skip, offline+missing-config skip.
+  +unpinned non-enforced fail, offline+missing-config non-enforced fail.
 
 *Depends on*: Phase 1 (config types available in ReportInput), Phase 2 helpful
 but not required.
 
-### Phase 6: Integration and Documentation
+### Phase 5: Integration and Documentation
 
-- `internal/integration/` — Integration tests for --update-config and
-  --merge-config with supply chain fields.
+- `internal/integration/` — Integration tests for --update-config with supply
+  chain fields.
 - `teep.toml.example` — Full supply chain section documentation.
 - `docs/measurement_allowlists.md` — Update to cover supply chain caching.
-- `README.md` / `README_ADVANCED.md` — Document new flags and config sections.
+- `README.md` / `README_ADVANCED.md` — Document new config sections.
 
 *Depends on*: All previous phases.
 
 ---
 
-## 8. Verification
+## 7. Verification
 
 1. `make check` passes after each phase.
 2. **Unit tests** for each phase:
    - Config parsing: valid TOML round-trips, unknown keys rejected, bad
      provenance values rejected, missing required fields rejected.
    - Cache: hit/miss/eviction/negative-cache behavior.
-   - UpdateConfig: compose hashes and pinned digests merge correctly,
-     deduplication works, backup created.
-   - MergeConfig: three-way union produces expected output.
+   - UpdateConfig: compose hashes, pinned digests, and image allowlist merge
+     correctly; deduplication works; backup created; three-way union produces
+     expected output.
    - Offline pinning: compose hash match → Pass, digest match → Pass,
-     no match → Skip (allowed).
-3. `make integration` with live providers (after Phase 6).
+     no match → Fail (non-enforced).
+3. `make integration` with live providers (after Phase 5).
 4. `make reports` to verify no regressions in provider verification.
 5. Manual: run `teep verify neardirect --model ... --update-config`, inspect
-   output config for supply_chain section. Run again with `--merge-config`,
-   verify image allowlist is written.
+   output config for supply_chain section including image allowlist and
+   pinned hashes.
 
 ---
 
-## 9. Decisions
+## 8. Decisions
 
+- **No separate `--merge-config` flag**: `--update-config` always writes the
+  full merged policy (hardcoded + config + observed). This produces a
+  self-contained config without requiring a second flag. The original
+  incremental-only behavior is not preserved as a separate mode.
 - **Image allowlist merge**: Config replaces hardcoded (not union) for normal
-  operation. `--merge-config` explicitly unions all sources.
+  runtime operation. `--update-config` output is the union of all sources.
 - **Compose hash cache**: Per-provider (different providers may have different
   compose files with the same images).
 - **Image digest cache**: Global (same digest = same image regardless of
@@ -568,10 +533,16 @@ but not required.
   rejected at startup (fail-closed).
 - **Chutes/phalacloud**: Excluded from this plan. Chutes uses cosign/IMA (no
   docker-compose). PhalaCloud has no supply chain policy yet.
+- **Compose hash as trust anchor**: A pinned compose hash causes policy
+  evaluation to pass without re-evaluating the image allowlist, even if the
+  allowlist has changed since the hash was pinned (e.g., across teep versions
+  or after user config edits). This is intentional: the compose was fully
+  validated against the effective policy at pinning time. To invalidate a
+  pinned hash after an allowlist change, remove it from the config file.
 
 ---
 
-## 10. Further Considerations
+## 9. Further Considerations
 
 1. **Global supply chain section**: A `[supply_chain]` top-level section could
    define default images shared across all providers (e.g., `datadog/agent`
