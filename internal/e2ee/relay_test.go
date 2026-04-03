@@ -260,7 +260,10 @@ func TestRelayStream(t *testing.T) {
 	input := fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", data)
 
 	rec := httptest.NewRecorder()
-	RelayStream(context.Background(), rec, strings.NewReader(input), session)
+	_, err := RelayStream(context.Background(), rec, strings.NewReader(input), session)
+	if err != nil {
+		t.Fatalf("RelayStream: %v", err)
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -283,7 +286,10 @@ func TestRelayStream(t *testing.T) {
 func TestRelayStream_NilSession(t *testing.T) {
 	input := "data: {\"choices\":[{\"delta\":{\"content\":\"plain\"}}]}\n\ndata: [DONE]\n\n"
 	rec := httptest.NewRecorder()
-	RelayStream(context.Background(), rec, strings.NewReader(input), nil)
+	_, err := RelayStream(context.Background(), rec, strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatalf("RelayStream: %v", err)
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -298,7 +304,10 @@ func TestRelayStream_NilSession(t *testing.T) {
 func TestRelayNonStream_NilSession(t *testing.T) {
 	input := `{"choices":[{"message":{"content":"hello"}}]}`
 	rec := httptest.NewRecorder()
-	RelayNonStream(context.Background(), rec, strings.NewReader(input), nil)
+	_, err := RelayNonStream(context.Background(), rec, strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatalf("RelayNonStream: %v", err)
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -321,7 +330,10 @@ func TestRelayNonStream_Encrypted(t *testing.T) {
 	body := nonStreamJSON(t, encrypted)
 
 	rec := httptest.NewRecorder()
-	RelayNonStream(context.Background(), rec, strings.NewReader(string(body)), session)
+	_, err := RelayNonStream(context.Background(), rec, strings.NewReader(string(body)), session)
+	if err != nil {
+		t.Fatalf("RelayNonStream: %v", err)
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -342,7 +354,10 @@ func TestRelayReassembledNonStream(t *testing.T) {
 	input := fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", data)
 
 	rec := httptest.NewRecorder()
-	RelayReassembledNonStream(context.Background(), rec, strings.NewReader(input), session)
+	_, err := RelayReassembledNonStream(context.Background(), rec, strings.NewReader(input), session)
+	if err != nil {
+		t.Fatalf("RelayReassembledNonStream: %v", err)
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -363,7 +378,13 @@ func TestRelayReassembledNonStream(t *testing.T) {
 
 func TestRelayStream_EmptyBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	RelayStream(context.Background(), rec, strings.NewReader(""), nil)
+	_, err := RelayStream(context.Background(), rec, strings.NewReader(""), nil)
+	if err == nil {
+		t.Fatal("RelayStream with empty body should return non-nil error")
+	}
+	if !errors.Is(err, ErrRelayFailed) {
+		t.Errorf("error should wrap ErrRelayFailed, got: %v", err)
+	}
 
 	// Empty body should produce a bad gateway error.
 	if rec.Code != http.StatusBadGateway {
@@ -683,5 +704,105 @@ func TestEffectiveTokens(t *testing.T) {
 				t.Errorf("EffectiveTokens() = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Relay error sentinel tests
+// ---------------------------------------------------------------------------
+
+func TestRelayStream_NoFlusher_ReturnsRelayFailed(t *testing.T) {
+	// Writer that does not implement http.Flusher.
+	w := &noFlushWriter{}
+	_, err := RelayStream(context.Background(), w, strings.NewReader("data: {}\n\n"), nil)
+	if err == nil {
+		t.Fatal("expected non-nil error when writer lacks Flusher")
+	}
+	if !errors.Is(err, ErrRelayFailed) {
+		t.Errorf("error should wrap ErrRelayFailed, got: %v", err)
+	}
+	if errors.Is(err, ErrDecryptionFailed) {
+		t.Error("error should NOT be ErrDecryptionFailed")
+	}
+}
+
+func TestRelayStream_ScannerError_ReturnsRelayFailed(t *testing.T) {
+	_, err := RelayStream(context.Background(), httptest.NewRecorder(), &failReader{}, nil)
+	if err == nil {
+		t.Fatal("expected non-nil error on scanner failure")
+	}
+	if !errors.Is(err, ErrRelayFailed) {
+		t.Errorf("error should wrap ErrRelayFailed, got: %v", err)
+	}
+}
+
+func TestRelayNonStream_ReadError_ReturnsRelayFailed(t *testing.T) {
+	_, err := RelayNonStream(context.Background(), httptest.NewRecorder(), &failReader{}, nil)
+	if err == nil {
+		t.Fatal("expected non-nil error on read failure")
+	}
+	if !errors.Is(err, ErrRelayFailed) {
+		t.Errorf("error should wrap ErrRelayFailed, got: %v", err)
+	}
+}
+
+func TestErrSentinels_Distinct(t *testing.T) {
+	if errors.Is(ErrRelayFailed, ErrDecryptionFailed) {
+		t.Error("ErrRelayFailed should not match ErrDecryptionFailed")
+	}
+	if errors.Is(ErrDecryptionFailed, ErrRelayFailed) {
+		t.Error("ErrDecryptionFailed should not match ErrRelayFailed")
+	}
+}
+
+// noFlushWriter is an http.ResponseWriter that does not implement http.Flusher.
+type noFlushWriter struct {
+	code int
+	body []byte
+}
+
+func (w *noFlushWriter) Header() http.Header { return http.Header{} }
+func (w *noFlushWriter) Write(b []byte) (int, error) {
+	w.body = append(w.body, b...)
+	return len(b), nil
+}
+func (w *noFlushWriter) WriteHeader(code int) { w.code = code }
+
+// failReader always returns an error on Read.
+type failReader struct{}
+
+func (*failReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+// failAfterReader succeeds for the first read (returning data) then fails.
+type failAfterReader struct {
+	data []byte
+	read bool
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		n := copy(p, r.data)
+		return n, nil
+	}
+	return 0, errors.New("mid-stream read failure")
+}
+
+func TestRelayStream_MidStreamScannerError_ReturnsRelayFailed(t *testing.T) {
+	// First scan succeeds (valid SSE line), then scanner hits a read error.
+	// The scanner.Err() at end of RelayStream should return ErrRelayFailed.
+	data := []byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+	r := &failAfterReader{data: data}
+
+	rec := httptest.NewRecorder()
+	_, err := RelayStream(context.Background(), rec, r, nil)
+	if err == nil {
+		t.Fatal("expected non-nil error on mid-stream scanner failure")
+	}
+	if !errors.Is(err, ErrRelayFailed) {
+		t.Errorf("error should wrap ErrRelayFailed, got: %v", err)
+	}
+	if errors.Is(err, ErrDecryptionFailed) {
+		t.Error("error should NOT be ErrDecryptionFailed")
 	}
 }

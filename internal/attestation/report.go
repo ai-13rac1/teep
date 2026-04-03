@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -85,6 +85,24 @@ func (r *VerificationReport) Blocked() bool {
 	return false
 }
 
+// Clone returns a deep copy of the report. Factors and Metadata are copied so
+// mutations to the clone do not affect the original (or vice-versa). Use this
+// before calling MarkE2EEUsable to avoid racing with concurrent readers of
+// a cached report.
+func (r *VerificationReport) Clone() *VerificationReport {
+	if r == nil {
+		return nil
+	}
+	dst := *r
+	dst.Factors = make([]FactorResult, len(r.Factors))
+	copy(dst.Factors, r.Factors)
+	if r.Metadata != nil {
+		dst.Metadata = make(map[string]string, len(r.Metadata))
+		maps.Copy(dst.Metadata, r.Metadata)
+	}
+	return &dst
+}
+
 // BlockedFactors returns the names and details of every enforced factor that
 // has failed. The slice is nil when Blocked() would return false.
 func (r *VerificationReport) BlockedFactors() []FactorResult {
@@ -111,31 +129,48 @@ func (r *VerificationReport) ReportDataBindingPassed() bool {
 }
 
 // MarkE2EEUsable updates the e2ee_usable factor to Pass after a successful
-// E2EE roundtrip in the proxy path. It adjusts the Passed/Skipped counters
-// accordingly. This must only be called when E2EE was actually used for a
-// live request and the response was successfully decrypted.
-//
-// TODO(e2ee_usable): This method manually adjusts report counters, which is
-// fragile and can desync if the factor is in an unexpected state (e.g.
-// promoted from Skip to Fail by BuildReport). The interaction between
-// report factors, proxy blocking, and live inference test factors needs
-// to be redesigned. See docs/plans/e2ee_usable_refactoring.md.
+// E2EE roundtrip in the proxy path. Counters are recomputed from the full
+// factor list to avoid desync. This must only be called when E2EE was
+// actually used for a live request and the response was successfully
+// decrypted.
 func (r *VerificationReport) MarkE2EEUsable(detail string) {
 	for i := range r.Factors {
 		if r.Factors[i].Name == "e2ee_usable" {
 			if r.Factors[i].Status == Skip {
 				r.Factors[i].Status = Pass
 				r.Factors[i].Detail = detail
-				r.Passed++
-				if r.Skipped > 0 {
-					r.Skipped--
-				} else {
-					slog.Warn("MarkE2EEUsable: Skipped counter already zero; counters may be out of sync")
-				}
+				r.recomputeCounters()
 			}
 			return
 		}
 	}
+}
+
+// recomputeCounters recalculates all summary counters from the Factors slice.
+// Called after any post-build factor mutation to prevent counter desync.
+func (r *VerificationReport) recomputeCounters() {
+	passed, failed, skipped := 0, 0, 0
+	enforcedFailed, allowedFailed := 0, 0
+	for _, f := range r.Factors {
+		switch f.Status {
+		case Pass:
+			passed++
+		case Fail:
+			failed++
+			if f.Enforced {
+				enforcedFailed++
+			} else {
+				allowedFailed++
+			}
+		case Skip:
+			skipped++
+		}
+	}
+	r.Passed = passed
+	r.Failed = failed
+	r.Skipped = skipped
+	r.EnforcedFailed = enforcedFailed
+	r.AllowedFailed = allowedFailed
 }
 
 // DefaultAllowFail lists the factor names that are allowed to fail without
@@ -177,14 +212,6 @@ var NearcloudDefaultAllowFail = []string{
 	"cpu_gpu_chain",
 	"measured_model_weights",
 	"cpu_id_registry",
-	// TODO(e2ee_usable): e2ee_usable has a chicken-and-egg problem in the
-	// proxy path: the factor starts as Skip (pending live test), which
-	// BuildReport promotes to Fail when enforced, blocking the very request
-	// needed to prove E2EE works. Allowed to fail here until the
-	// interaction between report factors, proxy blocking, and live
-	// inference test factors (e2ee_usable, future tool-call test) is
-	// redesigned. See docs/plans/e2ee_usable_refactoring.md.
-	"e2ee_usable",
 	// Gateway factors (nearcloud only).
 	"gateway_tdx_hardware_config",
 	"gateway_tdx_boot_config",
@@ -220,10 +247,6 @@ var ChutesDefaultAllowFail = []string{
 	"compose_binding",
 	"sigstore_verification",
 	"event_log_integrity",
-	// TODO(e2ee_usable): same chicken-and-egg problem as nearcloud; see
-	// the comment in NearcloudDefaultAllowFail and
-	// docs/plans/e2ee_usable_refactoring.md.
-	"e2ee_usable",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
@@ -399,8 +422,12 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	}
 
 	// Promote Skip → Fail for enforced factors.
+	// Exception: e2ee_usable stays Skip because it can only be evaluated
+	// via a live relay roundtrip — promoting it to Fail would block the
+	// very request needed to prove E2EE works. Post-relay enforcement
+	// catches failures instead (see proxy.handleE2EEDecryptionFailure).
 	for i := range factors {
-		if factors[i].Status == Skip && factors[i].Enforced {
+		if factors[i].Status == Skip && factors[i].Enforced && factors[i].Name != "e2ee_usable" {
 			factors[i].Status = Fail
 			factors[i].Detail += " (enforced)"
 		}
