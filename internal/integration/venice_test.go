@@ -89,7 +89,7 @@ func verifyVeniceNvidiaEAT(t *testing.T, raw *attestation.RawAttestation, nonce 
 	if raw.NvidiaPayload == "" {
 		return nil
 	}
-	result := attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+	result := attestation.VerifyNVIDIAPayload(context.Background(), raw.NvidiaPayload, nonce)
 	t.Logf("NVIDIA format: %s", result.Format)
 	t.Logf("NVIDIA signature err: %v", result.SignatureErr)
 	t.Logf("NVIDIA claims err: %v", result.ClaimsErr)
@@ -305,7 +305,7 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	t.Logf("nonce: %s", nonceHex[:16]+"...")
 
 	// 2. Parse fixture into RawAttestation
-	raw, err := venice.ParseAttestationResponse(attestBody)
+	raw, err := venice.ParseAttestationResponse(ctx, attestBody)
 	if err != nil {
 		t.Fatalf("parse Venice fixture: %v", err)
 	}

@@ -143,22 +143,22 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	if err != nil {
 		return nil, fmt.Errorf("nanogpt: %w", err)
 	}
-	return ParseAttestationResponse(body)
+	return ParseAttestationResponse(ctx, body)
 }
 
 // ParseAttestationResponse detects the attestation format from the JSON body
 // and delegates to the appropriate parser. For dstack format (the primary
 // NanoGPT backend), parsing is handled internally. Other formats (chutes)
 // are delegated to their respective packages.
-func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) {
+func ParseAttestationResponse(ctx context.Context, body []byte) (*attestation.RawAttestation, error) {
 	format := formatdetect.Detect(body)
-	slog.Debug("nanogpt format detected", "format", format)
+	slog.DebugContext(ctx, "nanogpt format detected", "format", format)
 
 	switch format {
 	case attestation.FormatDstack:
-		return parseDstack(body)
+		return parseDstack(ctx, body)
 	case attestation.FormatChutes:
-		return provider.ParseChutesFormat(body, "nanogpt")
+		return provider.ParseChutesFormat(ctx, body, "nanogpt")
 	case attestation.FormatTinfoil:
 		return nil, errors.New("nanogpt: tinfoil attestation format not yet supported")
 	case attestation.FormatGateway:
@@ -171,20 +171,20 @@ func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) 
 // parseDstack handles the dstack attestation format with NanoGPT-specific
 // quirks (signing_public_key instead of signing_key, eventLogFlexible,
 // double-encoded tcb_info).
-func parseDstack(body []byte) (*attestation.RawAttestation, error) {
+func parseDstack(ctx context.Context, body []byte) (*attestation.RawAttestation, error) {
 	var ar attestationResponse
 	if err := jsonstrict.UnmarshalWarn(body, &ar, "nanogpt attestation response"); err != nil {
 		return nil, fmt.Errorf("nanogpt: unmarshal attestation response: %w", err)
 	}
 
 	entries := []attestation.EventLogEntry(ar.EventLog)
-	slog.Debug("nanogpt event log", "entries", len(entries))
+	slog.DebugContext(ctx, "nanogpt event log", "entries", len(entries))
 	for i, e := range entries {
 		digest := e.Digest
 		if len(digest) > 16 {
 			digest = digest[:16] + "..."
 		}
-		slog.Debug("event log entry", "index", i, "imr", e.IMR,
+		slog.DebugContext(ctx, "event log entry", "index", i, "imr", e.IMR,
 			"event", e.Event, "type", e.EventType, "digest", digest)
 	}
 

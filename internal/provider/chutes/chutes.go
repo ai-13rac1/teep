@@ -159,7 +159,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("chutes: fetch evidence: %w", err)
 	}
 
-	raw, err := ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := ParseAttestationResponse(ctx, instancesBody, evidenceBody, nonce)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 // changes between the two API calls (instances fetched first, then evidence),
 // where an evidence entry may reference an instance that joined or left the
 // fleet in between.
-func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
+func ParseAttestationResponse(ctx context.Context, instancesBody, evidenceBody []byte, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
 	var instances e2eInstancesResponse
 	if err := jsonstrict.UnmarshalWarn(instancesBody, &instances, "chutes e2e instances response"); err != nil {
 		return nil, fmt.Errorf("chutes: unmarshal instances response: %w", err)
@@ -206,7 +206,7 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 		instanceMap[instances.Instances[i].InstanceID] = &instances.Instances[i]
 	}
 
-	slog.Debug("chutes: attestation received",
+	slog.DebugContext(ctx, "chutes: attestation received",
 		"instances", len(instances.Instances),
 		"evidence", len(ar.Evidence),
 		"failed", len(ar.FailedInstanceIDs),
@@ -227,13 +227,13 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 			continue
 		}
 		if inst.E2EPubKey == "" {
-			slog.Debug("chutes: skipping instance with empty e2e_pubkey",
+			slog.DebugContext(ctx, "chutes: skipping instance with empty e2e_pubkey",
 				"instance_id", ar.Evidence[i].InstanceID)
 			skipped++
 			continue
 		}
 		if len(inst.Nonces) == 0 {
-			slog.Debug("chutes: skipping instance with no nonces",
+			slog.DebugContext(ctx, "chutes: skipping instance with no nonces",
 				"instance_id", ar.Evidence[i].InstanceID)
 			skipped++
 			continue
@@ -247,7 +247,7 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 			len(ar.Evidence), len(instances.Instances))
 	}
 	if skipped > 0 {
-		slog.Info("chutes: skipped evidence entries",
+		slog.InfoContext(ctx, "chutes: skipped evidence entries",
 			"skipped", skipped, "used_instance", matched.InstanceID)
 	}
 
@@ -266,7 +266,7 @@ func ParseAttestationResponse(instancesBody, evidenceBody []byte, nonce attestat
 		intelQuoteHex = hex.EncodeToString(quoteBytes)
 	}
 
-	slog.Debug("chutes: attestation parsed",
+	slog.DebugContext(ctx, "chutes: attestation parsed",
 		"instance_id", matched.InstanceID,
 		"gpus", len(matched.GPUEvidence),
 		"has_quote", matched.Quote != "",

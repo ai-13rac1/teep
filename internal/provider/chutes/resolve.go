@@ -156,7 +156,7 @@ func (r *ModelResolver) fetchModels(ctx context.Context) (map[string]string, err
 		}
 	}
 
-	slog.Debug("chutes: model map refreshed", "models", len(result))
+	slog.DebugContext(ctx, "chutes: model map refreshed", "models", len(result))
 	return result, nil
 }
 

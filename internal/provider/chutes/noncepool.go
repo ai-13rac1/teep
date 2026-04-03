@@ -81,7 +81,7 @@ func (p *NoncePool) Take(ctx context.Context, model string) (*provider.E2EEMater
 	}
 
 	// Fast path: try to take from cache.
-	if m := p.take(chuteID); m != nil {
+	if m := p.take(ctx, chuteID); m != nil {
 		return m, nil
 	}
 
@@ -94,7 +94,7 @@ func (p *NoncePool) Take(ctx context.Context, model string) (*provider.E2EEMater
 		return nil, err
 	}
 
-	if m := p.take(chuteID); m != nil {
+	if m := p.take(ctx, chuteID); m != nil {
 		return m, nil
 	}
 	return nil, fmt.Errorf("nonce pool: no nonces available for chute %s after refresh", chuteID)
@@ -126,7 +126,7 @@ func (p *NoncePool) FetchE2EEMaterial(ctx context.Context, model string) (*provi
 
 // take attempts to consume one nonce from the pool. Returns nil if no nonces
 // are available or the pool is expired. Prefers instances with fewer failures.
-func (p *NoncePool) take(chuteID string) *provider.E2EEMaterial {
+func (p *NoncePool) take(ctx context.Context, chuteID string) *provider.E2EEMaterial {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -160,7 +160,7 @@ func (p *NoncePool) take(chuteID string) *provider.E2EEMaterial {
 	nonce := inst.nonces[0]
 	inst.nonces = inst.nonces[1:]
 
-	slog.Debug("nonce pool: took nonce",
+	slog.DebugContext(ctx, "nonce pool: took nonce",
 		"chute_id", chuteID,
 		"instance_id", inst.instanceID,
 		"remaining", len(inst.nonces),

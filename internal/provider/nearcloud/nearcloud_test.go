@@ -1,6 +1,7 @@
 package nearcloud_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +41,7 @@ func minimalGatewayJSON(model, nonceHex, spkiHash string) string {
 
 func TestParseGatewayResponse_HappyPath(t *testing.T) {
 	body := []byte(minimalGatewayJSON("test-model", "abc123", "sha256:fp"))
-	gw, raw, err := nearcloud.ParseGatewayResponse(body, "test-model")
+	gw, raw, err := nearcloud.ParseGatewayResponse(context.Background(), body, "test-model")
 	if err != nil {
 		t.Fatalf("ParseGatewayResponse: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestParseGatewayResponse_EventLog(t *testing.T) {
 		]
 	}`)
 
-	gw, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	gw, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	if err != nil {
 		t.Fatalf("ParseGatewayResponse: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestParseGatewayResponse_EventLog(t *testing.T) {
 
 func TestParseGatewayResponse_EmptyEventLog(t *testing.T) {
 	body := []byte(minimalGatewayJSON("m", "abc", "fp"))
-	gw, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	gw, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	if err != nil {
 		t.Fatalf("ParseGatewayResponse: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestParseGatewayResponse_MalformedEventLog(t *testing.T) {
 		]
 	}`)
 
-	_, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	t.Logf("error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for malformed event_log")
@@ -148,7 +149,7 @@ func TestParseGatewayResponse_MalformedEventLogEntry(t *testing.T) {
 		]
 	}`)
 
-	_, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	t.Logf("error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for malformed event log entry")
@@ -182,7 +183,7 @@ func TestParseGatewayResponse_EventLogTooManyEntries(t *testing.T) {
 		]
 	}`, sb.String())
 
-	_, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	if err == nil {
 		t.Fatal("expected error for oversized gateway event_log")
 	}
@@ -192,7 +193,7 @@ func TestParseGatewayResponse_EventLogTooManyEntries(t *testing.T) {
 }
 
 func TestParseGatewayResponse_MalformedJSON(t *testing.T) {
-	_, _, err := nearcloud.ParseGatewayResponse([]byte(`{{{`), "m")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), []byte(`{{{`), "m")
 	t.Logf("error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
@@ -213,7 +214,7 @@ func TestParseGatewayResponse_MalformedTCBInfo(t *testing.T) {
 		]
 	}`)
 
-	_, _, err := nearcloud.ParseGatewayResponse(body, "m")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "m")
 	t.Logf("error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for malformed tcb_info")
@@ -223,7 +224,7 @@ func TestParseGatewayResponse_MalformedTCBInfo(t *testing.T) {
 func TestParseGatewayResponse_NoModel(t *testing.T) {
 	body := []byte(minimalGatewayJSON("model-a", "abc", "fp"))
 
-	_, _, err := nearcloud.ParseGatewayResponse(body, "model-b")
+	_, _, err := nearcloud.ParseGatewayResponse(context.Background(), body, "model-b")
 	t.Logf("error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for missing model")
@@ -308,7 +309,7 @@ func TestAttester_FetchAttestation_HappyPath(t *testing.T) {
 	// unit tests. The integration test covers the full flow.
 	// Instead, test the parsing path that FetchAttestation uses.
 	body := []byte(minimalGatewayJSON("test-model", nonce.Hex(), "sha256:fp"))
-	gw, raw, err := nearcloud.ParseGatewayResponse(body, "test-model")
+	gw, raw, err := nearcloud.ParseGatewayResponse(context.Background(), body, "test-model")
 	if err != nil {
 		t.Fatalf("ParseGatewayResponse: %v", err)
 	}

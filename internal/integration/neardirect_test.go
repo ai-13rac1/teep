@@ -114,7 +114,7 @@ func TestIntegration_NearDirect_Fixture(t *testing.T) {
 	// ---------------------------------------------------------------
 	// 2. Parse fixture into RawAttestation
 	// ---------------------------------------------------------------
-	raw, err := neardirect.ParseAttestationResponse(attestBody, model)
+	raw, err := neardirect.ParseAttestationResponse(ctx, attestBody, model)
 	if err != nil {
 		t.Fatalf("parse NEAR AI fixture: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestIntegration_NearDirect_Fixture(t *testing.T) {
 	t.Log("--- NVIDIA EAT verification ---")
 	var nvidiaResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" {
-		nvidiaResult = attestation.VerifyNVIDIAPayload(raw.NvidiaPayload, nonce)
+		nvidiaResult = attestation.VerifyNVIDIAPayload(context.Background(), raw.NvidiaPayload, nonce)
 		t.Logf("NVIDIA format: %s", nvidiaResult.Format)
 		t.Logf("NVIDIA signature err: %v", nvidiaResult.SignatureErr)
 		t.Logf("NVIDIA claims err: %v", nvidiaResult.ClaimsErr)
