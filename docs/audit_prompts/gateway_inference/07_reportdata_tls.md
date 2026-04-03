@@ -32,7 +32,9 @@ The model backend's REPORTDATA binds the E2EE signing key and TLS fingerprint:
 - `REPORTDATA[0:32]` = `SHA256(signing_address_bytes || tls_fingerprint_bytes)`
 - `REPORTDATA[32:64]` = raw_client_nonce_32_bytes
 
-The `signing_address` is the ECDSA public key address (secp256k1) used for E2EE key exchange. The `tls_fingerprint` is the model backend's own TLS certificate fingerprint. Since the proxy connects to the gateway (not the model backend directly), the proxy cannot verify the model backend's TLS fingerprint against a live TLS connection — this fingerprint is verified only as part of the REPORTDATA binding to the TDX quote.
+For nearcloud, the `signing_address` is derived from the Ed25519 public key used for E2EE key exchange. The `tls_fingerprint` is the model backend's own TLS certificate fingerprint. Since the proxy connects to the gateway (not the model backend directly), the proxy cannot verify the model backend's TLS fingerprint against a live TLS connection — this fingerprint is verified only as part of the REPORTDATA binding to the TDX quote.
+
+> **Known divergence**: Venice uses a different REPORTDATA scheme — the signing address is derived from a keccak256 hash of a secp256k1 public key, occupying bytes [0:20] with zeros in [20:32]. See `internal/provider/venice/reportdata.go` for the Venice-specific scheme.
 
 ### Gateway REPORTDATA
 
@@ -144,6 +146,35 @@ For the pinned connection path, verify whether offline mode is honored. The offl
 - **Defense in depth**: Even with attestation-bound TLS pinning, CA verification bypass removes a layer of defense. Document whether this is justified.
 - **Fail-secure defaults**: A new provider added without REPORTDATA verifier implementations cannot silently pass verification.
 - **Connection isolation**: Same TCP/TLS connection used for attestation fetch and inference.
+
+## Known Divergence: Chutes/Sek8s
+
+Chutes/sek8s uses a fundamentally different REPORTDATA scheme. The Chutes gateway is unattested, so there is no gateway REPORTDATA, no attestation-bound TLS pinning, and no SPKI cache.
+
+### Chutes REPORTDATA Scheme
+
+- `REPORTDATA[0:32]` = `SHA256(nonce_hex + e2e_pubkey_base64)` — the nonce as lowercase hex string concatenated with the ML-KEM-768 public key as base64, then SHA-256 hashed.
+- `REPORTDATA[32:64]` = zero bytes.
+- The binding combines the attestation nonce AND the E2EE public key in a single commitment, unlike nearcloud which splits nonce and key binding across the two REPORTDATA halves.
+
+Audit focus:
+- Verify the concatenation format: `hex(nonce) + base64(pubkey)` with no separator.
+- Verify constant-time comparison for the first 32 bytes.
+- Verify the second half is checked to be all zeros (or document if it is not checked).
+- The `tdx_reportdata_binding` factor is enforced for chutes.
+
+Primary reference: `internal/provider/chutes/reportdata.go`.
+
+### No Gateway REPORTDATA, TLS Pinning, or SPKI Cache
+
+The Chutes gateway (`api.chutes.ai`/`llm.chutes.ai`) is unattested and produces no TDX quote. Therefore:
+- No `gateway_tdx_reportdata_binding` factor exists.
+- No SPKI pin cache is maintained for chutes providers.
+- No `tls_key_binding` enforcement — `tls_key_binding` is in `ChutesDefaultAllowFail`.
+- Standard HTTPS is used without attestation-bound TLS pinning.
+- Certificate Transparency checks do not apply.
+
+The audit should verify that the chutes code path does not attempt to use SPKI pinning or gateway REPORTDATA logic.
 
 ## Section Deliverable
 

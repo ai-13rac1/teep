@@ -38,10 +38,10 @@ Map each factor to its enforcement status:
 | `nvidia_payload_present` | No | NVIDIA payload field exists in attestation response |
 | `nvidia_signature` | **Yes** | Local SPDM ECDSA P-384 cert chain + signature verification |
 | `nvidia_claims` | No | EAT claims (arch, GPU count, nonce) are valid |
-| `nvidia_nonce_match` | **Yes** | Nonce in NVIDIA payload matches client-submitted nonce |
+| `nvidia_nonce_client_bound` | **Yes** | Nonce in NVIDIA payload matches client-submitted nonce |
 | `nvidia_nras_verified` | No | Remote NRAS JWT verification passed |
 
-Verify that `nvidia_signature` and `nvidia_nonce_match` are in `DefaultEnforced` and that their failure blocks traffic via `Blocked()`.
+Verify that `nvidia_signature` and `nvidia_nonce_client_bound` are NOT in `NearcloudDefaultAllowFail` (i.e., they are enforced for nearcloud) and that their failure blocks traffic via `Blocked()`.
 
 ### Local NVIDIA Evidence (EAT/SPDM)
 
@@ -109,7 +109,7 @@ The audit MUST verify the relationship between GPU TEE (NVIDIA) and CPU TEE (TDX
 Identify which NVIDIA checks remain active offline and which are skipped:
 - **Active offline**: local EAT parsing, certificate chain validation, SPDM signature verification, nonce matching,
 - **Skipped offline**: NRAS cloud verification (`nvidia_nras_verified` reports "offline mode; NRAS verification skipped"),
-- verify that `nvidia_nras_verified` is **not** in `DefaultEnforced` (so skipping does not block traffic offline).
+- verify that `nvidia_nras_verified` is NOT in `NearcloudDefaultAllowFail` (enforced for nearcloud; note it IS in the global `DefaultAllowFail` but provider-specific lists override).
 
 ## Best-Practice Audit Points
 
@@ -134,6 +134,20 @@ Identify which NVIDIA checks remain active offline and which are skipped:
 - **All-or-nothing verification**: Single GPU failure fails the entire check.
 - **Trust boundary**: Local EAT proves evidence is well-formed and signed. NRAS proves firmware matches golden values.
 - **Input validation on binary parsing**: SPDM bounds checks prevent buffer overread.
+
+## Known Divergence: Chutes/Sek8s
+
+For chutes providers, NVIDIA attestation factors `nvidia_signature` and `nvidia_nras_verified` are both in `ChutesDefaultAllowFail`. This means:
+- Local NVIDIA EAT/SPDM verification is computed but non-blocking.
+- Remote NRAS verification is computed but non-blocking.
+- `nvidia_payload_present`, `nvidia_claims`, and `nvidia_nonce_client_bound` enforcement depends on whether they appear in the allow-fail list (verify against `ChutesDefaultAllowFail`).
+
+The chutes attestation response includes GPU evidence via a separate endpoint (`/chutes/{chute}/evidence?nonce={hex}`), which returns an array of GPU evidence objects. The audit should verify:
+- That GPU evidence parsing uses the same `nvidia_eat.go` code path as nearcloud.
+- That GPU evidence count is bounded (max 64 per `MaxGPUEvidence`).
+- That a missing GPU evidence array does not cause a false pass.
+
+Primary reference: `internal/provider/chutes/policy.go`, `internal/provider/chutes/chutes.go`.
 
 ## Section Deliverable
 

@@ -23,7 +23,7 @@ The audit MUST also document whether Proof-of-Cloud is checked for the gateway C
 ### PoC Enforcement Factor
 
 The PoC result is reported via the `cpu_id_registry` verification factor. Verify:
-- `cpu_id_registry` is **not** in `DefaultEnforced` — PoC failure does not block traffic by default,
+- `cpu_id_registry` IS in `NearcloudDefaultAllowFail` — PoC failure does not block traffic by default,
 - this means PoC is currently **informational-only** (computed but non-blocking),
 - document the rationale: PoC depends on external trust servers that may be unavailable,
 - verify whether PoC can be promoted to enforced via the `[policy] enforce` TOML configuration.
@@ -129,6 +129,12 @@ Track separately — do NOT treat as present controls:
 - **Trust server authentication**: HTTPS with standard TLS — assess whether pinning would strengthen.
 - **Fail-open semantics**: Document as known trade-off between availability and security.
 - **Trust server compromise**: Single compromised server can deny service; all 3 must cooperate for success.
+
+## Known Divergence: Chutes/Sek8s
+
+For chutes providers, `cpu_id_registry` is in `ChutesDefaultAllowFail`, making Proof-of-Cloud informational-only (same as nearcloud's default). There is no `gateway_cpu_id_registry` factor since the Chutes gateway is unattested and has no TDX quote from which to extract a PPID.
+
+The chutes attestation flow extracts PPID from the TDX quote's PCK certificate chain the same way as nearcloud. The audit should verify that the PoC code path is agnostic to the provider type and handles chutes attestation data correctly.
 
 ## Section Deliverable
 

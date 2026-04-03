@@ -60,12 +60,12 @@ The docker compose files for BOTH the gateway and model backend list sub-images.
 
 ### Gateway Compose Image Verification Gap
 
-> NOTE: The current implementation may perform Sigstore/Rekor checks only on the model backend's compose images.
-
 The audit MUST verify:
 - whether gateway compose images are also subject to Sigstore/Rekor provenance checks,
 - whether gateway compose images are checked against the provider's image repository allowlist,
 - if gateway compose images are NOT checked, flag this as a gap and document the residual risk (a compromised gateway image that is nonetheless compose-bound would pass attestation).
+
+> NOTE: The current implementation performs Sigstore/Rekor checks only on the model backend's compose images. The audit MUST flag whether gateway compose images are also subject to these checks, and if not, report this as a gap.
 
 ### Sigstore Verification
 
@@ -86,7 +86,10 @@ Verify and report:
 - Fulcio certificate provenance extraction via X.509 extension OIDs (1.3.6.1.4.1.57264.1.*),
 - accepted signer identity model (OIDC issuer, identity patterns, exact-match vs glob),
 - behavior when a Rekor entry has a raw public key (no Fulcio cert): document whether this is treated as passing provenance,
+- handling of Rekor entries that lack DSSE (Dead Simple Signing Envelope) signatures — the `NoDSSE` field in `ImageProvenance` controls whether this is accepted,
 - when multiple Rekor UUIDs are returned, only the first is fetched — document risk.
+
+For the nearcloud provider, the supply chain policy (`internal/provider/nearcloud/policy.go`) extends the neardirect base policy with gateway-specific images. The model-tier images (shared with neardirect) include `datadog/agent`, `certbot/dns-cloudflare`, and `nearaidev/compose-manager`. Gateway-tier images include `nearaidev/dstack-vpc`, `nearaidev/cloud-api`, and `nearaidev/cvm-ingress`. Each image entry specifies whether it is a model-tier or gateway-tier image, and the expected provenance (Sigstore key, Fulcio OIDC identity, or compose-binding-only).
 
 ### Outage Behavior and Enforcement Classification
 
@@ -127,6 +130,27 @@ Compose binding (`MRConfigID`) provides application-layer assurance. Document:
 - **Input validation**: Regex-based extraction cannot be confused by crafted compose content.
 - **Denial-of-service**: Thousands of image references could trigger thousands of API calls. Verify bounds.
 - **Fail-secure defaults**: A new image not in the allowlist MUST be a hard failure.
+
+## Known Divergence: Chutes/Sek8s
+
+Chutes/sek8s does **not** use compose binding, Sigstore verification, or Rekor provenance checking. All three factors are in `ChutesDefaultAllowFail`:
+- `compose_binding` — `MRCONFIGID` is not used for chutes; the sek8s platform does not expose compose content in attestation responses.
+- `sigstore_verification` — no Sigstore queries are made for chutes providers.
+- `build_transparency_log` — no Rekor provenance is fetched for chutes providers.
+
+### Alternative Supply-Chain Controls in Sek8s
+
+Sek8s uses different mechanisms that are **not verifiable by teep**:
+- **Cosign admission controller**: Runs inside the TEE and verifies container image signatures at deployment time. Teep cannot observe or audit this check.
+- **LUKS boot gating**: Runtime measurements are validated against expected values during boot, with disk decryption gated on success. Teep relies on the MRTD/RTMR golden values as opaque evidence that this process completed successfully.
+- **Image digest pinning**: Sek8s Kubernetes manifests pin images by digest. Teep does not have access to these manifests.
+
+The audit should verify:
+- That the chutes attestation code path does NOT attempt to parse `app_compose` or `MRConfigID`.
+- That the absence of compose data results in `Skip` (not `Pass`) for `compose_binding`.
+- That Sigstore/Rekor code paths are not triggered for chutes providers.
+
+Primary reference: `internal/provider/chutes/policy.go`, `docs/attestation_gaps/sek8s_integrity.md`.
 
 ## Section Deliverable
 

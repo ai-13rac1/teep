@@ -57,29 +57,42 @@ For complete attestation of a dstack-based CVM, the verification process should:
 
 5. **Verify MRSEAM + MRTD + RTMR0-2 as a set**: These five values together form a complete chain-of-trust from the TDX module through firmware, kernel, and OS components. Verifying only a subset (e.g., only compose binding via MRConfigID + RTMR3 event log replay) leaves significant gaps where the base system could be substituted.
 
-## Current Gap: Inference Provider Has Not Published Golden Values
+## Current Stopgaps and Residual Gaps
 
-The code currently supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and RTMR0-3, but the current direct inference provider (NearAI) does not publish:
-- reproducible build instructions or pre-built images for their CVM,
-- golden/reference values for MRTD, MRSEAM, RTMR0, RTMR1, or RTMR2,
-- documentation of their specific CPU/RAM configuration (needed to compute RTMR0),
-- the dstack OS version or TDX module version deployed.
+The code supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and RTMR0-3. The direct inference provider (neardirect / NEAR AI) does not publish authenticated measurement baselines in-band, but teep now provides Go-coded stopgap defaults and operator tooling to partially close this gap:
 
-Because these reference values are unavailable, the code does not currently enforce checking MRSEAM, MRTD, or RTMR0-2 against any baseline. The `MeasurementPolicy` allowlists remain empty, meaning these fields are extracted and logged but not policy-enforced. This is the correct behavior given the absence of reference data — enforcing against fabricated or unverified golden values would provide false assurance.
+**MRSEAM — Go-coded defaults from Intel releases.** `DstackBaseMeasurementPolicy()` in `internal/attestation/dstack_defaults.go` ships an allowlist of four Intel-published MRSEAM values corresponding to TDX module versions 1.5.08, 1.5.16, 2.0.08, and 2.0.02. These are sourced from Intel's official release notes. The `tdx_mrseam_mrtd` factor is enforced by default for neardirect (it is NOT in `NeardirectDefaultAllowFail`).
 
-**The audit MUST flag this as a residual risk**: without MRSEAM/MRTD/RTMR0-2 verification, the attestation trusts any TDX module version and any VM image that happens to produce the correct compose hash (MRConfigID) and valid RTMR3 event log. This means:
-- A compromised or outdated TDX module would not be detected (MRSEAM gap),
-- A substituted virtual firmware could bypass measured boot (MRTD gap),
-- A modified kernel, initrd, or rootfs could go undetected (RTMR0-2 gap),
-- Only the application-layer compose binding (MRConfigID) and event log replay (RTMR3) provide assurance, which is insufficient for full CVM integrity.
+**MRTD — Go-coded defaults from dstack reproducible builds.** The same base policy ships two MRTD values corresponding to dstack-nvidia image versions 0.5.4.1 and 0.5.5, derived from reproducible build artifacts.
+
+**RTMR0, RTMR1, RTMR2 — Per-provider observed-value defaults.** `DefaultMeasurementPolicy()` in `internal/provider/neardirect/policy.go` provides observed RTMR0-2 values. These are pinned from verified attestation sessions and serve as a detection mechanism — a change in these values triggers an alert. The `tdx_hardware_config` (RTMR0) and `tdx_boot_config` (RTMR1/RTMR2) factors are in `NeardirectDefaultAllowFail` — meaning they are computed and reported but do not block traffic by default.
+
+**Measurement policy merge.** Policies are resolved via a three-tier precedence: per-provider TOML config → global TOML config → Go-coded defaults, implemented in `MergedMeasurementPolicy()` in `internal/config/config.go`.
+
+**Operator bootstrapping.** The `teep verify <provider> --model <model> --update-config` command runs a full attestation verification and appends newly observed measurement values to the per-provider policy section.
+
+**Residual risk.** Despite these stopgaps, the provider still does not publish authenticated measurement baselines in-band:
+- MRSEAM and MRTD defaults are independently verifiable from Intel and dstack sources — these are the strongest stopgaps.
+- RTMR0-2 defaults are pinned from observed attestation data and cannot distinguish a legitimate provider infrastructure change from a compromised lower stack.
+- No signed measurement manifest exists for automated consumption.
+
+**The audit MUST flag the remaining residual risk** and recommend that the inference provider publish authenticated measurement baselines. See `docs/attestation_gaps/dstack_integrity.md` for the detailed analysis.
 
 ## Current Direct-Provider Expectation Summary
 
 - MRCONFIGID is expected to be cryptographically checked via compose binding,
 - RTMR fields are expected to be consistency-checked via event log replay when event logs are present,
-- REPORTDATA is expected to be cryptographically verified via the provider-specific binding scheme,
-- MRSEAM, MRTD, RTMR0, RTMR1, and RTMR2 are currently informational-only due to the absence of provider-published golden values — this MUST be documented as a gap with high residual risk,
+- REPORTDATA is expected to be cryptographically verified via the neardirect binding scheme (sha256(signing_address + tls_fingerprint) + nonce),
+- MRSEAM and MRTD are enforced by default via Go-coded allowlists sourced from Intel TDX module releases and dstack reproducible builds — the `tdx_mrseam_mrtd` factor is enforced (not in `NeardirectDefaultAllowFail`),
+- RTMR0 is checked via `tdx_hardware_config` against per-provider observed values — allowed to fail by default,
+- RTMR1 and RTMR2 are checked via `tdx_boot_config` against per-provider observed values — allowed to fail by default,
 - MRSIGNERSEAM, MROWNER, MROWNERCONFIG are expected to be all-zeros for standard dstack deployments and should be documented as informational-only.
+
+The audit MUST verify:
+- how MRTD/MRSEAM/RTMR allowlists are configured (the three-tier merge in `MergedMeasurementPolicy()`),
+- input validation rules for allowlist values (length/encoding),
+- whether allowlist mismatches are enforced fail-closed or informational (depends on whether the factor is in `allow_fail`),
+- the `--update-config` bootstrapping flow and its implications for initial deployment.
 
 ## Required Checks
 
@@ -118,10 +131,12 @@ Verify and report how the `MeasurementPolicy` is structured and loaded:
 - how allowlist entries are matched against quote values (exact match, prefix match, or set membership),
 - whether the comparison is byte-level or string-level (hex canonicalization: lowercase vs uppercase, 0x prefix handling).
 
-When allowlist policy exists (i.e., when the inference provider eventually publishes golden values), the audit MUST verify:
-- how MRTD/MRSEAM/RTMR allowlists are configured,
+The audit MUST verify:
+- how MRTD/MRSEAM/RTMR allowlists are configured via the three-tier merge (per-provider TOML > global TOML > Go defaults),
+- that separate TOML fields exist for each measurement type (`mrtd_allow`, `mrseam_allow`, `rtmr0_allow`, etc.),
 - input validation rules for allowlist values (length/encoding),
-- whether allowlist mismatches are enforced fail-closed or informational.
+- whether allowlist mismatches are enforced fail-closed or informational (depends on whether the factor is in `allow_fail`),
+- the `--update-config` bootstrapping flow and that it correctly captures observed measurements.
 
 ### Golden-Value Management Lifecycle
 
@@ -159,14 +174,14 @@ You MUST explicitly evaluate the known baseline-publication gap:
 
 You MUST quantify realistic attacker capability under this gap (for example, hypervisor-level substitution of firmware/kernel/initrd/rootfs while preserving application-layer bindings).
 
-**The audit MUST recommend** that the inference provider (NearAI) publish:
+**The audit MUST recommend** that the inference provider publish:
 1. The specific dstack OS version (or equivalent CVM image) and TDX module version used in their deployments,
 2. Reproducible build instructions or source references for their CVM image,
 3. Pre-computed golden values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration,
 4. The expected MRSEAM value for the Intel TDX module version deployed on their hardware,
 5. A versioned manifest or API endpoint that maps deployment configurations to expected measurement values, so that verifiers like teep can populate `MeasurementPolicy` allowlists automatically.
 
-Until this information is provided, the attestation provides application-layer assurance (compose hash and RTMR3) but not full system-level assurance. The auditor MUST quantify this gap by noting that an attacker with hypervisor-level access could substitute the firmware/kernel/initrd while preserving compose binding, and report it as a high-severity residual risk.
+See `docs/attestation_gaps/dstack_integrity.md` for the detailed analysis and recommended in-band publication model.
 
 ## Best-Practice Audit Points
 

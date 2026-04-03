@@ -21,10 +21,10 @@ Ensure that the code verifies that the machine ID from the attestation is covere
 ### PoC Enforcement Factor
 
 The PoC result is reported via the [`cpu_id_registry`](../../../internal/attestation/report.go:522) verification factor. Verify:
-- `cpu_id_registry` is **not** in [`DefaultEnforced`](../../../internal/attestation/report.go:76) — PoC failure does not block traffic by default,
+- `cpu_id_registry` IS in `NeardirectDefaultAllowFail` — PoC failure does not block traffic by default,
 - this means PoC is currently **informational-only** (computed but non-blocking),
 - document the rationale: PoC depends on external trust servers that may be unavailable — making it enforced would cause outages when trust servers are down,
-- verify whether PoC can be promoted to enforced via the `[policy] enforce` TOML configuration.
+- verify whether PoC can be promoted to enforced by removing `cpu_id_registry` from `[policy] allow_fail` (or by setting `allow_fail = []`) in the TOML configuration.
 
 ### Machine Identity Derivation
 

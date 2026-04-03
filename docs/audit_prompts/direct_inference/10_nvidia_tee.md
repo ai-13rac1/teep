@@ -32,10 +32,10 @@ The following verification factors in [`report.go`](../../../internal/attestatio
 | `nvidia_payload_present` | No | NVIDIA payload field exists in attestation response |
 | `nvidia_signature` | **Yes** | Local SPDM ECDSA P-384 cert chain + signature verification |
 | `nvidia_claims` | No | EAT claims (arch, GPU count, nonce) are valid |
-| `nvidia_nonce_match` | **Yes** | Nonce in NVIDIA payload matches client-submitted nonce |
+| `nvidia_nonce_client_bound` | **Yes** | Nonce in NVIDIA payload matches client-submitted nonce |
 | `nvidia_nras_verified` | No | Remote NRAS JWT verification passed |
 
-Verify that `nvidia_signature` and `nvidia_nonce_match` are in [`DefaultEnforced`](../../../internal/attestation/report.go:76) and that their failure blocks traffic via [`Blocked()`](../../../internal/attestation/report.go:63).
+Verify that `nvidia_signature` and `nvidia_nonce_client_bound` are NOT in `NeardirectDefaultAllowFail` (i.e., they are enforced for neardirect) and that their failure blocks traffic via `Blocked()`.
 
 ### Local NVIDIA Evidence (EAT/SPDM)
 
@@ -133,7 +133,7 @@ Document this as a known gap with high residual risk.
 If offline mode exists, identify exactly which NVIDIA checks remain active and which are skipped:
 - **Active offline**: local EAT parsing, certificate chain validation, SPDM signature verification, nonce matching,
 - **Skipped offline**: NRAS cloud verification (factor `nvidia_nras_verified` reports `"offline mode; NRAS verification skipped"`),
-- verify that `nvidia_nras_verified` is **not** in `DefaultEnforced` (so skipping it does not block traffic in offline mode).
+- verify that `nvidia_nras_verified` is NOT in `NeardirectDefaultAllowFail` (enforced for neardirect; note it IS in the global `DefaultAllowFail` but provider-specific lists override).
 
 ## Best-Practice Audit Points
 

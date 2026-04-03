@@ -2,7 +2,9 @@
 
 This repository implements a proxy that ensures private LLM inference by performing attestation-bound TLS pinning to a TEE-attested API gateway, which in turn routes traffic to TEE-attested model inference backends. The proxy validates that both the gateway and the model backend run genuine TEE hardware with verifiable software, prevents man-in-the-middle attacks through cryptographic binding of the TLS channel to the gateway's attestation report, and protects request and response confidentiality through E2EE using a signing key obtained from the model backend's attestation.
 
-This is a **gateway inference** provider audit: attestation covers two layers — a gateway CVM and a model backend CVM.
+This is a **gateway inference** provider audit: attestation covers two layers — a gateway CVM and a model backend CVM. The primary reference provider is **nearcloud** (NearCloud / NEAR AI), which provides full dual-tier TEE attestation. **Venice** is a secondary reference: it forwards model backend attestation but does NOT provide gateway-level TEE attestation. See `docs/attestation_gaps/dstack_integrity.md` for trust model analysis of near, venice, and other dstack-based providers.
+
+**Chutes** (sek8s-based) is a third reference architecture with a different security model — see Section 01 for full details. All Chutes traffic routes through the Chutes gateway (`api.chutes.ai`/`llm.chutes.ai`) to specific sek8s TEE instances, but the gateway itself is unattested (no TEE, no TDX quote). See `docs/attestation_gaps/sek8s_integrity.md` for the trust model analysis of chutes and other sek8s providers.
 
 ## Architectural Overview
 
@@ -21,6 +23,8 @@ The two layers of attestation to verify are:
 - **Tier 4 (gateway):** the gateway's own TDX quote, compose binding, event log, REPORTDATA binding, and TLS certificate binding.
 
 Additionally, the model backend's attestation provides an E2EE signing key that the proxy uses to encrypt request messages and decrypt response messages, protecting header and body confidentiality even if the gateway is compromised.
+
+> **Note on Chutes/Sek8s:** For chutes, there is no Tier 4 (the Chutes gateway is unattested and produces no TDX quote). Additionally, Tier 1–3 checks for compose binding, event log integrity, and Sigstore/Rekor verification return `Skip` because the sek8s attestation model does not expose this data to clients. The primary client-side controls are the TDX quote, MRTD/RTMR0-2 measurement allowlists, REPORTDATA binding, and ML-KEM-768 E2EE. Sections marked as N/A for chutes should still verify that `Skip` results are correctly returned with explanatory messages.
 
 ## Threat Model Summary
 
