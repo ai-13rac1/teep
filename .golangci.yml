@@ -55,7 +55,7 @@ linters:
 
   settings:
     gocyclo:
-      min-complexity: 34
+      min-complexity: 32
     errcheck:
       exclude-functions:
         - (net/http.ResponseWriter).Write
