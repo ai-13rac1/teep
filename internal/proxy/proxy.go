@@ -778,14 +778,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = "upstream_failed"
 		code := http.StatusBadGateway
+		msg := "upstream request failed"
 		if he := (*httpError)(nil); errors.As(err, &he) {
 			status = he.status
 			code = he.code
+			if he.status == "e2ee_failed" {
+				msg = "failed to prepare encrypted request"
+			}
 		}
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		slog.ErrorContext(ctx, "upstream roundtrip failed", "provider", prov.Name, "model", upstreamModel, "err", err)
-		http.Error(w, "upstream request failed", code)
+		http.Error(w, msg, code)
 		return
 	}
 	resp := ur.Resp
