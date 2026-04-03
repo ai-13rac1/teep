@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -56,7 +57,7 @@ func TestParseChutesFormat_HappyPath(t *testing.T) {
 	body := chutesFormatJSON(t, "test-nonce", "inst-42", "ml-kem-pub-key", quoteB64, 1)
 	t.Logf("input body: %s", body)
 
-	raw, err := provider.ParseChutesFormat(body, "test")
+	raw, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	if err != nil {
 		t.Fatalf("ParseChutesFormat: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestParseChutesFormat_HappyPath(t *testing.T) {
 
 func TestParseChutesFormat_EmptyAttestations(t *testing.T) {
 	body := []byte(`{"attestation_type":"TDX","nonce":"n","all_attestations":[]}`)
-	_, err := provider.ParseChutesFormat(body, "test")
+	_, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	t.Logf("empty attestations error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for empty all_attestations")
@@ -117,7 +118,7 @@ func TestParseChutesFormat_EmptyAttestations(t *testing.T) {
 
 func TestParseChutesFormat_TooManyAttestations(t *testing.T) {
 	body := chutesFormatJSON(t, "n", "i", "k", "", 257)
-	_, err := provider.ParseChutesFormat(body, "test")
+	_, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	t.Logf("too many attestations error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for 257 attestations (max 256)")
@@ -153,7 +154,7 @@ func TestParseChutesFormat_TooManyGPUEvidence(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	_, err = provider.ParseChutesFormat(body, "test")
+	_, err = provider.ParseChutesFormat(context.Background(), body, "test")
 	t.Logf("too many GPU evidence error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for 65 GPU evidence entries (max 64)")
@@ -162,7 +163,7 @@ func TestParseChutesFormat_TooManyGPUEvidence(t *testing.T) {
 
 func TestParseChutesFormat_InvalidBase64Quote(t *testing.T) {
 	body := chutesFormatJSON(t, "n", "i", "k", "not-valid-base64!!!", 1)
-	_, err := provider.ParseChutesFormat(body, "test")
+	_, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	t.Logf("invalid base64 error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for invalid base64 intel_quote")
@@ -171,7 +172,7 @@ func TestParseChutesFormat_InvalidBase64Quote(t *testing.T) {
 
 func TestParseChutesFormat_EmptyIntelQuote(t *testing.T) {
 	body := chutesFormatJSON(t, "n", "i", "k", "", 1)
-	raw, err := provider.ParseChutesFormat(body, "test")
+	raw, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	if err != nil {
 		t.Fatalf("ParseChutesFormat: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestParseChutesFormat_EmptyIntelQuote(t *testing.T) {
 }
 
 func TestParseChutesFormat_InvalidJSON(t *testing.T) {
-	_, err := provider.ParseChutesFormat([]byte("garbage{{{"), "test")
+	_, err := provider.ParseChutesFormat(context.Background(), []byte("garbage{{{"), "test")
 	t.Logf("invalid JSON error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -191,7 +192,7 @@ func TestParseChutesFormat_InvalidJSON(t *testing.T) {
 
 func TestParseChutesFormat_MultipleAttestations(t *testing.T) {
 	body := chutesFormatJSON(t, "n", "inst-1", "k", "", 3)
-	raw, err := provider.ParseChutesFormat(body, "test")
+	raw, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	if err != nil {
 		t.Fatalf("ParseChutesFormat: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestParseChutesFormat_MultipleAttestations(t *testing.T) {
 func TestParseChutesFormat_MaxBoundary(t *testing.T) {
 	// 256 attestations should succeed (at the boundary).
 	body := chutesFormatJSON(t, "n", "i", "k", "", 256)
-	raw, err := provider.ParseChutesFormat(body, "test")
+	raw, err := provider.ParseChutesFormat(context.Background(), body, "test")
 	if err != nil {
 		t.Fatalf("ParseChutesFormat with 256 entries: %v", err)
 	}

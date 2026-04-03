@@ -335,7 +335,7 @@ func (h *PinnedHandler) attestOnConn(
 		"model", model,
 	)
 
-	gwRaw, raw, err := h.sendAttestationRequest(conn, br, bw, domain, model, modelNonce)
+	gwRaw, raw, err := h.sendAttestationRequest(ctx, conn, br, bw, domain, model, modelNonce)
 	if err != nil {
 		return nil, "", err
 	}
@@ -446,7 +446,7 @@ func (h *PinnedHandler) attestOnConn(
 // sendAttestationRequest writes the attestation HTTP request and reads the
 // combined gateway+model response. On error, the caller must close the connection.
 func (h *PinnedHandler) sendAttestationRequest(
-	conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
+	ctx context.Context, conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
 	domain, model string, nonce attestation.Nonce,
 ) (*GatewayRaw, *attestation.RawAttestation, error) {
 	q := url.Values{}
@@ -489,7 +489,7 @@ func (h *PinnedHandler) sendAttestationRequest(
 		return nil, nil, fmt.Errorf("attestation HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 256))
 	}
 
-	return ParseGatewayResponse(body, model)
+	return ParseGatewayResponse(ctx, body, model)
 }
 
 // verifyModelTDX runs TDX quote verification and report data binding for the model.

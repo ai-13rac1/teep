@@ -77,7 +77,7 @@ type GatewayRaw struct {
 // ParseGatewayResponse extracts gateway attestation fields and delegates model
 // attestation parsing to neardirect.ParseAttestationResponse. Returns both the
 // gateway-specific data and the model RawAttestation.
-func ParseGatewayResponse(body []byte, model string) (*GatewayRaw, *attestation.RawAttestation, error) {
+func ParseGatewayResponse(ctx context.Context, body []byte, model string) (*GatewayRaw, *attestation.RawAttestation, error) {
 	var gr gatewayResponse
 	if err := jsonstrict.UnmarshalWarn(body, &gr, "nearcloud gateway response"); err != nil {
 		return nil, nil, fmt.Errorf("nearcloud: unmarshal gateway response: %w", err)
@@ -117,7 +117,7 @@ func ParseGatewayResponse(body []byte, model string) (*GatewayRaw, *attestation.
 	}
 
 	// Model attestation parsed by the shared neardirect parser.
-	raw, err := neardirect.ParseAttestationResponse(body, model)
+	raw, err := neardirect.ParseAttestationResponse(ctx, body, model)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nearcloud: parse model attestation: %w", err)
 	}
@@ -160,7 +160,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("nearcloud: %w", err)
 	}
 
-	gwRaw, raw, err := ParseGatewayResponse(body, model)
+	gwRaw, raw, err := ParseGatewayResponse(ctx, body, model)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -39,7 +40,7 @@ type chutesResponse struct {
 // ParseChutesFormat parses the gateway-wrapped chutes attestation format.
 // This format is returned by gateway providers like phalacloud/RedPill and
 // NanoGPT when routing to chutes-based backends.
-func ParseChutesFormat(body []byte, prefix string) (*attestation.RawAttestation, error) {
+func ParseChutesFormat(ctx context.Context, body []byte, prefix string) (*attestation.RawAttestation, error) {
 	var cr chutesResponse
 	if err := jsonstrict.UnmarshalWarn(body, &cr, prefix+" chutes attestation response"); err != nil {
 		return nil, fmt.Errorf("%s: unmarshal chutes response: %w", prefix, err)
@@ -72,7 +73,7 @@ func ParseChutesFormat(body []byte, prefix string) (*attestation.RawAttestation,
 		intelQuoteHex = hex.EncodeToString(quoteBytes)
 	}
 
-	slog.Debug(prefix+" chutes attestation parsed",
+	slog.DebugContext(ctx, prefix+" chutes attestation parsed",
 		"type", cr.AttestationType,
 		"instances", len(cr.AllAttestations),
 		"instance_id", first.InstanceID,

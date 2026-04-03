@@ -82,20 +82,20 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	if err != nil {
 		return nil, fmt.Errorf("phalacloud: %w", err)
 	}
-	return ParseAttestationResponse(body)
+	return ParseAttestationResponse(ctx, body)
 }
 
 // ParseAttestationResponse detects the attestation format from the JSON body
 // and delegates to the appropriate backend parser.
-func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) {
+func ParseAttestationResponse(ctx context.Context, body []byte) (*attestation.RawAttestation, error) {
 	format := formatdetect.Detect(body)
-	slog.Debug("phalacloud format detected", "format", format)
+	slog.DebugContext(ctx, "phalacloud format detected", "format", format)
 
 	switch format {
 	case attestation.FormatChutes:
-		return provider.ParseChutesFormat(body, "phalacloud")
+		return provider.ParseChutesFormat(ctx, body, "phalacloud")
 	case attestation.FormatDstack:
-		return nanogpt.ParseAttestationResponse(body)
+		return nanogpt.ParseAttestationResponse(ctx, body)
 	case attestation.FormatTinfoil:
 		return nil, errors.New("phalacloud: tinfoil attestation format not yet supported")
 	case attestation.FormatGateway:

@@ -114,7 +114,7 @@ func TestIntegration_NearDirect_Fixture(t *testing.T) {
 	// ---------------------------------------------------------------
 	// 2. Parse fixture into RawAttestation
 	// ---------------------------------------------------------------
-	raw, err := neardirect.ParseAttestationResponse(attestBody, model)
+	raw, err := neardirect.ParseAttestationResponse(ctx, attestBody, model)
 	if err != nil {
 		t.Fatalf("parse NEAR AI fixture: %v", err)
 	}

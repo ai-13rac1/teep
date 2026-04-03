@@ -305,7 +305,7 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	t.Logf("nonce: %s", nonceHex[:16]+"...")
 
 	// 2. Parse fixture into RawAttestation
-	raw, err := venice.ParseAttestationResponse(attestBody)
+	raw, err := venice.ParseAttestationResponse(ctx, attestBody)
 	if err != nil {
 		t.Fatalf("parse Venice fixture: %v", err)
 	}

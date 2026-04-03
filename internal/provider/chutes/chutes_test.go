@@ -47,7 +47,7 @@ func TestParseAttestationResponse_Success(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestParseAttestationResponse_MultipleInstances(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestParseAttestationResponse_MultipleInstances(t *testing.T) {
 
 func TestParseAttestationResponse_NoInstances(t *testing.T) {
 	nonce := attestation.NewNonce()
-	_, err := chutes.ParseAttestationResponse(
+	_, err := chutes.ParseAttestationResponse(context.Background(),
 		[]byte(`{"instances": []}`),
 		[]byte(`{"evidence": [{"quote": "", "gpu_evidence": [], "instance_id": "i", "certificate": ""}]}`),
 		nonce,
@@ -139,7 +139,7 @@ func TestParseAttestationResponse_NoInstances(t *testing.T) {
 
 func TestParseAttestationResponse_NoEvidence(t *testing.T) {
 	nonce := attestation.NewNonce()
-	_, err := chutes.ParseAttestationResponse(
+	_, err := chutes.ParseAttestationResponse(context.Background(),
 		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": []}]}`),
 		[]byte(`{"evidence": [], "failed_instance_ids": ["i"]}`),
 		nonce,
@@ -154,7 +154,7 @@ func TestParseAttestationResponse_NoEvidence(t *testing.T) {
 
 func TestParseAttestationResponse_InstanceMismatch(t *testing.T) {
 	nonce := attestation.NewNonce()
-	_, err := chutes.ParseAttestationResponse(
+	_, err := chutes.ParseAttestationResponse(context.Background(),
 		[]byte(`{"instances": [{"instance_id": "inst-AAA", "e2e_pubkey": "k", "nonces": []}]}`),
 		[]byte(`{"evidence": [{"quote": "", "gpu_evidence": [], "instance_id": "inst-ZZZ", "certificate": ""}], "failed_instance_ids": []}`),
 		nonce,
@@ -185,7 +185,7 @@ func TestParseAttestationResponse_SkipUnknownInstance(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestParseAttestationResponse_SkipInstanceNoNonces(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestParseAttestationResponse_SkipInstanceEmptyPubKey(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	raw, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	raw, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestParseAttestationResponse_AllInstancesIncomplete(t *testing.T) {
 		"failed_instance_ids": []
 	}`)
 
-	_, err := chutes.ParseAttestationResponse(instancesBody, evidenceBody, nonce)
+	_, err := chutes.ParseAttestationResponse(context.Background(), instancesBody, evidenceBody, nonce)
 	if err == nil {
 		t.Fatal("expected error when all instances have incomplete E2EE material")
 	}
@@ -301,7 +301,7 @@ func TestParseAttestationResponse_AllInstancesIncomplete(t *testing.T) {
 
 func TestParseAttestationResponse_InvalidBase64Quote(t *testing.T) {
 	nonce := attestation.NewNonce()
-	_, err := chutes.ParseAttestationResponse(
+	_, err := chutes.ParseAttestationResponse(context.Background(),
 		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": ["n1"]}]}`),
 		[]byte(`{"evidence": [{"quote": "!!!bad!!!", "gpu_evidence": [], "instance_id": "i", "certificate": ""}], "failed_instance_ids": []}`),
 		nonce,
@@ -316,7 +316,7 @@ func TestParseAttestationResponse_InvalidBase64Quote(t *testing.T) {
 
 func TestParseAttestationResponse_EmptyQuote(t *testing.T) {
 	nonce := attestation.NewNonce()
-	raw, err := chutes.ParseAttestationResponse(
+	raw, err := chutes.ParseAttestationResponse(context.Background(),
 		[]byte(`{"instances": [{"instance_id": "i", "e2e_pubkey": "k", "nonces": ["n1"]}]}`),
 		[]byte(`{"evidence": [{"quote": "", "gpu_evidence": [], "instance_id": "i", "certificate": ""}], "failed_instance_ids": []}`),
 		nonce,
@@ -331,7 +331,7 @@ func TestParseAttestationResponse_EmptyQuote(t *testing.T) {
 
 func TestParseAttestationResponse_InvalidJSON(t *testing.T) {
 	nonce := attestation.NewNonce()
-	_, err := chutes.ParseAttestationResponse([]byte(`not json`), []byte(`{}`), nonce)
+	_, err := chutes.ParseAttestationResponse(context.Background(), []byte(`not json`), []byte(`{}`), nonce)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}

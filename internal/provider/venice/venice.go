@@ -213,25 +213,25 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 	if err != nil {
 		return nil, fmt.Errorf("venice: %w", err)
 	}
-	return ParseAttestationResponse(body)
+	return ParseAttestationResponse(ctx, body)
 }
 
 // ParseAttestationResponse unmarshals a Venice attestation JSON response body
 // into a RawAttestation. Extracted from FetchAttestation so integration tests
 // can parse fixture files without making HTTP calls.
-func ParseAttestationResponse(body []byte) (*attestation.RawAttestation, error) {
+func ParseAttestationResponse(ctx context.Context, body []byte) (*attestation.RawAttestation, error) {
 	var ar attestationResponse
 	if err := jsonstrict.UnmarshalWarn(body, &ar, "venice attestation response"); err != nil {
 		return nil, fmt.Errorf("venice: unmarshal attestation response: %w", err)
 	}
 
-	slog.Debug("venice event log", "entries", len(ar.EventLog))
+	slog.DebugContext(ctx, "venice event log", "entries", len(ar.EventLog))
 	for i, e := range ar.EventLog {
 		digest := e.Digest
 		if len(digest) > 16 {
 			digest = digest[:16] + "..."
 		}
-		slog.Debug("event log entry", "index", i, "imr", e.IMR,
+		slog.DebugContext(ctx, "event log entry", "index", i, "imr", e.IMR,
 			"event", e.Event, "type", e.EventType, "digest", digest)
 	}
 

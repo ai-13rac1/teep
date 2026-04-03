@@ -152,7 +152,7 @@ func TestParseAttestationResponse_EventLogString(t *testing.T) {
 		`"event_log": `+mustMarshal(t, eventLogArray),
 		1)
 
-	raw, err := venice.ParseAttestationResponse([]byte(body))
+	raw, err := venice.ParseAttestationResponse(context.Background(), []byte(body))
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestParseAttestationResponse_EventLogInvalid(t *testing.T) {
 		`"event_log": 42`,
 		1)
 
-	_, err := venice.ParseAttestationResponse([]byte(body))
+	_, err := venice.ParseAttestationResponse(context.Background(), []byte(body))
 	if err == nil {
 		t.Fatal("expected error for numeric event_log, got nil")
 	}

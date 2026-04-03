@@ -273,7 +273,7 @@ func (h *PinnedHandler) attestOnConn(
 		"model", model,
 	)
 
-	raw, err := h.sendAttestationRequest(conn, br, bw, domain, model, nonce)
+	raw, err := h.sendAttestationRequest(ctx, conn, br, bw, domain, model, nonce)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +327,7 @@ func (h *PinnedHandler) attestOnConn(
 // sendAttestationRequest writes the attestation HTTP request and reads the
 // response. On error, the caller must close the connection.
 func (h *PinnedHandler) sendAttestationRequest(
-	conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
+	ctx context.Context, conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
 	domain, model string, nonce attestation.Nonce,
 ) (*attestation.RawAttestation, error) {
 	path := attestationPath +
@@ -366,7 +366,7 @@ func (h *PinnedHandler) sendAttestationRequest(
 		return nil, fmt.Errorf("attestation HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 256))
 	}
 
-	return ParseAttestationResponse(body, model)
+	return ParseAttestationResponse(ctx, body, model)
 }
 
 // verifyTDX runs TDX quote verification and report data binding.

@@ -149,7 +149,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 			return nil, fmt.Errorf("nearai: resolve model %q: %w", model, err)
 		}
 		baseURL = "https://" + domain
-		slog.Debug("nearai model resolved", "model", model, "domain", domain)
+		slog.DebugContext(ctx, "nearai model resolved", "model", model, "domain", domain)
 	}
 
 	endpoint, err := url.Parse(baseURL + attestationPath)
@@ -167,7 +167,7 @@ func (a *Attester) FetchAttestation(ctx context.Context, model string, nonce att
 		return nil, fmt.Errorf("nearai: %w", err)
 	}
 
-	return ParseAttestationResponse(body, model)
+	return ParseAttestationResponse(ctx, body, model)
 }
 
 func shouldResolveModelDomain(host string) bool {
@@ -178,7 +178,7 @@ func shouldResolveModelDomain(host string) bool {
 // ParseAttestationResponse unmarshals a NEAR AI attestation JSON response body
 // and selects the entry matching model. Used by both FetchAttestation (HTTP
 // client path) and PinnedHandler (raw connection path).
-func ParseAttestationResponse(body []byte, model string) (*attestation.RawAttestation, error) {
+func ParseAttestationResponse(_ context.Context, body []byte, model string) (*attestation.RawAttestation, error) {
 	var ar attestationResponse
 	if err := jsonstrict.UnmarshalWarn(body, &ar, "nearai attestation response"); err != nil {
 		return nil, fmt.Errorf("nearai: unmarshal attestation response: %w", err)

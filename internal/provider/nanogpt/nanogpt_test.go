@@ -406,7 +406,7 @@ func TestParseAttestationResponse_ChutesFormatDelegation(t *testing.T) {
 			"gpu_evidence": []
 		}]
 	}`
-	raw, err := nanogpt.ParseAttestationResponse([]byte(body))
+	raw, err := nanogpt.ParseAttestationResponse(context.Background(), []byte(body))
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}

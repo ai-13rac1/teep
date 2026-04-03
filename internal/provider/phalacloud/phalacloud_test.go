@@ -120,7 +120,7 @@ func TestParseAttestationResponse_DstackFormat(t *testing.T) {
 		"vm_config": ""
 	}`)
 
-	raw, err := phalacloud.ParseAttestationResponse(body)
+	raw, err := phalacloud.ParseAttestationResponse(context.Background(), body)
 	if err != nil {
 		t.Fatalf("ParseAttestationResponse: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestParseAttestationResponse_DstackFormat(t *testing.T) {
 
 func TestParseAttestationResponse_UnsupportedTinfoil(t *testing.T) {
 	body := []byte(`{"format":"tinfoil","data":"stuff"}`)
-	_, err := phalacloud.ParseAttestationResponse(body)
+	_, err := phalacloud.ParseAttestationResponse(context.Background(), body)
 	if err == nil {
 		t.Fatal("expected error for tinfoil format")
 	}
@@ -145,7 +145,7 @@ func TestParseAttestationResponse_UnsupportedTinfoil(t *testing.T) {
 
 func TestParseAttestationResponse_UnrecognizedFormat(t *testing.T) {
 	body := []byte(`{"unknown_key":"value"}`)
-	_, err := phalacloud.ParseAttestationResponse(body)
+	_, err := phalacloud.ParseAttestationResponse(context.Background(), body)
 	if err == nil {
 		t.Fatal("expected error for unrecognized format")
 	}
@@ -298,7 +298,7 @@ func TestAttester_SendsCorrectQueryParams(t *testing.T) {
 }
 
 func TestParseAttestationResponse_InvalidJSON(t *testing.T) {
-	_, err := phalacloud.ParseAttestationResponse([]byte(`not json`))
+	_, err := phalacloud.ParseAttestationResponse(context.Background(), []byte(`not json`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
