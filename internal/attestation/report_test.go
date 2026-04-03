@@ -1644,9 +1644,10 @@ func TestEvalE2EEUsable(t *testing.T) {
 		}
 	})
 
-	t.Run("enforced_no_api_key_promoted_to_fail", func(t *testing.T) {
-		// When e2ee_usable is enforced (not in allow_fail) and there's no API key,
-		// the Skip should be promoted to Fail by BuildReport.
+	t.Run("enforced_no_api_key_stays_skip", func(t *testing.T) {
+		// e2ee_usable is exempt from Skip→Fail promotion because it can
+		// only be evaluated via a live relay roundtrip. Post-relay
+		// enforcement catches failures instead.
 		nonce := NewNonce()
 		raw := buildMinimalRaw(nonce, validSigningKey(t))
 		report := BuildReport(&ReportInput{
@@ -1661,8 +1662,8 @@ func TestEvalE2EEUsable(t *testing.T) {
 			},
 		})
 		f := findFactor(t, report, "e2ee_usable")
-		if f.Status != Fail {
-			t.Errorf("enforced skip should be promoted to Fail, got %s", f.Status)
+		if f.Status != Skip {
+			t.Errorf("e2ee_usable should stay Skip (exempt from promotion), got %s", f.Status)
 		}
 		if !f.Enforced {
 			t.Error("should be marked enforced")
