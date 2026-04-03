@@ -351,9 +351,13 @@ When `--offline` is set and the config file contains `compose_hashes` and/or
 When `--offline` is set and no `compose_hashes` or `pinned_digests` exist:
 
 - **No online validation** is performed (Sigstore/Rekor calls are skipped).
-- **Image names** extracted from the compose file are still verified against
-  the image allowlist (hardcoded or configured). This is a local-only check
-  that requires no network access.
+- **Image names** are only verified against the image allowlist when the
+  repository can be extracted from the compose file using the current
+  extractor. Today that extractor only handles digest-pinned image references
+  such as `image: repo@sha256:...`; tag-based references such as
+  `image: repo:tag` do not currently yield an extracted repository, so this
+  local-only allowlist check cannot be relied on for them in offline mode
+  until extractor support is added (see Section 5a below).
 - Supply chain factors that require online access (`build_transparency_log`,
   `sigstore_verification`) are added to `allow_fail` via the existing
   `OnlineFactors` / `WithOfflineAllowFail` mechanism. This makes them
@@ -366,6 +370,26 @@ as `Fail` remains `Fail` — it just becomes non-enforced, so it does not block.
 A factor that evaluates as `Skip` stays `Skip` and is not promoted to `Fail`
 because it is non-enforced.
 
+### Startup warnings for insufficient offline config
+
+When `--offline` is set, teep should inspect the effective config at startup
+and emit log warnings if there are insufficient configured hashes or images to
+enforce all supply chain factors. Specifically:
+
+- If `compose_hashes` is empty or absent for the provider, warn that
+  `compose_binding` will be non-enforced (allowed to fail) in offline mode.
+- If `pinned_digests` is empty or absent, warn that `sigstore_verification`
+  and `build_transparency_log` will be non-enforced.
+- If the image allowlist is empty or absent, warn that image repo allowlist
+  checks will be skipped.
+- Each warning should name the specific factor(s) being demoted to allow_fail
+  as a result (e.g., `"--offline: no pinned_digests configured for provider
+  'neardirect'; factors [sigstore_verification, build_transparency_log]
+  demoted to allow_fail"`).
+
+This ensures operators understand the security posture difference without
+making `--offline` always fail when the config lacks pinned values.
+
 ### Summary table
 
 | Condition | Compose hash | Image digest | Image repo |
@@ -375,6 +399,59 @@ because it is non-enforced.
 | Offline, pinned hash | Pinned → pass | Pinned → pass | N/A (compose validated) |
 | Offline, unpinned hash | Fail (non-enforced) | Fail (non-enforced) | Checked against allowlist |
 | Offline, no config | Fail (non-enforced) | Fail (non-enforced) | Checked against allowlist |
+
+### 5a. Tag-Based Image Caching and `allow_any_version`
+
+The current `ExtractImageRepositories` only handles `@sha256:`-pinned image
+references. To support tag-based images (common in NanoGPT and other dstack
+providers), the plan adds tag-aware caching:
+
+**Specific release tags**: If a specific release tag for an image is
+authenticated via Sigstore/Rekor verification, it can be cached and treated
+like a hash pin. The cached entry must use the **full canonical `image:tag`**
+(e.g., `vllm/vllm-openai:v0.4.2`), not just the tag portion. Once cached, the
+image at that specific tag is considered authenticated without further online
+verification, since release tags are immutable by convention.
+
+**Generic / branch tags**: For image references that use non-specific tags
+such as `latest`, `head`, `main`, or similar branch-tracking tags, the version
+cannot be pinned because the same tag may resolve to different images over
+time. For these, `--update-config` emits an explicit `allow_any_version = true`
+field in the image config entry. This means the image is considered
+authenticated by its presence in the allowlist without requiring further online
+update verification. This option is **on by default** for images where a
+specific release cannot be determined, but is always **explicitly present in
+the config** so operators can see what is happening just from reading the
+cached config.
+
+**Config example** (Option B format):
+
+```toml
+# Specific release tag — cached like a hash, no allow_any_version needed
+[providers.nanogpt.supply_chain.images."vllm/vllm-openai"]
+model_tier = true
+provenance = "compose_binding_only"
+pinned_tag = "v0.4.2"  # full canonical tag, authenticated via sigstore
+
+# Generic tag — allow_any_version is explicit
+[providers.nanogpt.supply_chain.images."alpine"]
+model_tier = true
+provenance = "compose_binding_only"
+allow_any_version = true  # tag is 'latest' or similar; no specific release to pin
+
+# Digest-pinned — standard behavior, no special fields needed
+[providers.neardirect.supply_chain.images."datadog/agent"]
+model_tier = true
+provenance = "sigstore_present"
+key_fingerprint = "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b"
+```
+
+**Behavior summary**:
+- `pinned_tag` present → image at that exact tag is treated as authenticated
+  (cacheable across restarts, no online re-verification required)
+- `allow_any_version = true` → any version of this image is accepted based on
+  allowlist membership alone (no digest or tag pinning)
+- Neither present → standard behavior (digest-based verification via Sigstore)
 
 ---
 
@@ -400,14 +477,16 @@ SupplyChainConfig {
     Images         map[string]ImageConfig  // Option B: repo name as key
 }
 ImageConfig {
-    ModelTier      bool
-    GatewayTier    bool
-    Provenance     string  // "fulcio_signed" | "sigstore_present" | "compose_binding_only"
-    KeyFingerprint string
-    OIDCIssuer     string
-    OIDCIdentity   string
-    SourceRepos    []string
-    NoDSSE         bool
+    ModelTier        bool
+    GatewayTier      bool
+    Provenance       string    // "fulcio_signed" | "sigstore_present" | "compose_binding_only"
+    KeyFingerprint   string
+    OIDCIssuer       string
+    OIDCIdentity     string
+    SourceRepos      []string
+    NoDSSE           bool
+    PinnedTag        string    // full canonical tag authenticated via sigstore (e.g., "v0.4.2")
+    AllowAnyVersion  bool      // true → any version accepted (for generic/branch tags)
 }
 ```
 
@@ -557,10 +636,10 @@ but not required.
    is an immutable identifier — if it passes Sigstore for one provider, it
    passes for all.
 
-3. **Sigstore re-verification for tag-based images**: Images referenced by tag
-   (not `@sha256:`) cannot use the global digest cache because the tag may
-   resolve to a different digest. These images must be re-verified via Sigstore
-   on every new compose hash. This is the correct security behavior but means
-   providers like nanogpt (all ComposeBindingOnly, tag-based) see no benefit
-   from the Sigstore cache — which is fine because they don't use Sigstore
-   anyway.
+3. **Tag-based image versioning**: Images referenced by tag (not `@sha256:`)
+   are handled by two new config fields: `pinned_tag` (for specific release
+   tags authenticated via Sigstore) and `allow_any_version` (for generic/branch
+   tags where a specific release cannot be determined). See Section 5a for
+   details. This replaces the earlier approach of always re-verifying tag-based
+   images, and gives operators explicit visibility into which images are
+   version-locked vs. version-flexible.
