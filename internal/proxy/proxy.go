@@ -799,8 +799,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				s.signingKeyCache.Delete(prov.Name, upstreamModel)
 				slog.ErrorContext(ctx, "E2EE previously failed; cached attestation insufficient for recovery",
 					"provider", prov.Name, "model", upstreamModel)
-				atomic.AddUint64(&s.stats.errors, 1)
-				atomic.AddUint64(&ms.errors, 1)
+				s.stats.errors.Add(1)
+				ms.errors.Add(1)
 				http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)
 				status = "e2ee_recovery_pending"
 				return
@@ -1187,7 +1187,7 @@ func (s *Server) handlePinnedChat(
 				s.signingKeyCache.Delete(prov.Name, upstreamModel)
 				slog.ErrorContext(ctx, "E2EE previously failed; cached pinned attestation insufficient for recovery",
 					"provider", prov.Name, "model", upstreamModel)
-				atomic.AddUint64(&s.stats.errors, 1)
+				s.stats.errors.Add(1)
 				http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)
 				return
 			}
