@@ -64,11 +64,7 @@ No dependencies. All other phases depend on this.
    - **phalacloud**: `EmbeddingsPath = "/embeddings"` (no `/v1/` prefix, consistent with `ChatPath = "/chat/completions"`)
    - **chutes**: `EmbeddingsPath = "/v1/embeddings"` (for `X-E2E-Path` threading)
 
-4. **Do not** raise the existing `handleChatCompletions` body limit to 100 MiB while the handler still reads the entire body into memory via `io.ReadAll`. The current 10 MiB cap stays until the implementation is changed to avoid full-buffering. The path forward:
-
-   - **neardirect VL (TLS-level E2EE):** The pinned handler already has a raw `tls.Conn` to the model TEE. Refactor to stream the request body via `io.Copy` directly to the TLS connection without buffering. This eliminates the body limit constraint for neardirect VL entirely. This is significant refactoring that warrants its own sub-plan or early phase.
-   - **Chutes/nearcloud VL (app-layer E2EE):** ML-KEM and XChaCha20-Poly1305 operate on the complete body as a unit (no chunked encryption protocol exists). These providers must keep full-body buffering. Raise limit modestly only for these providers if needed, after measuring real VL request sizes, rather than a blanket 100 MiB.
-   - **All non-VL endpoints:** Current limits are sufficient (embeddings 10 MiB, audio 25 MiB, images 10 MiB).
+4. Raise the default body limit from 10 MiB to **25 MiB** for all endpoints (chat/VL, embeddings, images, audio). The primary use case for teep is trusted local inference; if teep is exposed to untrusted input, operators can enforce their own limits on their use of the local API proxy. A future streaming refactor (neardirect `io.Copy` via pinned `tls.Conn`, and eventually chunked encryption for Chutes/nearcloud) can further reduce memory pressure, but should not block usability now.
 
 5. Parameterize `doUpstreamRoundtrip` to accept the endpoint path as an argument instead of reading `prov.ChatPath`. Today `proxy.go:1468` hardcodes `prov.BaseURL + prov.ChatPath` as the upstream URL. Each new handler must pass its endpoint-specific path (e.g., `prov.EmbeddingsPath`). Same for `PinnedRequest` construction — all `handlePinned*` functions pass the correct path field rather than hardcoding `prov.ChatPath`.
 
@@ -217,4 +213,4 @@ Depends on Phase 1; research required first.
 
 3. **Chutes embeddings base URL**: Chutes uses `llm.chutes.ai` for LLM models and `api.chutes.ai` for E2EE invoke. Verify whether the embeddings base URL differs (e.g. `embedding.chutes.ai`). Check the `/v1/models` response for embedding chute type metadata.
 
-4. **VL body limit for buffered E2EE providers**: Current 10 MiB limit may be too small for some VL use cases with Chutes/nearcloud (which require full-body buffering for encryption). Measure real VL request sizes before choosing a raised limit. neardirect can stream, so no limit constraint there.
+4. **Streaming body relay (future)**: neardirect's pinned handler can `io.Copy` directly to the model TEE's `tls.Conn`, eliminating full-body buffering entirely. Chutes/nearcloud require protocol-level chunked encryption for the same benefit. Both are follow-on work, not blocking this plan.
