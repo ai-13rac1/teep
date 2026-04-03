@@ -4,14 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1132,4 +1135,255 @@ func TestHandlePinned_BlockedThenRecovery(t *testing.T) {
 	if attestCalls != 2 {
 		t.Errorf("attestation calls = %d, want 2", attestCalls)
 	}
+}
+
+// --------------------------------------------------------------------------
+// Direct unit tests for extracted verification helpers
+// --------------------------------------------------------------------------
+
+func readRealTDXQuoteHex(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../attestation/testdata/tdx_prod_quote_SPR_E4.dat")
+	if err != nil {
+		t.Fatalf("read TDX quote testdata: %v", err)
+	}
+	return hex.EncodeToString(raw)
+}
+
+func TestVerifyTDX(t *testing.T) {
+	t.Run("EmptyQuote", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{IntelQuote: ""}
+		nonce := attestation.NewNonce()
+
+		result := h.verifyTDX(context.Background(), raw, nonce)
+		t.Logf("result: %v", result)
+		if result != nil {
+			t.Error("expected nil for empty quote")
+		}
+	})
+
+	t.Run("InvalidQuote", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{IntelQuote: "aabbccdd"}
+		nonce := attestation.NewNonce()
+
+		result := h.verifyTDX(context.Background(), raw, nonce)
+		t.Logf("result: %+v", result)
+		if result == nil {
+			t.Fatal("expected non-nil result for invalid quote")
+		}
+		if result.ParseErr == nil {
+			t.Error("expected ParseErr for invalid quote")
+		}
+		t.Logf("ParseErr: %v", result.ParseErr)
+	})
+
+	t.Run("RealQuoteWithVerifier", func(t *testing.T) {
+		quoteHex := readRealTDXQuoteHex(t)
+		h := &PinnedHandler{
+			offline:    true,
+			rdVerifier: ReportDataVerifier{},
+		}
+		raw := &attestation.RawAttestation{
+			IntelQuote:     quoteHex,
+			SigningAddress: "0xtest",
+			TLSFingerprint: "aabb",
+		}
+		nonce := attestation.NewNonce()
+
+		result := h.verifyTDX(context.Background(), raw, nonce)
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		t.Logf("result: ParseErr=%v, MRTD len=%d", result.ParseErr, len(result.MRTD))
+		if result.ParseErr != nil {
+			t.Fatalf("unexpected ParseErr: %v", result.ParseErr)
+		}
+		// rdVerifier was called (nonce won't match, so binding should fail).
+		t.Logf("ReportDataBindingErr: %v", result.ReportDataBindingErr)
+		t.Logf("ReportDataBindingDetail: %s", result.ReportDataBindingDetail)
+	})
+}
+
+func TestVerifyNVIDIA(t *testing.T) {
+	t.Run("EmptyPayload", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{NvidiaPayload: ""}
+		nonce := attestation.NewNonce()
+
+		eat, nras := h.verifyNVIDIA(context.Background(), raw, nonce)
+		t.Logf("eat=%v nras=%v", eat, nras)
+		if eat != nil {
+			t.Error("expected nil eat for empty payload")
+		}
+		if nras != nil {
+			t.Error("expected nil nras for empty payload")
+		}
+	})
+
+	t.Run("NonJSONPayload", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{NvidiaPayload: "not-a-json-payload"}
+		nonce := attestation.NewNonce()
+
+		eat, nras := h.verifyNVIDIA(context.Background(), raw, nonce)
+		t.Logf("eat=%+v nras=%v", eat, nras)
+		if eat == nil {
+			t.Fatal("expected non-nil eat for non-JSON payload")
+		}
+		if eat.SignatureErr == nil {
+			t.Error("expected SignatureErr for non-JSON payload")
+		}
+		t.Logf("eat.SignatureErr: %v", eat.SignatureErr)
+		// NRAS not attempted: payload doesn't start with '{' and offline=true.
+		if nras != nil {
+			t.Error("expected nil nras for non-JSON payload")
+		}
+	})
+
+	t.Run("JSONPayloadOffline", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{NvidiaPayload: `{"invalid":"jwt"}`}
+		nonce := attestation.NewNonce()
+
+		eat, nras := h.verifyNVIDIA(context.Background(), raw, nonce)
+		t.Logf("eat=%+v nras=%v", eat, nras)
+		if eat == nil {
+			t.Fatal("expected non-nil eat for JSON payload")
+		}
+		// NRAS skipped because offline=true.
+		if nras != nil {
+			t.Error("expected nil nras when offline")
+		}
+	})
+}
+
+func TestCheckPoC(t *testing.T) {
+	t.Run("Offline", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		result := h.checkPoC(context.Background(), "some-quote-hex")
+		t.Logf("result: %v", result)
+		if result != nil {
+			t.Error("expected nil when offline")
+		}
+	})
+
+	t.Run("EmptyQuote", func(t *testing.T) {
+		h := &PinnedHandler{offline: false}
+		result := h.checkPoC(context.Background(), "")
+		t.Logf("result: %v", result)
+		if result != nil {
+			t.Error("expected nil for empty quote")
+		}
+	})
+}
+
+// testComposeWithDigest returns a compose JSON and matching MRConfigID for testing.
+func testComposeWithDigest(t *testing.T) (appCompose string, mrConfigID []byte) {
+	t.Helper()
+	appCompose = `{"docker_compose_file":"services:\n  app:\n    image: ghcr.io/org/repo@sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\n"}`
+	hash := sha256.Sum256([]byte(appCompose))
+	mrConfigID = make([]byte, 48)
+	mrConfigID[0] = 0x01
+	copy(mrConfigID[1:], hash[:])
+	return appCompose, mrConfigID
+}
+
+func TestVerifySupplyChain(t *testing.T) {
+	t.Run("EmptyCompose", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{AppCompose: ""}
+		tdx := &attestation.TDXVerifyResult{}
+
+		compose, repos, d2r, sig, rek := h.verifySupplyChain(context.Background(), raw, tdx)
+		t.Logf("compose=%v repos=%v d2r=%v sig=%v rek=%v", compose, repos, d2r, sig, rek)
+		if compose != nil {
+			t.Error("expected nil compose for empty AppCompose")
+		}
+	})
+
+	t.Run("NilTDX", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{AppCompose: "something"}
+
+		compose, repos, d2r, sig, rek := h.verifySupplyChain(context.Background(), raw, nil)
+		t.Logf("compose=%v repos=%v d2r=%v sig=%v rek=%v", compose, repos, d2r, sig, rek)
+		if compose != nil {
+			t.Error("expected nil compose for nil TDX result")
+		}
+	})
+
+	t.Run("TDXParseError", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		raw := &attestation.RawAttestation{AppCompose: "something"}
+		tdx := &attestation.TDXVerifyResult{ParseErr: errors.New("bad quote")}
+
+		compose, repos, d2r, sig, rek := h.verifySupplyChain(context.Background(), raw, tdx)
+		t.Logf("compose=%v repos=%v d2r=%v sig=%v rek=%v", compose, repos, d2r, sig, rek)
+		if compose != nil {
+			t.Error("expected nil compose when TDX has ParseErr")
+		}
+	})
+
+	t.Run("BindingMismatch", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		appCompose, _ := testComposeWithDigest(t)
+		wrongMRConfigID := make([]byte, 48)
+		wrongMRConfigID[0] = 0x01 // correct prefix, but wrong hash (zeros)
+
+		raw := &attestation.RawAttestation{AppCompose: appCompose}
+		tdx := &attestation.TDXVerifyResult{MRConfigID: wrongMRConfigID}
+
+		compose, repos, d2r, sig, rek := h.verifySupplyChain(context.Background(), raw, tdx)
+		t.Logf("compose=%+v repos=%v d2r=%v sig=%v rek=%v", compose, repos, d2r, sig, rek)
+		if compose == nil {
+			t.Fatal("expected non-nil compose result")
+		}
+		if !compose.Checked {
+			t.Error("expected Checked=true")
+		}
+		if compose.Err == nil {
+			t.Error("expected compose binding error for mismatched MRConfigID")
+		}
+		t.Logf("compose.Err: %v", compose.Err)
+		if repos != nil {
+			t.Error("expected nil repos on binding failure")
+		}
+		if sig != nil {
+			t.Error("expected nil sigstore on binding failure")
+		}
+	})
+
+	t.Run("BindingPass", func(t *testing.T) {
+		h := &PinnedHandler{offline: true}
+		appCompose, mrConfigID := testComposeWithDigest(t)
+
+		raw := &attestation.RawAttestation{AppCompose: appCompose}
+		tdx := &attestation.TDXVerifyResult{MRConfigID: mrConfigID}
+
+		compose, repos, d2r, sig, rek := h.verifySupplyChain(context.Background(), raw, tdx)
+		t.Logf("compose=%+v repos=%v d2r=%v sig=%v rek=%v", compose, repos, d2r, sig, rek)
+		if compose == nil {
+			t.Fatal("expected non-nil compose result")
+		}
+		if compose.Err != nil {
+			t.Fatalf("unexpected compose binding error: %v", compose.Err)
+		}
+		if len(repos) == 0 {
+			t.Error("expected non-empty imageRepos")
+		}
+		t.Logf("imageRepos: %v", repos)
+		if len(d2r) == 0 {
+			t.Error("expected non-empty digestToRepo")
+		}
+		t.Logf("digestToRepo: %v", d2r)
+		// Sigstore/rekor not attempted: offline=true, rekorClient=nil.
+		if sig != nil {
+			t.Error("expected nil sigstore when offline")
+		}
+		if rek != nil {
+			t.Error("expected nil rekor when offline")
+		}
+	})
 }
