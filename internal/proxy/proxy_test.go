@@ -2274,7 +2274,7 @@ type mockPreparer struct {
 	apiKey string
 }
 
-func (m *mockPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool) error {
+func (m *mockPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool, _ string) error {
 	m.called = true
 	req.Header.Set("Authorization", "Bearer "+m.apiKey)
 	return nil
@@ -2291,7 +2291,7 @@ func TestPrepareUpstreamHeaders_NilSession(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2311,7 +2311,7 @@ func TestPrepareUpstreamHeaders_NilSessionEmptyKey(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2338,7 +2338,7 @@ func TestPrepareUpstreamHeaders_WithSession(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2991,7 +2991,7 @@ type noopPreparer struct {
 	apiKey string
 }
 
-func (p noopPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool) error {
+func (p noopPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool, _ string) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	return nil

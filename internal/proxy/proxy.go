@@ -312,6 +312,9 @@ func New(cfg *config.Config) (*Server, error) {
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
 	s.mux.HandleFunc("GET /events", s.handleEvents)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("POST /v1/embeddings", s.handleEmbeddings)
+	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.handleAudioTranscriptions)
+	s.mux.HandleFunc("POST /v1/images/generations", s.handleImagesGenerations)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
 
@@ -414,6 +417,9 @@ func fromConfig(
 		p.ModelLister = venice.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "neardirect":
 		p.ChatPath = "/v1/chat/completions"
+		p.EmbeddingsPath = "/v1/embeddings"
+		p.AudioPath = "/v1/audio/transcriptions"
+		p.ImagesPath = "/v1/images/generations"
 		rdVerifier := neardirect.ReportDataVerifier{}
 		p.Attester = neardirect.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = neardirect.NewPreparer(cp.APIKey)
@@ -433,6 +439,11 @@ func fromConfig(
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
+		// nearcloud non-chat E2EE is NOT verified: EncryptChatMessagesNearCloud
+		// only encrypts the messages array. Embeddings (input), audio, and images
+		// (prompt) would be sent in plaintext through a channel the user believes
+		// is E2EE. Non-chat paths are not wired until the E2EE protocol is
+		// verified to cover those content fields.
 		p.Encryptor = nearcloud.NewE2EE()
 		rdVerifier := neardirect.ReportDataVerifier{}
 		p.Attester = nearcloud.NewAttester(cp.APIKey, offline)
@@ -462,6 +473,7 @@ func fromConfig(
 		p.SupplyChainPolicy = nanogpt.SupplyChainPolicy()
 	case "phalacloud":
 		p.ChatPath = "/chat/completions"
+		p.EmbeddingsPath = "/embeddings"
 		p.Attester = phalacloud.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = phalacloud.NewPreparer(cp.APIKey)
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
@@ -474,6 +486,7 @@ func fromConfig(
 	case "chutes":
 		p.BaseURL = chutesProvider.DefaultLLMBaseURL
 		p.ChatPath = "/v1/chat/completions"
+		p.EmbeddingsPath = "/v1/embeddings"
 		p.SkipSigningKeyCache = true
 		attester := chutesProvider.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Attester = attester
@@ -731,7 +744,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx := reqid.WithID(r.Context(), reqid.New())
 	requestStart := time.Now()
 
-	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MiB max
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20) // 50 MiB max
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
@@ -811,28 +824,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// invalidates the cached attestation. Recovery requires a confirmed fresh
 	// attestation (cache miss), indicated by ar.Raw != nil.
 	if ar.E2EEActive {
-		key := providerModelKey{prov.Name, upstreamModel}
-		if _, failed := s.e2eeFailed.Load(key); failed {
-			if ar.Raw != nil {
-				// Fresh attestation succeeded: safe to clear the prior
-				// E2EE failure marker and proceed.
-				s.e2eeFailed.Delete(key)
-				slog.InfoContext(ctx, "Cleared prior E2EE failure after successful re-attestation",
-					"provider", prov.Name, "model", upstreamModel)
-			} else {
-				// Cached attestation: a concurrent request may have
-				// repopulated the cache without fresh verification.
-				// Fail closed and invalidate caches to force re-attestation.
-				s.cache.Delete(prov.Name, upstreamModel)
-				s.signingKeyCache.Delete(prov.Name, upstreamModel)
-				slog.ErrorContext(ctx, "E2EE previously failed; cached attestation insufficient for recovery",
-					"provider", prov.Name, "model", upstreamModel)
-				s.stats.errors.Add(1)
-				ms.errors.Add(1)
-				http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)
-				status = "e2ee_recovery_pending"
-				return
-			}
+		if ok := s.clearE2EEFailureIfFresh(ctx, w, prov, upstreamModel, ar, ms); !ok {
+			status = "e2ee_recovery_pending"
+			return
 		}
 	}
 
@@ -842,7 +836,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// nonce pool with a new encryption handshake. Non-Chutes paths execute
 	// exactly once; post-relay decryption failure marks the provider+model
 	// pair as globally failed (fail-closed).
-	rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, req.Stream)
+	rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, req.Stream, prov.ChatPath)
 	e2eeDur += rr.e2eeDur
 	upstreamDur += rr.upstreamDur
 	if rr.status != "" {
@@ -882,6 +876,7 @@ func (s *Server) relayWithRetry(
 	ar *attestResult,
 	ms *modelStats,
 	stream bool,
+	endpointPath string,
 ) relayResult {
 	chutesE2EE := isChutesE2EE(prov, ar.E2EEActive)
 	maxRelayAttempts := 1
@@ -903,7 +898,7 @@ func (s *Server) relayWithRetry(
 			attemptRaw = nil
 		}
 
-		ur, err := s.doUpstreamRoundtrip(ctx, prov, body, upstreamModel, ar.E2EEActive, attemptRaw, stream)
+		ur, err := s.doUpstreamRoundtrip(ctx, prov, body, upstreamModel, ar.E2EEActive, attemptRaw, stream, endpointPath)
 		result.e2eeDur += ur.E2EEDur
 		result.upstreamDur += ur.UpstreamDur
 		if err != nil {
@@ -1528,8 +1523,9 @@ func (s *Server) doUpstreamRoundtrip(
 	e2eeActive bool,
 	raw *attestation.RawAttestation,
 	stream bool,
+	endpointPath string,
 ) (*upstreamResult, error) {
-	upstreamURL := prov.BaseURL + prov.ChatPath
+	upstreamURL := prov.BaseURL + endpointPath
 	upstreamTimeout := upstreamStreamTimeout
 	if !stream {
 		upstreamTimeout = upstreamNonStreamTimeout
@@ -1589,7 +1585,7 @@ func (s *Server) doUpstreamRoundtrip(
 		}
 		upstreamReq.Header.Set("Content-Type", "application/json")
 
-		if prepErr := prepareUpstreamHeaders(upstreamReq, prov, session, meta, stream); prepErr != nil {
+		if prepErr := prepareUpstreamHeaders(upstreamReq, prov, session, meta, stream, endpointPath); prepErr != nil {
 			cancel()
 			zeroE2EESessions(session, meta)
 			return &upstreamResult{E2EEDur: e2eeDur, UpstreamDur: upstreamDur},
@@ -1780,7 +1776,7 @@ func (s *Server) buildUpstreamBody(
 // It builds protocol-specific headers from the Decryptor via type switch, then
 // delegates to the provider's Preparer. When no Preparer is configured, it sets
 // only the Authorization header.
-func prepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool) error {
+func prepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool, endpointPath string) error {
 	if prov.Preparer == nil {
 		if prov.APIKey != "" {
 			req.Header.Set("Authorization", "Bearer "+prov.APIKey)
@@ -1802,10 +1798,421 @@ func prepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session 
 		e2eeHeaders.Set("X-Client-Pub-Key", s.ClientEd25519PubHex())
 		e2eeHeaders.Set("X-Encryption-Version", "2")
 	}
-	return prov.Preparer.PrepareRequest(req, e2eeHeaders, meta, stream)
+	return prov.Preparer.PrepareRequest(req, e2eeHeaders, meta, stream, endpointPath)
 }
 
-// modelsListResponse is the OpenAI-compatible response for GET /v1/models.
+// --------------------------------------------------------------------------
+// Non-chat endpoint handlers
+// --------------------------------------------------------------------------
+
+// embeddingsRequest is a minimal parse of an OpenAI embeddings request.
+type embeddingsRequest struct {
+	Model string `json:"model"`
+}
+
+// handleEmbeddings handles POST /v1/embeddings. The flow mirrors
+// handleChatCompletions but uses prov.EmbeddingsPath and is non-streaming.
+func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	ctx := reqid.WithID(r.Context(), reqid.New())
+	requestStart := time.Now()
+
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	var req embeddingsRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.Model == "" {
+		http.Error(w, `"model" field is required`, http.StatusBadRequest)
+		return
+	}
+
+	prov, upstreamModel, ok := s.resolveModel(req.Model)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown model %q", req.Model), http.StatusBadRequest)
+		return
+	}
+	if prov.EmbeddingsPath == "" {
+		http.Error(w, fmt.Sprintf("provider %q does not support embeddings", prov.Name), http.StatusBadRequest)
+		return
+	}
+
+	var attestDur, e2eeDur, upstreamDur time.Duration
+	var status string
+	defer func() {
+		slog.InfoContext(ctx, "request complete",
+			"endpoint", "embeddings",
+			"provider", prov.Name,
+			"model", upstreamModel,
+			"status", status,
+			"attest", fmtDur(attestDur),
+			"e2ee", fmtDur(e2eeDur),
+			"upstream", fmtDur(upstreamDur),
+			"total", fmtDur(time.Since(requestStart)),
+		)
+	}()
+
+	s.stats.requests.Add(1)
+	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms.requests.Add(1)
+	ms.lastRequestAt.Store(time.Now().Unix())
+	s.stats.nonStream.Add(1)
+
+	if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		status = "neg_cached"
+		s.stats.errors.Add(1)
+		ms.errors.Add(1)
+		http.Error(w, fmt.Sprintf("attestation recently failed for %s/%s; try again later", prov.Name, upstreamModel), http.StatusServiceUnavailable)
+		return
+	}
+
+	if prov.PinnedHandler != nil {
+		status = "pinned"
+		s.handlePinnedNonChat(ctx, w, r, prov, upstreamModel, body, prov.EmbeddingsPath)
+		return
+	}
+
+	ar, failStatus := s.attestAndCache(ctx, w, prov, upstreamModel, ms)
+	attestDur = ar.AttestDur
+	if failStatus != "" {
+		status = failStatus
+		return
+	}
+	report := ar.Report
+
+	if ar.E2EEActive {
+		if ok := s.clearE2EEFailureIfFresh(ctx, w, prov, upstreamModel, ar, ms); !ok {
+			status = "e2ee_recovery_pending"
+			return
+		}
+	}
+
+	rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, false, prov.EmbeddingsPath)
+	e2eeDur += rr.e2eeDur
+	upstreamDur += rr.upstreamDur
+	if rr.status != "" {
+		status = rr.status
+		return
+	}
+
+	if ar.E2EEActive {
+		cloned := report.Clone()
+		cloned.MarkE2EEUsable("E2EE roundtrip succeeded via proxy")
+		s.cache.Put(prov.Name, upstreamModel, cloned)
+	}
+	status = "ok"
+}
+
+// imagesRequest is a minimal parse of an OpenAI image generation request.
+type imagesRequest struct {
+	Model string `json:"model"`
+}
+
+// handleImagesGenerations handles POST /v1/images/generations. Non-streaming JSON relay.
+func (s *Server) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
+	ctx := reqid.WithID(r.Context(), reqid.New())
+	requestStart := time.Now()
+
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	var req imagesRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.Model == "" {
+		http.Error(w, `"model" field is required`, http.StatusBadRequest)
+		return
+	}
+
+	prov, upstreamModel, ok := s.resolveModel(req.Model)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown model %q", req.Model), http.StatusBadRequest)
+		return
+	}
+	if prov.ImagesPath == "" {
+		http.Error(w, fmt.Sprintf("provider %q does not support image generation", prov.Name), http.StatusBadRequest)
+		return
+	}
+
+	var attestDur, e2eeDur, upstreamDur time.Duration
+	var status string
+	defer func() {
+		slog.InfoContext(ctx, "request complete",
+			"endpoint", "images",
+			"provider", prov.Name,
+			"model", upstreamModel,
+			"status", status,
+			"attest", fmtDur(attestDur),
+			"e2ee", fmtDur(e2eeDur),
+			"upstream", fmtDur(upstreamDur),
+			"total", fmtDur(time.Since(requestStart)),
+		)
+	}()
+
+	s.stats.requests.Add(1)
+	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms.requests.Add(1)
+	ms.lastRequestAt.Store(time.Now().Unix())
+	s.stats.nonStream.Add(1)
+
+	if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		status = "neg_cached"
+		s.stats.errors.Add(1)
+		ms.errors.Add(1)
+		http.Error(w, fmt.Sprintf("attestation recently failed for %s/%s; try again later", prov.Name, upstreamModel), http.StatusServiceUnavailable)
+		return
+	}
+
+	if prov.PinnedHandler != nil {
+		status = "pinned"
+		s.handlePinnedNonChat(ctx, w, r, prov, upstreamModel, body, prov.ImagesPath)
+		return
+	}
+
+	ar, failStatus := s.attestAndCache(ctx, w, prov, upstreamModel, ms)
+	attestDur = ar.AttestDur
+	if failStatus != "" {
+		status = failStatus
+		return
+	}
+	report := ar.Report
+
+	if ar.E2EEActive {
+		if ok := s.clearE2EEFailureIfFresh(ctx, w, prov, upstreamModel, ar, ms); !ok {
+			status = "e2ee_recovery_pending"
+			return
+		}
+	}
+
+	rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, false, prov.ImagesPath)
+	e2eeDur += rr.e2eeDur
+	upstreamDur += rr.upstreamDur
+	if rr.status != "" {
+		status = rr.status
+		return
+	}
+
+	if ar.E2EEActive {
+		cloned := report.Clone()
+		cloned.MarkE2EEUsable("E2EE roundtrip succeeded via proxy")
+		s.cache.Put(prov.Name, upstreamModel, cloned)
+	}
+	status = "ok"
+}
+
+// handleAudioTranscriptions handles POST /v1/audio/transcriptions.
+// Body is multipart/form-data (audio file + model field).
+func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	ctx := reqid.WithID(r.Context(), reqid.New())
+	requestStart := time.Now()
+
+	// Extract model from multipart form; do NOT parse as JSON.
+	modelName := r.FormValue("model")
+	if modelName == "" {
+		http.Error(w, `"model" form field is required`, http.StatusBadRequest)
+		return
+	}
+
+	prov, upstreamModel, ok := s.resolveModel(modelName)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown model %q", modelName), http.StatusBadRequest)
+		return
+	}
+	if prov.AudioPath == "" {
+		http.Error(w, fmt.Sprintf("provider %q does not support audio transcription", prov.Name), http.StatusBadRequest)
+		return
+	}
+
+	// Multipart E2EE guard (fail-closed): Non-pinned E2EE providers
+	// (Chutes, nearcloud) require body encryption, which doesn't support
+	// multipart. Fail closed to prevent silently sending plaintext.
+	if prov.E2EE && prov.PinnedHandler == nil {
+		http.Error(w, "audio transcription requires TLS-level E2EE (pinned provider)", http.StatusBadRequest)
+		return
+	}
+
+	// Read full body for forwarding.
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	var attestDur, upstreamDur time.Duration
+	var status string
+	defer func() {
+		slog.InfoContext(ctx, "request complete",
+			"endpoint", "audio",
+			"provider", prov.Name,
+			"model", upstreamModel,
+			"status", status,
+			"attest", fmtDur(attestDur),
+			"upstream", fmtDur(upstreamDur),
+			"total", fmtDur(time.Since(requestStart)),
+		)
+	}()
+
+	s.stats.requests.Add(1)
+	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms.requests.Add(1)
+	ms.lastRequestAt.Store(time.Now().Unix())
+	s.stats.nonStream.Add(1)
+
+	if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		status = "neg_cached"
+		s.stats.errors.Add(1)
+		ms.errors.Add(1)
+		http.Error(w, fmt.Sprintf("attestation recently failed for %s/%s; try again later", prov.Name, upstreamModel), http.StatusServiceUnavailable)
+		return
+	}
+
+	if prov.PinnedHandler != nil {
+		status = "pinned"
+		// Forward raw multipart body to pinned handler.
+		s.handlePinnedNonChat(ctx, w, r, prov, upstreamModel, body, prov.AudioPath)
+		return
+	}
+
+	// Non-pinned path: attestAndCache + relay. E2EE guard above ensures
+	// this path is only reached for non-E2EE providers.
+	ar, failStatus := s.attestAndCache(ctx, w, prov, upstreamModel, ms)
+	attestDur = ar.AttestDur
+	if failStatus != "" {
+		status = failStatus
+		return
+	}
+
+	rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, false, prov.AudioPath)
+	upstreamDur += rr.upstreamDur
+	if rr.status != "" {
+		status = rr.status
+		return
+	}
+	status = "ok"
+}
+
+// handlePinnedNonChat handles non-chat requests for connection-pinned providers.
+// It mirrors handlePinnedChat but uses the given endpointPath and is always
+// non-streaming with no E2EE session decryption (E2EE is TLS-level for pinned).
+func (s *Server) handlePinnedNonChat(
+	ctx context.Context,
+	w http.ResponseWriter, r *http.Request,
+	prov *provider.Provider, upstreamModel string,
+	body []byte, endpointPath string,
+) {
+	headers := make(http.Header)
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		headers.Set("Content-Type", ct)
+	} else {
+		headers.Set("Content-Type", "application/json")
+	}
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		headers.Set("Authorization", auth)
+	}
+
+	pinnedReq := provider.PinnedRequest{
+		Method:  http.MethodPost,
+		Path:    endpointPath,
+		Headers: headers,
+		Body:    body,
+		Model:   upstreamModel,
+		E2EE:    prov.E2EE,
+	}
+	if prov.E2EE {
+		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
+			pinnedReq.SigningKey = cachedKey
+		}
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	pinnedResp, err := prov.PinnedHandler.HandlePinned(reqCtx, &pinnedReq)
+	if err != nil {
+		s.negCache.Record(prov.Name, upstreamModel)
+		slog.ErrorContext(ctx, "pinned request failed", "provider", prov.Name, "model", upstreamModel, "path", endpointPath, "err", err)
+		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer pinnedResp.Body.Close()
+
+	report := pinnedResp.Report
+	if report != nil {
+		s.cache.Put(prov.Name, upstreamModel, report)
+	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		report = cached
+	}
+	if !s.enforceReport(ctx, w, report, prov, upstreamModel) {
+		s.negCache.Record(prov.Name, upstreamModel)
+		return
+	}
+	if pinnedResp.SigningKey != "" {
+		s.signingKeyCache.Put(prov.Name, upstreamModel, pinnedResp.SigningKey)
+	}
+
+	for key, vals := range pinnedResp.Header {
+		switch key {
+		case "Transfer-Encoding", "Content-Encoding", "Content-Length", "Connection":
+			continue
+		}
+		for _, v := range vals {
+			w.Header().Add(key, v)
+		}
+	}
+
+	w.WriteHeader(pinnedResp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(pinnedResp.Body, 50<<20))
+}
+
+// clearE2EEFailureIfFresh clears a prior E2EE failure if the attestation
+// result has fresh attestation (ar.Raw != nil). Otherwise it fails closed,
+// invalidates caches, and writes an HTTP error. Returns true if the caller
+// should proceed.
+func (s *Server) clearE2EEFailureIfFresh(
+	ctx context.Context,
+	w http.ResponseWriter,
+	prov *provider.Provider,
+	upstreamModel string,
+	ar *attestResult,
+	ms *modelStats,
+) bool {
+	key := providerModelKey{prov.Name, upstreamModel}
+	_, failed := s.e2eeFailed.Load(key)
+	if !failed {
+		return true
+	}
+	if ar.Raw != nil {
+		s.e2eeFailed.Delete(key)
+		slog.InfoContext(ctx, "Cleared prior E2EE failure after successful re-attestation",
+			"provider", prov.Name, "model", upstreamModel)
+		return true
+	}
+	s.cache.Delete(prov.Name, upstreamModel)
+	s.signingKeyCache.Delete(prov.Name, upstreamModel)
+	slog.ErrorContext(ctx, "E2EE previously failed; cached attestation insufficient for recovery",
+		"provider", prov.Name, "model", upstreamModel)
+	s.stats.errors.Add(1)
+	ms.errors.Add(1)
+	http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)
+	return false
+}
+
 type modelsListResponse struct {
 	Object string            `json:"object"`
 	Data   []json.RawMessage `json:"data"`

@@ -477,7 +477,7 @@ func TestPreparer_SetsAuthHeader(t *testing.T) {
 	p := chutes.NewPreparer("sk-test-123", "/v1/chat/completions", "https://api.chutes.ai")
 	req, _ := http.NewRequest(http.MethodPost, "https://llm.chutes.ai/v1/chat/completions", http.NoBody)
 
-	if err := p.PrepareRequest(req, nil, nil, false); err != nil {
+	if err := p.PrepareRequest(req, nil, nil, false, ""); err != nil {
 		t.Fatalf("PrepareRequest: %v", err)
 	}
 	if req.Header.Get("Authorization") != "Bearer sk-test-123" {
@@ -503,7 +503,7 @@ func TestPreparer_RejectsInvalidAPIBaseURL(t *testing.T) {
 				InstanceID: "inst-1",
 				E2ENonce:   "nonce-1",
 			}
-			err := p.PrepareRequest(req, nil, meta, true)
+			err := p.PrepareRequest(req, nil, meta, true, "/v1/chat/completions")
 			if err == nil {
 				t.Fatalf("expected error for apiBaseURL=%q", tc.apiBaseURL)
 			}
