@@ -29,7 +29,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -147,6 +150,34 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%.3fs", d.Seconds())
 }
 
+// extractMultipartField reads a single text field from multipart/form-data
+// body bytes without consuming an http.Request body. Returns the field value
+// or an error if the content-type is not multipart or the field is absent.
+func extractMultipartField(contentType string, body []byte, fieldName string) (string, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		return "", fmt.Errorf("not multipart content-type: %s", contentType)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", errors.New("missing boundary in content-type")
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			return "", err
+		}
+		if p.FormName() == fieldName {
+			val, err := io.ReadAll(io.LimitReader(p, 1024))
+			if err != nil {
+				return "", err
+			}
+			return string(val), nil
+		}
+	}
+}
+
 // chutesRetryableError returns true if the upstream error or response status
 // indicates a Chutes instance-level failure that warrants failover to a
 // different instance. Returns false for client-induced cancellations
@@ -210,9 +241,11 @@ type chatRequest struct {
 }
 
 // chatMessage is one message in the chat history.
+// Content is json.RawMessage because it may be a string (text) or an array
+// (multimodal / vision-language). The proxy never inspects message content.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 // providerModelKey is used as the key in the e2eeFailed sync.Map.
@@ -2020,9 +2053,20 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 	ctx := reqid.WithID(r.Context(), reqid.New())
 	requestStart := time.Now()
 
-	// Extract model from multipart form; do NOT parse as JSON.
-	modelName := r.FormValue("model")
-	if modelName == "" {
+	// Read full body first so we can forward it verbatim later.
+	// FormValue would consume r.Body via ParseMultipartForm.
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+
+	// Extract model from the multipart form data without consuming the
+	// original body. Parse from the saved bytes.
+	modelName, err := extractMultipartField(r.Header.Get("Content-Type"), body, "model")
+	if err != nil || modelName == "" {
 		http.Error(w, `"model" form field is required`, http.StatusBadRequest)
 		return
 	}
@@ -2044,15 +2088,6 @@ func (s *Server) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "audio transcription requires TLS-level E2EE (pinned provider)", http.StatusBadRequest)
 		return
 	}
-
-	// Read full body for forwarding.
-	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
-		return
-	}
-	r.Body.Close()
 
 	var attestDur, upstreamDur time.Duration
 	var status string

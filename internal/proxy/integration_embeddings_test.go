@@ -51,11 +51,13 @@ func TestIntegration_NearDirect_Embeddings(t *testing.T) {
 // Chutes embeddings integration
 // --------------------------------------------------------------------------
 
-func chutesEmbeddingsModel() string {
-	if m := os.Getenv("CHUTES_EMBEDDING_MODEL"); m != "" {
-		return m
+func chutesEmbeddingsModel(t *testing.T) string {
+	t.Helper()
+	m := os.Getenv("CHUTES_EMBEDDING_MODEL")
+	if m == "" {
+		t.Skip("CHUTES_EMBEDDING_MODEL not set; Chutes does not currently list embedding models")
 	}
-	return "Qwen/Qwen3-Embedding-8B"
+	return m
 }
 
 func TestIntegration_Chutes_Embeddings(t *testing.T) {
@@ -65,7 +67,7 @@ func TestIntegration_Chutes_Embeddings(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationChutesPlaintextConfig(t))
 	defer proxySrv.Close()
 
-	model := chutesEmbeddingsModel()
+	model := chutesEmbeddingsModel(t)
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
 	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -92,7 +94,7 @@ func TestIntegration_Chutes_EmbeddingsE2EE(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationChutesE2EEConfig(t))
 	defer proxySrv.Close()
 
-	model := chutesEmbeddingsModel()
+	model := chutesEmbeddingsModel(t)
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
 	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
 	if err != nil {
