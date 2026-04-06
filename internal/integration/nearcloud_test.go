@@ -9,15 +9,16 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/defaults"
-	"github.com/13rac1/teep/internal/provider/venice"
+	"github.com/13rac1/teep/internal/provider/nearcloud"
+	"github.com/13rac1/teep/internal/provider/neardirect"
 )
 
-func TestIntegration_Venice_Fixture(t *testing.T) {
+func TestIntegration_NearCloud_Fixture(t *testing.T) {
 	ctx := context.Background()
-	env := loadFixture(t, "venice")
+	env := loadFixture(t, "nearcloud")
 
 	// Fetch attestation through replay.
-	attester := venice.NewAttester("https://api.venice.ai", "", true)
+	attester := nearcloud.NewAttester("", true)
 	attester.SetClient(env.client)
 	raw, err := attester.FetchAttestation(ctx, env.manifest.Model, env.nonce)
 	if err != nil {
@@ -25,8 +26,12 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	}
 	t.Logf("model=%s intel_quote=%d nvidia_payload=%d app_compose=%d",
 		raw.Model, len(raw.IntelQuote), len(raw.NvidiaPayload), len(raw.AppCompose))
+	t.Logf("gateway: intel_quote=%d app_compose=%d tls_fingerprint=%s event_log=%d",
+		len(raw.GatewayIntelQuote), len(raw.GatewayAppCompose),
+		raw.GatewayTLSFingerprint[:min(16, len(raw.GatewayTLSFingerprint))]+"...",
+		len(raw.GatewayEventLog))
 
-	// TDX
+	// --- Model TDX ---
 	tdxResult := attestation.VerifyTDXQuote(ctx, raw.IntelQuote, env.nonce, false)
 	if tdxResult.ParseErr != nil {
 		t.Fatalf("TDX parse: %v", tdxResult.ParseErr)
@@ -35,20 +40,21 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		tdxResult.CertChainErr, tdxResult.SignatureErr, tdxResult.CollateralErr,
 		tdxResult.FMSPC, tdxResult.TcbStatus)
 
-	// REPORTDATA binding
-	detail, rdErr := venice.ReportDataVerifier{}.VerifyReportData(tdxResult.ReportData, raw, env.nonce)
+	// Model REPORTDATA binding (neardirect scheme, since nearcloud
+	// delegates model parsing to neardirect).
+	detail, rdErr := neardirect.ReportDataVerifier{}.VerifyReportData(tdxResult.ReportData, raw, env.nonce)
 	tdxResult.ReportDataBindingErr = rdErr
 	tdxResult.ReportDataBindingDetail = detail
 	t.Logf("REPORTDATA: detail=%q err=%v", detail, rdErr)
 
-	// NVIDIA EAT
+	// --- NVIDIA EAT ---
 	var nvidiaResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" {
 		nvidiaResult = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, env.nonce)
 		t.Logf("NVIDIA EAT: format=%s sig_err=%v claims_err=%v", nvidiaResult.Format, nvidiaResult.SignatureErr, nvidiaResult.ClaimsErr)
 	}
 
-	// NVIDIA NRAS (time-pinned for expired JWTs)
+	// --- NVIDIA NRAS (time-pinned) ---
 	var nrasResult *attestation.NvidiaVerifyResult
 	if raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
 		nrasResult = attestation.VerifyNVIDIANRAS(ctx, raw.NvidiaPayload, env.client,
@@ -59,17 +65,47 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 			nrasResult.Format, nrasResult.SignatureErr, nrasResult.ClaimsErr, nrasResult.OverallResult)
 	}
 
-	// Compose binding
+	// --- Model compose binding ---
 	var composeResult *attestation.ComposeBindingResult
+	var modelCD attestation.ComposeDigests
 	if raw.AppCompose != "" && tdxResult.ParseErr == nil {
 		composeResult = &attestation.ComposeBindingResult{Checked: true}
 		composeResult.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
 		t.Logf("compose binding: err=%v", composeResult.Err)
+		if composeResult.Err == nil {
+			modelCD = attestation.ExtractComposeDigests(raw.AppCompose)
+		}
 	}
 
-	// Sigstore + Rekor
-	modelCD := attestation.ExtractComposeDigests(raw.AppCompose)
-	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, attestation.ComposeDigests{})
+	// --- Gateway TDX ---
+	var gatewayTDX *attestation.TDXVerifyResult
+	var gatewayCompose *attestation.ComposeBindingResult
+	var gatewayCD attestation.ComposeDigests
+	if raw.GatewayIntelQuote != "" {
+		gatewayTDX = attestation.VerifyTDXQuote(ctx, raw.GatewayIntelQuote, env.nonce, false)
+		t.Logf("gateway TDX: parse=%v cert=%v sig=%v collateral=%v",
+			gatewayTDX.ParseErr, gatewayTDX.CertChainErr, gatewayTDX.SignatureErr, gatewayTDX.CollateralErr)
+
+		if gatewayTDX.ParseErr == nil {
+			gwDetail, gwRDErr := nearcloud.GatewayReportDataVerifier{}.VerifyReportData(
+				gatewayTDX.ReportData, raw, env.nonce)
+			gatewayTDX.ReportDataBindingErr = gwRDErr
+			gatewayTDX.ReportDataBindingDetail = gwDetail
+			t.Logf("gateway REPORTDATA: detail=%q err=%v", gwDetail, gwRDErr)
+		}
+
+		if raw.GatewayAppCompose != "" && gatewayTDX.ParseErr == nil {
+			gatewayCompose = &attestation.ComposeBindingResult{Checked: true}
+			gatewayCompose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, gatewayTDX.MRConfigID)
+			t.Logf("gateway compose binding: err=%v", gatewayCompose.Err)
+			if gatewayCompose.Err == nil {
+				gatewayCD = attestation.ExtractComposeDigests(raw.GatewayAppCompose)
+			}
+		}
+	}
+
+	// --- Sigstore + Rekor ---
+	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
 	rc := attestation.NewRekorClient(env.client)
 	sigstoreResults := rc.CheckSigstoreDigests(ctx, allDigests)
 	t.Logf("sigstore: %d digests checked", len(sigstoreResults))
@@ -83,15 +119,21 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 	}
 	assertRekorExercised(t, sigstoreResults, rekorResults)
 
-	// PoC
+	// --- PoC (model + gateway) ---
 	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client)
 	pocResult := poc.CheckQuote(ctx, raw.IntelQuote)
-	t.Logf("PoC: registered=%v err=%v", pocResult.Registered, pocResult.Err)
+	t.Logf("PoC model: registered=%v err=%v", pocResult.Registered, pocResult.Err)
 
-	// Build report with provider defaults.
-	modelPolicy, _ := defaults.MeasurementDefaults("venice")
+	var gatewayPoC *attestation.PoCResult
+	if raw.GatewayIntelQuote != "" {
+		gatewayPoC = poc.CheckQuote(ctx, raw.GatewayIntelQuote)
+		t.Logf("PoC gateway: registered=%v err=%v", gatewayPoC.Registered, gatewayPoC.Err)
+	}
+
+	// --- Build report with provider defaults ---
+	modelPolicy, gatewayPolicy := defaults.MeasurementDefaults("nearcloud")
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:          "venice",
+		Provider:          "nearcloud",
 		Model:             env.manifest.Model,
 		Raw:               raw,
 		Nonce:             env.nonce,
@@ -101,12 +143,20 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		PoC:               pocResult,
 		Compose:           composeResult,
 		ImageRepos:        modelCD.Repos,
+		GatewayImageRepos: gatewayCD.Repos,
 		DigestToRepo:      digestToRepo,
 		Sigstore:          sigstoreResults,
 		Rekor:             rekorResults,
+		GatewayTDX:        gatewayTDX,
+		GatewayPoC:        gatewayPoC,
+		GatewayNonceHex:   raw.GatewayNonceHex,
+		GatewayNonce:      env.nonce,
+		GatewayCompose:    gatewayCompose,
+		GatewayEventLog:   raw.GatewayEventLog,
 		Policy:            modelPolicy,
-		SupplyChainPolicy: venice.SupplyChainPolicy(),
-		AllowFail:         attestation.DefaultAllowFail,
+		GatewayPolicy:     gatewayPolicy,
+		SupplyChainPolicy: nearcloud.SupplyChainPolicy(),
+		AllowFail:         attestation.NearcloudDefaultAllowFail,
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
@@ -114,12 +164,13 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 	}
 
-	assertVeniceReport(t, report)
+	assertNearcloudReport(t, report)
 }
 
-func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
+func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport) {
 	t.Helper()
 
+	// Model factors that must pass.
 	assertMustPass(t, report, []string{
 		"nonce_match",
 		"tdx_quote_present",
@@ -131,19 +182,38 @@ func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
 		"nvidia_payload_present",
 		"nvidia_nonce_client_bound",
 		"e2ee_capable",
+		"tls_key_binding",
 		"compose_binding",
 		"sigstore_verification",
 		"build_transparency_log",
 		"event_log_integrity",
 	})
 
-	// Venice uses E2EE, not TLS binding.
-	assertFactorStatus(t, report, "tls_key_binding", attestation.Skip)
+	// Gateway factors (Tier 4) that must pass.
+	assertMustPass(t, report, []string{
+		"gateway_nonce_match",
+		"gateway_tdx_quote_present",
+		"gateway_tdx_quote_structure",
+		"gateway_tdx_cert_chain",
+		"gateway_tdx_quote_signature",
+		"gateway_tdx_debug_disabled",
+		"gateway_tdx_mrseam_mrtd",
+		"gateway_compose_binding",
+		"gateway_event_log_integrity",
+	})
 
 	commonModelAssertions(t, report)
 
-	if report.Passed < 10 {
-		t.Errorf("expected at least 10 passing factors, got %d", report.Passed)
+	// Gateway allow-fail factors — log for visibility.
+	logFactorStatus(t, report,
+		"gateway_tdx_reportdata_binding",
+		"gateway_tdx_hardware_config",
+		"gateway_tdx_boot_config",
+		"gateway_cpu_id_registry",
+	)
+
+	if report.Passed < 20 {
+		t.Errorf("expected at least 20 passing factors (model + gateway), got %d", report.Passed)
 	}
 	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
 }

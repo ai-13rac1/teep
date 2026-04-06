@@ -1,4 +1,4 @@
-.PHONY: help build build-debug self-check test integration integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture vet teeplint lint check clean reports report-venice report-neardirect report-nearcloud report-nanogpt report-phalacloud report-chutes e2e-venice
+.PHONY: help build build-debug self-check test integration integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture vet teeplint lint check clean reports report-venice report-neardirect report-nearcloud report-nanogpt report-phalacloud report-chutes e2e-venice
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -19,7 +19,7 @@ self-check: build ## Build and run self-check
 test: ## Run unit tests with race detector (-short skips integration)
 	go test -short -race ./cmd/... ./internal/...
 
-integration: integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture ## Run all integration tests
+integration: integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture ## Run all integration tests
 
 integration-venice: ## Run Venice integration tests (requires VENICE_API_KEY)
 	go test -v -race -timeout 120s -run TestIntegration_Venice ./internal/proxy/
@@ -44,6 +44,9 @@ integration-neardirect-fixture: ## Run NEAR Direct fixture integration test (no 
 
 integration-venice-fixture: ## Run Venice fixture integration test (no API key needed)
 	go test -v -race -timeout 60s -run TestIntegration_Venice_Fixture ./internal/integration/
+
+integration-nearcloud-fixture: ## Run NearCloud fixture integration test (no API key needed)
+	go test -v -race -timeout 60s -run TestIntegration_NearCloud_Fixture ./internal/integration/
 
 vet: ## Run go vet
 	go vet ./cmd/... ./internal/...
