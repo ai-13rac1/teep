@@ -3,8 +3,12 @@ package e2ee_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -480,4 +484,325 @@ func truncate(b []byte, maxLen int) string {
 		return string(b)
 	}
 	return string(b[:maxLen]) + "..."
+}
+
+// --------------------------------------------------------------------------
+// Encrypted rerank input test
+// --------------------------------------------------------------------------
+
+// TestIntegration_NearCloud_Rerank_EncryptedInput tests what happens when we
+// encrypt the "query" and "documents" fields of a rerank request. If the server
+// supported E2EE for rerank, it would decrypt these fields before processing.
+func TestIntegration_NearCloud_Rerank_EncryptedInput(t *testing.T) {
+	skipNearCloudE2EEIntegration(t)
+
+	const model = "Qwen/Qwen3-Reranker-0.6B"
+	signingKey := fetchSigningKey(t, model)
+	session := createE2EESession(t, signingKey)
+	defer session.Zero()
+
+	// Encrypt the query.
+	encQuery, err := e2ee.EncryptXChaCha20([]byte("What is deep learning?"), session.ModelX25519Pub())
+	if err != nil {
+		t.Fatalf("encrypt query: %v", err)
+	}
+
+	// Encrypt each document.
+	docs := []string{
+		"Deep learning is a subset of machine learning.",
+		"The weather today is sunny.",
+		"Neural networks have multiple layers.",
+	}
+	encDocs := make([]string, len(docs))
+	for i, d := range docs {
+		enc, encErr := e2ee.EncryptXChaCha20([]byte(d), session.ModelX25519Pub())
+		if encErr != nil {
+			t.Fatalf("encrypt document %d: %v", i, encErr)
+		}
+		encDocs[i] = enc
+	}
+
+	// Build JSON with encrypted fields.
+	type rerankReq struct {
+		Model     string   `json:"model"`
+		Query     string   `json:"query"`
+		Documents []string `json:"documents"`
+		TopN      int      `json:"top_n"`
+	}
+	reqBody, err := json.Marshal(rerankReq{
+		Model:     model,
+		Query:     encQuery,
+		Documents: encDocs,
+		TopN:      2,
+	})
+	if err != nil {
+		t.Fatalf("marshal rerank request: %v", err)
+	}
+
+	e2eeResp := nearcloudE2EERequest(t, "/v1/rerank", reqBody, "application/json", session)
+	e2eeBody := readBody(t, e2eeResp)
+	e2eeResp.Body.Close()
+	t.Logf("encrypted rerank: status=%d body_len=%d", e2eeResp.StatusCode, len(e2eeBody))
+	t.Logf("encrypted rerank response: %s", truncate(e2eeBody, 500))
+
+	switch e2eeResp.StatusCode {
+	case http.StatusOK:
+		var result struct {
+			Results []struct {
+				Index          int     `json:"index"`
+				RelevanceScore float64 `json:"relevance_score"`
+				Document       struct {
+					Text string `json:"text"`
+				} `json:"document"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(e2eeBody, &result); err == nil && len(result.Results) > 0 {
+			t.Log("FINDING: Server reranked the CIPHERTEXT as if it were plaintext")
+			for _, r := range result.Results {
+				docPreview := r.Document.Text
+				if len(docPreview) > 40 {
+					docPreview = docPreview[:40] + "..."
+				}
+				t.Logf("  rank: doc[%d] score=%.4f text=%q", r.Index, r.RelevanceScore, docPreview)
+			}
+			t.Log("CONCLUSION: Server does NOT decrypt query/documents — E2EE is NOT end-to-end for rerank")
+		} else {
+			bodyStr := string(e2eeBody)
+			if e2ee.IsEncryptedChunkXChaCha20(strings.TrimSpace(bodyStr)) {
+				t.Log("FINDING: Server returned encrypted response for encrypted rerank input")
+				t.Log("CONCLUSION: Server MAY support true E2EE for rerank")
+			} else {
+				t.Logf("FINDING: Unexpected response format: %s", truncate(e2eeBody, 300))
+			}
+		}
+	default:
+		t.Logf("FINDING: Server rejected encrypted rerank input: status=%d body=%s",
+			e2eeResp.StatusCode, truncate(e2eeBody, 500))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Encrypted audio transcription input test
+// --------------------------------------------------------------------------
+
+// TestIntegration_NearCloud_Audio_EncryptedInput tests what happens when we
+// encrypt the WAV file data before sending it via multipart. If the server
+// supported E2EE for audio, it would decrypt the file content before transcription.
+func TestIntegration_NearCloud_Audio_EncryptedInput(t *testing.T) {
+	skipNearCloudE2EEIntegration(t)
+
+	const model = "openai/whisper-large-v3"
+	signingKey := fetchSigningKey(t, model)
+	session := createE2EESession(t, signingKey)
+	defer session.Zero()
+
+	wavData := makeMinimalWAV()
+
+	// Encrypt the WAV file content.
+	encWAV, err := e2ee.EncryptXChaCha20(wavData, session.ModelX25519Pub())
+	if err != nil {
+		t.Fatalf("encrypt WAV data: %v", err)
+	}
+	t.Logf("encrypted WAV hex length: %d chars (original WAV: %d bytes)", len(encWAV), len(wavData))
+
+	// Build multipart with the encrypted WAV data as the file content.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("model", model); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	fw, err := mw.CreateFormFile("file", "test.wav")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	// Write the hex-encoded ciphertext as the file content.
+	if _, err := fw.Write([]byte(encWAV)); err != nil {
+		t.Fatalf("write encrypted wav: %v", err)
+	}
+	mw.Close()
+
+	e2eeResp := nearcloudE2EERequest(t, "/v1/audio/transcriptions", buf.Bytes(), mw.FormDataContentType(), session)
+	e2eeBody := readBody(t, e2eeResp)
+	e2eeResp.Body.Close()
+	t.Logf("encrypted audio: status=%d body=%s", e2eeResp.StatusCode, truncate(e2eeBody, 500))
+
+	switch e2eeResp.StatusCode {
+	case http.StatusOK:
+		var result struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(e2eeBody, &result); err == nil {
+			t.Logf("FINDING: Server returned transcription text: %q", result.Text)
+			t.Log("Server processed the ciphertext bytes as audio input")
+			t.Log("CONCLUSION: Server does NOT decrypt audio file content — E2EE is NOT end-to-end for audio")
+		} else {
+			bodyStr := string(e2eeBody)
+			if e2ee.IsEncryptedChunkXChaCha20(strings.TrimSpace(bodyStr)) {
+				t.Log("FINDING: Server returned encrypted audio response")
+				t.Log("CONCLUSION: Server MAY support true E2EE for audio")
+			} else {
+				t.Logf("FINDING: Unexpected response: %s", truncate(e2eeBody, 300))
+			}
+		}
+	default:
+		// An error is the most likely outcome: the encrypted data is not valid WAV.
+		t.Logf("FINDING: Server rejected encrypted audio file: status=%d", e2eeResp.StatusCode)
+		t.Log("The ciphertext is not valid WAV, so the server cannot process it")
+		t.Log("CONCLUSION: Server does NOT decrypt the audio file — E2EE is NOT end-to-end for audio")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Encrypted VL (vision-language) chat input test
+// --------------------------------------------------------------------------
+
+// testPNG8x8 returns a valid 8x8 solid red PNG image as bytes.
+func testPNG8x8() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	red := color.RGBA{R: 255, A: 255}
+	for y := range 8 {
+		for x := range 8 {
+			img.Set(x, y, red)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+// TestIntegration_NearCloud_VL_EncryptedImage tests what happens when a VL
+// (vision-language) chat request includes an encrypted image. The standard
+// EncryptChatMessagesNearCloud only encrypts message content strings, but VL
+// messages use structured content arrays with image_url objects. This test
+// verifies whether the server can handle encrypted image data in a VL request.
+func TestIntegration_NearCloud_VL_EncryptedImage(t *testing.T) {
+	skipNearCloudE2EEIntegration(t)
+
+	const model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+	signingKey := fetchSigningKey(t, model)
+	session := createE2EESession(t, signingKey)
+	defer session.Zero()
+
+	// First: baseline plaintext VL request to verify the model works.
+	pngData := testPNG8x8()
+	pngB64 := base64.StdEncoding.EncodeToString(pngData)
+	plaintextBody := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "What color is this image? Answer in one word."},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}
+			]
+		}],
+		"stream": false,
+		"max_tokens": 50
+	}`, model, pngB64)
+
+	ptResp := nearcloudPlaintextRequest(t, "/v1/chat/completions", []byte(plaintextBody), "application/json")
+	ptBody := readBody(t, ptResp)
+	ptResp.Body.Close()
+	t.Logf("plaintext VL: status=%d body_len=%d", ptResp.StatusCode, len(ptBody))
+
+	if ptResp.StatusCode == http.StatusOK {
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(ptBody, &chatResp); err == nil && len(chatResp.Choices) > 0 {
+			t.Logf("plaintext VL response: %q", chatResp.Choices[0].Message.Content)
+		}
+	} else {
+		t.Logf("plaintext VL response: %s", truncate(ptBody, 300))
+	}
+
+	// Now: encrypt the image data and embed it in a VL chat request.
+	// Encrypt the base64 PNG data URL just as EncryptChatMessagesNearCloud
+	// would encrypt message content strings.
+	imgDataURL := "data:image/png;base64," + pngB64
+	encImage, err := e2ee.EncryptXChaCha20([]byte(imgDataURL), session.ModelX25519Pub())
+	if err != nil {
+		t.Fatalf("encrypt image data: %v", err)
+	}
+
+	// Also encrypt the text prompt.
+	encText, err := e2ee.EncryptXChaCha20([]byte("What color is this image? Answer in one word."), session.ModelX25519Pub())
+	if err != nil {
+		t.Fatalf("encrypt text: %v", err)
+	}
+
+	// Build the VL request with encrypted content parts.
+	// The content array has structured objects — EncryptChatMessagesNearCloud
+	// only handles flat string content, not structured VL content arrays.
+	encVLBody := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": %q},
+				{"type": "image_url", "image_url": {"url": %q}}
+			]
+		}],
+		"stream": true,
+		"max_tokens": 50
+	}`, model, encText, encImage)
+
+	e2eeResp := nearcloudE2EERequest(t, "/v1/chat/completions", []byte(encVLBody), "application/json", session)
+	e2eeBody := readBody(t, e2eeResp)
+	e2eeResp.Body.Close()
+	t.Logf("encrypted VL: status=%d body_len=%d", e2eeResp.StatusCode, len(e2eeBody))
+	t.Logf("encrypted VL response: %s", truncate(e2eeBody, 500))
+
+	switch e2eeResp.StatusCode {
+	case http.StatusOK:
+		// Check if any SSE data chunks contain encrypted content.
+		bodyStr := string(e2eeBody)
+		hasEncrypted := false
+		hasPlaintext := false
+		for line := range strings.SplitSeq(bodyStr, "\n") {
+			line = strings.TrimPrefix(line, "data: ")
+			line = strings.TrimSpace(line)
+			if line == "" || line == "[DONE]" {
+				continue
+			}
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(line), &chunk); err == nil && len(chunk.Choices) > 0 {
+				c := chunk.Choices[0].Delta.Content
+				if c == "" {
+					continue
+				}
+				if e2ee.IsEncryptedChunkXChaCha20(c) {
+					hasEncrypted = true
+				} else {
+					hasPlaintext = true
+				}
+			}
+		}
+		switch {
+		case hasEncrypted && !hasPlaintext:
+			t.Log("FINDING: Server returned ENCRYPTED SSE chunks for encrypted VL input")
+			t.Log("The server encrypted the response — but the input image was ciphertext, not a real image")
+			t.Log("CONCLUSION: E2EE encrypts the response but cannot decrypt structured VL content arrays")
+		case hasPlaintext:
+			t.Log("FINDING: Server returned PLAINTEXT SSE chunks despite E2EE headers and encrypted input")
+			t.Log("CONCLUSION: Server does NOT handle encrypted VL content — E2EE does not cover VL messages")
+		default:
+			t.Logf("FINDING: Unexpected SSE response pattern (encrypted=%v plaintext=%v)", hasEncrypted, hasPlaintext)
+		}
+	default:
+		t.Logf("FINDING: Server rejected encrypted VL request: status=%d body=%s",
+			e2eeResp.StatusCode, truncate(e2eeBody, 500))
+		t.Log("CONCLUSION: Server cannot process encrypted image URLs in VL content arrays")
+	}
 }
