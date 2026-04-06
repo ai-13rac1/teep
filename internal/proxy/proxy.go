@@ -1097,10 +1097,12 @@ func (s *Server) handleE2EEDecryptionFailure(
 
 	// Demote e2ee_usable in the cached report so the report endpoint
 	// reflects the failure. The cache entry is about to be deleted, but
-	// a concurrent reader may still see it briefly.
+	// a concurrent reader may still see it briefly. Keep the report detail
+	// sanitized: relayErr may wrap lower-level decrypt errors that include
+	// upstream content, which must never be exposed via the report endpoint.
 	if cachedReport, ok := s.cache.Get(prov.Name, upstreamModel); ok {
 		cloned := cachedReport.Clone()
-		cloned.MarkE2EEFailed("E2EE decryption failed: " + relayErr.Error())
+		cloned.MarkE2EEFailed("E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
 		s.cache.Put(prov.Name, upstreamModel, cloned)
 	}
 
@@ -1284,10 +1286,11 @@ func (s *Server) handlePinnedPostRelay(
 		s.e2eeFailed.Store(providerModelKey{prov.Name, upstreamModel}, true)
 
 		// Demote e2ee_usable in the cached report so the report endpoint
-		// reflects the failure before the cache entry is deleted.
+		// reflects the failure before the cache entry is deleted. Keep detail
+		// sanitized: relayErr may include upstream content.
 		if cachedReport, ok := s.cache.Get(prov.Name, upstreamModel); ok {
 			cloned := cachedReport.Clone()
-			cloned.MarkE2EEFailed("pinned E2EE decryption failed: " + relayErr.Error())
+			cloned.MarkE2EEFailed("pinned E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
 			s.cache.Put(prov.Name, upstreamModel, cloned)
 		}
 
