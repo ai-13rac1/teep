@@ -303,28 +303,32 @@ func ParseAttestationResponse(ctx context.Context, instancesBody, evidenceBody [
 // /e2e/invoke endpoint and sets the required headers.
 type Preparer struct {
 	apiKey     string
-	chatPath   string
 	apiBaseURL string // platform API base (e.g. https://api.chutes.ai)
 }
 
-// NewPreparer returns a Chutes Preparer configured with the given API key,
-// chat path, and platform API base URL. The apiBaseURL is used for E2EE
-// invoke URL rewriting (the LLM inference and platform APIs use different hosts).
-func NewPreparer(apiKey, chatPath, apiBaseURL string) *Preparer {
-	return &Preparer{apiKey: apiKey, chatPath: chatPath, apiBaseURL: apiBaseURL}
+// NewPreparer returns a Chutes Preparer configured with the given API key
+// and platform API base URL. The apiBaseURL is used for E2EE invoke URL
+// rewriting (the LLM inference and platform APIs use different hosts).
+// Endpoint paths are passed dynamically per-request via PrepareRequest.
+func NewPreparer(apiKey, apiBaseURL string) *Preparer {
+	return &Preparer{apiKey: apiKey, apiBaseURL: apiBaseURL}
 }
 
 // PrepareRequest injects the Authorization header into req. For Chutes E2EE
 // sessions, it also sets the E2EE headers and rewrites the full URL to the
-// platform API's /e2e/invoke endpoint.
-func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.ChutesE2EE, stream bool) error {
+// platform API's /e2e/invoke endpoint. The path parameter specifies the
+// TEE-internal endpoint path for X-E2E-Path (e.g. "/v1/embeddings").
+func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, meta *e2ee.ChutesE2EE, stream bool, path string) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	if meta != nil {
+		if path == "" {
+			return errors.New("chutes E2EE: endpoint path is required but empty")
+		}
 		req.Header.Set("X-Chute-Id", meta.ChuteID)
 		req.Header.Set("X-Instance-Id", meta.InstanceID)
 		req.Header["X-E2E-Nonce"] = []string{meta.E2ENonce}
 		req.Header["X-E2E-Stream"] = []string{strconv.FormatBool(stream)}
-		req.Header["X-E2E-Path"] = []string{p.chatPath}
+		req.Header["X-E2E-Path"] = []string{path}
 		req.Header.Set("Content-Type", "application/octet-stream")
 		// E2EE invoke is on the platform API (api.chutes.ai), not the
 		// LLM inference gateway (llm.chutes.ai). We must also set

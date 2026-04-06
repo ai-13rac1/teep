@@ -46,19 +46,22 @@ type E2EEMaterialFetcher interface {
 // RequestPreparer injects provider-specific headers into an outgoing upstream
 // request. e2eeHeaders contains pre-built E2EE protocol headers (may be nil
 // for plaintext or Chutes paths). meta is non-nil for Chutes requests.
+// path is the endpoint path for this request (e.g. "/v1/embeddings"); used by
+// Chutes to set X-E2E-Path dynamically per endpoint type.
 type RequestPreparer interface {
-	PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool) error
+	PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool, path string) error
 }
 
-// RequestEncryptor encrypts an outgoing chat request body for a provider's
-// E2EE protocol. Returns the encrypted body, a Decryptor for response
-// decryption, optional Chutes metadata, and any error.
+// RequestEncryptor encrypts an outgoing request body for a provider's E2EE
+// protocol. The endpointPath (e.g. "/v1/chat/completions", "/v1/images/generations")
+// tells the encryptor which fields to encrypt. Returns the encrypted body, a
+// Decryptor for response decryption, optional Chutes metadata, and any error.
 //
 // For Chutes, Decryptor is nil; crypto state is carried in *e2ee.ChutesE2EE
 // instead (the Chutes protocol uses a different relay path).
 // For Venice and NearCloud, *e2ee.ChutesE2EE is nil.
 type RequestEncryptor interface {
-	EncryptRequest(body []byte, raw *attestation.RawAttestation) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)
+	EncryptRequest(body []byte, raw *attestation.RawAttestation, endpointPath string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)
 }
 
 // PinnedHandler handles chat requests on a connection-pinned TLS connection
@@ -134,6 +137,22 @@ type Provider struct {
 
 	// ChatPath is the API path for chat completions (e.g. "/api/v1/chat/completions").
 	ChatPath string
+
+	// EmbeddingsPath is the upstream API path for embeddings (e.g. "/v1/embeddings").
+	// Empty means the provider does not support embeddings via this proxy.
+	EmbeddingsPath string
+
+	// AudioPath is the upstream API path for audio transcriptions
+	// (e.g. "/v1/audio/transcriptions"). Empty means unsupported.
+	AudioPath string
+
+	// ImagesPath is the upstream API path for image generations
+	// (e.g. "/v1/images/generations"). Empty means unsupported.
+	ImagesPath string
+
+	// RerankPath is the upstream API path for reranking
+	// (e.g. "/v1/rerank"). Empty means unsupported.
+	RerankPath string
 
 	// E2EE indicates whether this provider supports end-to-end encryption.
 	E2EE bool

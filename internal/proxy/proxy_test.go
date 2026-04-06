@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -341,7 +342,8 @@ func extractDeltaContent(t *testing.T, chunkJSON string) string {
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"delta"`
 		} `json:"choices"`
 	}
@@ -351,7 +353,12 @@ func extractDeltaContent(t *testing.T, chunkJSON string) string {
 	if len(chunk.Choices) == 0 {
 		return ""
 	}
-	return chunk.Choices[0].Delta.Content
+	// Thinking models (e.g. Qwen3.5) emit reasoning in reasoning_content
+	// and may leave content empty. Fall back so callers see useful text.
+	if c := chunk.Choices[0].Delta.Content; c != "" {
+		return c
+	}
+	return chunk.Choices[0].Delta.ReasoningContent
 }
 
 // extractMessageContent extracts message.content from a non-streaming response.
@@ -430,6 +437,616 @@ func TestInvalidJSONBody400(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// pathCapturingPinnedHandler records the PinnedRequest.Path from each call
+// and returns a stub OK response.
+type pathCapturingPinnedHandler struct {
+	mu   sync.Mutex
+	path string
+}
+
+func (h *pathCapturingPinnedHandler) HandlePinned(_ context.Context, req *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	h.mu.Lock()
+	h.path = req.Path
+	h.mu.Unlock()
+	body := io.NopCloser(strings.NewReader(`{"object":"list","data":[{"object":"embedding","embedding":[0.1],"index":0}],"model":"test-model","usage":{"prompt_tokens":5,"total_tokens":5}}`))
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+		Report: &attestation.VerificationReport{
+			Provider: "neardirect",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+			},
+		},
+	}, nil
+}
+
+// newNeardirectProxyServer creates a neardirect-backed proxy server with all
+// endpoint paths wired and a stub PinnedHandler attached.
+func newNeardirectProxyServer(t *testing.T, handler provider.PinnedHandler) *httptest.Server {
+	t.Helper()
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	prov := srv.ProviderByName("neardirect")
+	prov.PinnedHandler = handler
+	return httptest.NewServer(srv)
+}
+
+// sessionPinnedHandler returns a non-nil Session in PinnedResponse, simulating
+// an upstream that returned E2EE-encrypted data on a non-chat endpoint.
+type sessionPinnedHandler struct{}
+
+// fakeDecryptor satisfies e2ee.Decryptor for testing.
+type fakeDecryptor struct{}
+
+func (fakeDecryptor) IsEncryptedChunk(string) bool   { return false }
+func (fakeDecryptor) Decrypt(string) ([]byte, error) { return nil, errors.New("fake") }
+func (fakeDecryptor) Zero()                          {}
+
+func (sessionPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	body := io.NopCloser(strings.NewReader(`{"data":"encrypted"}`))
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+		Session:    fakeDecryptor{},
+		Report: &attestation.VerificationReport{
+			Provider: "neardirect",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+			},
+		},
+	}, nil
+}
+
+// --------------------------------------------------------------------------
+// Embeddings endpoint tests
+// --------------------------------------------------------------------------
+
+func TestEmbeddings_MissingModel400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("POST embeddings: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestEmbeddings_InvalidJSON400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatalf("POST embeddings: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestEmbeddings_PinnedOK(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("POST embeddings: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/embeddings" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/embeddings", gotPath)
+	}
+}
+
+func TestEmbeddings_ProviderDoesNotSupport400(t *testing.T) {
+	// Venice has no EmbeddingsPath set.
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("POST embeddings: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Images endpoint tests
+// --------------------------------------------------------------------------
+
+func TestImages_MissingModel400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/images/generations", "application/json",
+		strings.NewReader(`{"prompt":"a cat"}`))
+	if err != nil {
+		t.Fatalf("POST images: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestImages_InvalidJSON400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/images/generations", "application/json",
+		strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatalf("POST images: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestImages_PinnedOK(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/images/generations", "application/json",
+		strings.NewReader(`{"model":"test-model","prompt":"a cat","n":1}`))
+	if err != nil {
+		t.Fatalf("POST images: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/images/generations" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/images/generations", gotPath)
+	}
+}
+
+func TestImages_PinnedE2EESessionRelayed(t *testing.T) {
+	// When a pinned non-chat endpoint returns an E2EE session, the proxy
+	// decrypts the response via RelayNonStream and forwards to the client.
+	// fakeDecryptor.IsEncryptedChunk returns false, so the body passes through.
+	proxySrv := newNeardirectProxyServer(t, sessionPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/images/generations", "application/json",
+		strings.NewReader(`{"model":"test-model","prompt":"a cat","n":1}`))
+	if err != nil {
+		t.Fatalf("POST images: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestImages_ProviderDoesNotSupport400(t *testing.T) {
+	// Venice has no ImagesPath set.
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/images/generations", "application/json",
+		strings.NewReader(`{"model":"test-model","prompt":"a cat"}`))
+	if err != nil {
+		t.Fatalf("POST images: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// headerPinnedHandler returns upstream response headers alongside the body,
+// allowing tests to verify the proxy forwards them to the client.
+type headerPinnedHandler struct {
+	extraHeaders http.Header
+}
+
+func (h headerPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	hdr := http.Header{"Content-Type": []string{"application/json"}}
+	maps.Copy(hdr, h.extraHeaders)
+	body := io.NopCloser(strings.NewReader(`{"data":"ok"}`))
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     hdr,
+		Body:       body,
+		Report: &attestation.VerificationReport{
+			Provider: "neardirect",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+			},
+		},
+	}, nil
+}
+
+func TestNonChat_PinnedOK_ForwardsUpstreamHeaders(t *testing.T) {
+	// Regression: handlePinnedNonChat must forward upstream response headers
+	// (rate-limit, request IDs, etc.) to the client, matching handlePinnedChat.
+	handler := headerPinnedHandler{
+		extraHeaders: http.Header{
+			"X-Request-Id":          []string{"req-abc-123"},
+			"X-Ratelimit-Remaining": []string{"42"},
+		},
+	}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	endpoints := []struct {
+		path string
+		body string
+	}{
+		{"/v1/embeddings", `{"model":"test-model","input":"hello"}`},
+		{"/v1/images/generations", `{"model":"test-model","prompt":"a cat","n":1}`},
+	}
+	for _, ep := range endpoints {
+		t.Run(ep.path, func(t *testing.T) {
+			resp, err := http.Post(proxySrv.URL+ep.path, "application/json",
+				strings.NewReader(ep.body))
+			if err != nil {
+				t.Fatalf("POST %s: %v", ep.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+			}
+
+			if got := resp.Header.Get("X-Request-Id"); got != "req-abc-123" {
+				t.Errorf("X-Request-Id = %q, want %q", got, "req-abc-123")
+			}
+			if got := resp.Header.Get("X-Ratelimit-Remaining"); got != "42" {
+				t.Errorf("X-Ratelimit-Remaining = %q, want %q", got, "42")
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// Audio transcriptions endpoint tests
+// --------------------------------------------------------------------------
+
+func TestAudio_MissingModel400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	// Multipart form without model field.
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAudio_PinnedOK(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	// Multipart form with model field.
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ntest-model\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/audio/transcriptions" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/audio/transcriptions", gotPath)
+	}
+}
+
+func TestAudio_PinnedOK_FileBeforeModel(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	// Multipart form with file field before model field (reversed order).
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ntest-model\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/audio/transcriptions" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/audio/transcriptions", gotPath)
+	}
+}
+
+func TestAudio_ProviderDoesNotSupport400(t *testing.T) {
+	// Venice has no AudioPath set.
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ntest-model\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestAudio_NonPinnedE2EEFails400(t *testing.T) {
+	// Chutes has E2EE=true and no PinnedHandler (app-layer E2EE).
+	// Audio multipart must fail-closed for non-pinned E2EE.
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"chutes": {
+				Name:    "chutes",
+				BaseURL: "https://api.chutes.ai",
+				APIKey:  "key",
+				E2EE:    true,
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	// chutes has no AudioPath set by default, but force one to test the E2EE guard.
+	prov := srv.ProviderByName("chutes")
+	prov.AudioPath = "/v1/audio/transcriptions"
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ntest-model\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestAudio_OversizedModelField400(t *testing.T) {
+	// Regression: extractMultipartField must reject fields exceeding the size
+	// limit instead of silently truncating them.
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	oversized := strings.Repeat("a", 1025)
+	var buf bytes.Buffer
+	buf.WriteString("--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n")
+	buf.WriteString(oversized)
+	buf.WriteString("\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.wav\"\r\nContent-Type: audio/wav\r\n\r\naudiodata\r\n--boundary--\r\n")
+	resp, err := http.Post(proxySrv.URL+"/v1/audio/transcriptions",
+		"multipart/form-data; boundary=boundary", &buf)
+	if err != nil {
+		t.Fatalf("POST audio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Rerank endpoint tests
+// --------------------------------------------------------------------------
+
+func TestRerank_MissingModel400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/rerank", "application/json",
+		strings.NewReader(`{"query":"hello","documents":["a","b"]}`))
+	if err != nil {
+		t.Fatalf("POST rerank: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRerank_InvalidJSON400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/rerank", "application/json",
+		strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatalf("POST rerank: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestRerank_PinnedOK(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/rerank", "application/json",
+		strings.NewReader(`{"model":"test-model","query":"hello","documents":["a","b"]}`))
+	if err != nil {
+		t.Fatalf("POST rerank: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/rerank" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/rerank", gotPath)
+	}
+}
+
+func TestRerank_ProviderDoesNotSupport400(t *testing.T) {
+	// Venice has no RerankPath set.
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/rerank", "application/json",
+		strings.NewReader(`{"model":"test-model","query":"hello","documents":["a","b"]}`))
+	if err != nil {
+		t.Fatalf("POST rerank: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Embeddings negative cache hit returns 503
+// --------------------------------------------------------------------------
+
+func TestEmbeddings_NegativeCache503(t *testing.T) {
+	handler := blockedPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	// First request: blocked attestation in pinned handler → 502.
+	resp1, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusBadGateway {
+		t.Errorf("first request status = %d, want 502", resp1.StatusCode)
+	}
+
+	// Second request: negative cache → 503.
+	resp2, err := http.Post(proxySrv.URL+"/v1/embeddings", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second request status = %d, want 503", resp2.StatusCode)
 	}
 }
 
@@ -2274,7 +2891,7 @@ type mockPreparer struct {
 	apiKey string
 }
 
-func (m *mockPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool) error {
+func (m *mockPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool, _ string) error {
 	m.called = true
 	req.Header.Set("Authorization", "Bearer "+m.apiKey)
 	return nil
@@ -2291,7 +2908,7 @@ func TestPrepareUpstreamHeaders_NilSession(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2311,7 +2928,7 @@ func TestPrepareUpstreamHeaders_NilSessionEmptyKey(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, nil, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2338,7 +2955,7 @@ func TestPrepareUpstreamHeaders_WithSession(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false); err != nil {
+	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false, "/v1/chat/completions"); err != nil {
 		t.Fatalf("PrepareUpstreamHeaders: %v", err)
 	}
 
@@ -2982,7 +3599,7 @@ func (m *mockE2EEFetcher) Invalidate(chuteID string) {
 // from meta.
 type passthroughEncryptor struct{}
 
-func (passthroughEncryptor) EncryptRequest(body []byte, _ *attestation.RawAttestation) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+func (passthroughEncryptor) EncryptRequest(body []byte, _ *attestation.RawAttestation, _ string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
 	return body, nil, nil, nil
 }
 
@@ -2991,7 +3608,7 @@ type noopPreparer struct {
 	apiKey string
 }
 
-func (p noopPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool) error {
+func (p noopPreparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool, _ string) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	return nil

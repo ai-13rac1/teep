@@ -291,7 +291,7 @@ func NewPreparer(apiKey string) *Preparer {
 }
 
 // PrepareRequest injects the NEAR AI Authorization header into req.
-func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool) error {
+func (p *Preparer) PrepareRequest(req *http.Request, _ http.Header, _ *e2ee.ChutesE2EE, _ bool, _ string) error {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	return nil
 }

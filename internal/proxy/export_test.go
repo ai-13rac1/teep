@@ -21,8 +21,8 @@ func (s *Server) SetNegativeCache(nc *attestation.NegativeCache) {
 }
 
 // PrepareUpstreamHeaders exposes prepareUpstreamHeaders for external tests.
-func PrepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool) error {
-	return prepareUpstreamHeaders(req, prov, session, meta, stream)
+func PrepareUpstreamHeaders(req *http.Request, prov *provider.Provider, session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool, endpointPath string) error {
+	return prepareUpstreamHeaders(req, prov, session, meta, stream, endpointPath)
 }
 
 // PutAttestationCache injects a report into the attestation cache.
