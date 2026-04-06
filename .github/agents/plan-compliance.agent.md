@@ -54,7 +54,7 @@ Follow the instructions in `.github/instructions/code-review.instructions.md` ex
 
 ## Output Format
 
-Produce a structured report with two sections:
+Produce a structured report with two parts plus an overall verdict:
 
 ### Part 1: Plan Compliance
 
