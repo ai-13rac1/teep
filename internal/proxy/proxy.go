@@ -2079,19 +2079,22 @@ func (s *Server) handlePinnedNonChat(
 		s.signingKeyCache.Put(prov.Name, upstreamModel, pinnedResp.SigningKey)
 	}
 
+	// Copy response headers, excluding hop-by-hop headers that Go's
+	// HTTP stack manages (matching handlePinnedChat's filtering).
+	for key, vals := range pinnedResp.Header {
+		switch key {
+		case "Transfer-Encoding", "Content-Encoding", "Content-Length", "Connection":
+			continue
+		}
+		for _, v := range vals {
+			w.Header().Add(key, v)
+		}
+	}
+
 	// Non-OK: forward error response directly (no E2EE decryption needed).
 	if pinnedResp.StatusCode != http.StatusOK {
 		if pinnedResp.Session != nil {
 			defer pinnedResp.Session.Zero()
-		}
-		for key, vals := range pinnedResp.Header {
-			switch key {
-			case "Transfer-Encoding", "Content-Encoding", "Content-Length", "Connection":
-				continue
-			}
-			for _, v := range vals {
-				w.Header().Add(key, v)
-			}
 		}
 		w.WriteHeader(pinnedResp.StatusCode)
 		_, _ = io.Copy(w, io.LimitReader(pinnedResp.Body, 10<<20))

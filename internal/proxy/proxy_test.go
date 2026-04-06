@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -698,6 +699,73 @@ func TestImages_ProviderDoesNotSupport400(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// headerPinnedHandler returns upstream response headers alongside the body,
+// allowing tests to verify the proxy forwards them to the client.
+type headerPinnedHandler struct {
+	extraHeaders http.Header
+}
+
+func (h headerPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
+	hdr := http.Header{"Content-Type": []string{"application/json"}}
+	maps.Copy(hdr, h.extraHeaders)
+	body := io.NopCloser(strings.NewReader(`{"data":"ok"}`))
+	return &provider.PinnedResponse{
+		StatusCode: http.StatusOK,
+		Header:     hdr,
+		Body:       body,
+		Report: &attestation.VerificationReport{
+			Provider: "neardirect",
+			Model:    "test-model",
+			Factors: []attestation.FactorResult{
+				{Name: "nonce_match", Status: attestation.Pass, Detail: "match"},
+			},
+		},
+	}, nil
+}
+
+func TestNonChat_PinnedOK_ForwardsUpstreamHeaders(t *testing.T) {
+	// Regression: handlePinnedNonChat must forward upstream response headers
+	// (rate-limit, request IDs, etc.) to the client, matching handlePinnedChat.
+	handler := headerPinnedHandler{
+		extraHeaders: http.Header{
+			"X-Request-Id":          []string{"req-abc-123"},
+			"X-Ratelimit-Remaining": []string{"42"},
+		},
+	}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	endpoints := []struct {
+		path string
+		body string
+	}{
+		{"/v1/embeddings", `{"model":"test-model","input":"hello"}`},
+		{"/v1/images/generations", `{"model":"test-model","prompt":"a cat","n":1}`},
+	}
+	for _, ep := range endpoints {
+		t.Run(ep.path, func(t *testing.T) {
+			resp, err := http.Post(proxySrv.URL+ep.path, "application/json",
+				strings.NewReader(ep.body))
+			if err != nil {
+				t.Fatalf("POST %s: %v", ep.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+			}
+
+			if got := resp.Header.Get("X-Request-Id"); got != "req-abc-123" {
+				t.Errorf("X-Request-Id = %q, want %q", got, "req-abc-123")
+			}
+			if got := resp.Header.Get("X-Ratelimit-Remaining"); got != "42" {
+				t.Errorf("X-Ratelimit-Remaining = %q, want %q", got, "42")
+			}
+		})
 	}
 }
 
