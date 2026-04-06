@@ -13,11 +13,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider/nanogpt"
@@ -1094,6 +1096,293 @@ func TestDoE2EEChutesStreamTest_HTTPError(t *testing.T) {
 	}
 	if !strings.Contains(result.Err.Error(), "401") {
 		t.Errorf("error should mention 401, got: %v", result.Err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// outcomeFromE2EEResult / e2eeResultFromOutcome round-trip tests
+// --------------------------------------------------------------------------
+
+func TestOutcomeFromE2EEResult_Nil(t *testing.T) {
+	if got := outcomeFromE2EEResult(nil); got != nil {
+		t.Errorf("outcomeFromE2EEResult(nil) = %v, want nil", got)
+	}
+}
+
+func TestE2EEResultFromOutcome_Nil(t *testing.T) {
+	if got := e2eeResultFromOutcome(nil); got != nil {
+		t.Errorf("e2eeResultFromOutcome(nil) = %v, want nil", got)
+	}
+}
+
+func TestOutcomeFromE2EEResult_Success(t *testing.T) {
+	r := &attestation.E2EETestResult{
+		Attempted: true,
+		APIKeyEnv: "VENICE_API_KEY",
+		Detail:    "2 encrypted chunks decrypted",
+	}
+	o := outcomeFromE2EEResult(r)
+	if !o.Attempted {
+		t.Error("Attempted should be true")
+	}
+	if o.Failed {
+		t.Error("Failed should be false")
+	}
+	if o.ErrMsg != "" {
+		t.Errorf("ErrMsg = %q, want empty", o.ErrMsg)
+	}
+	if o.APIKeyEnv != "VENICE_API_KEY" {
+		t.Errorf("APIKeyEnv = %q, want VENICE_API_KEY", o.APIKeyEnv)
+	}
+	if o.Detail != "2 encrypted chunks decrypted" {
+		t.Errorf("Detail = %q", o.Detail)
+	}
+}
+
+func TestOutcomeFromE2EEResult_WithError(t *testing.T) {
+	r := &attestation.E2EETestResult{
+		Attempted: true,
+		Err:       errors.New("decryption failed"),
+		Detail:    "failed after 1 chunk",
+	}
+	o := outcomeFromE2EEResult(r)
+	if !o.Failed {
+		t.Error("Failed should be true when Err is set")
+	}
+	if o.ErrMsg != "decryption failed" {
+		t.Errorf("ErrMsg = %q, want 'decryption failed'", o.ErrMsg)
+	}
+}
+
+func TestE2EEResultFromOutcome_Success(t *testing.T) {
+	o := &capture.E2EEOutcome{
+		Attempted: true,
+		APIKeyEnv: "NEARCLOUD_API_KEY",
+		Detail:    "ok",
+	}
+	r := e2eeResultFromOutcome(o)
+	if !r.Attempted {
+		t.Error("Attempted should be true")
+	}
+	if r.Err != nil {
+		t.Errorf("Err should be nil, got %v", r.Err)
+	}
+	if r.APIKeyEnv != "NEARCLOUD_API_KEY" {
+		t.Errorf("APIKeyEnv = %q", r.APIKeyEnv)
+	}
+}
+
+func TestE2EEResultFromOutcome_WithError(t *testing.T) {
+	o := &capture.E2EEOutcome{
+		Attempted: true,
+		Failed:    true,
+		ErrMsg:    "timeout",
+	}
+	r := e2eeResultFromOutcome(o)
+	if r.Err == nil {
+		t.Fatal("Err should be non-nil when Failed is true")
+	}
+	if r.Err.Error() != "timeout" {
+		t.Errorf("Err = %q, want 'timeout'", r.Err)
+	}
+}
+
+func TestE2EEResultFromOutcome_FailedEmptyMsg(t *testing.T) {
+	o := &capture.E2EEOutcome{
+		Attempted: true,
+		Failed:    true,
+		ErrMsg:    "",
+	}
+	r := e2eeResultFromOutcome(o)
+	if r.Err == nil {
+		t.Fatal("Err should be non-nil when Failed is true")
+	}
+	if r.Err.Error() == "" {
+		t.Error("Err message should not be empty for failed outcome with empty ErrMsg")
+	}
+}
+
+func TestOutcomeE2EERoundTrip(t *testing.T) {
+	original := &attestation.E2EETestResult{
+		Attempted: true,
+		NoAPIKey:  true,
+		APIKeyEnv: "CHUTES_API_KEY",
+		Err:       errors.New("connection refused"),
+		Detail:    "test detail",
+	}
+	outcome := outcomeFromE2EEResult(original)
+	restored := e2eeResultFromOutcome(outcome)
+
+	if restored.Attempted != original.Attempted {
+		t.Errorf("Attempted mismatch")
+	}
+	if restored.NoAPIKey != original.NoAPIKey {
+		t.Errorf("NoAPIKey mismatch")
+	}
+	if restored.APIKeyEnv != original.APIKeyEnv {
+		t.Errorf("APIKeyEnv mismatch")
+	}
+	if restored.Detail != original.Detail {
+		t.Errorf("Detail mismatch")
+	}
+	if restored.Err == nil {
+		t.Fatal("Err should survive round-trip")
+	}
+	if restored.Err.Error() != original.Err.Error() {
+		t.Errorf("Err message = %q, want %q", restored.Err.Error(), original.Err.Error())
+	}
+}
+
+// --------------------------------------------------------------------------
+// compareReports tests
+// --------------------------------------------------------------------------
+
+func TestCompareReports_Match(t *testing.T) {
+	report := "line1\nline2\nline3"
+	if err := compareReports(report, report); err != nil {
+		t.Errorf("compareReports with identical strings should return nil, got %v", err)
+	}
+}
+
+func TestCompareReports_Mismatch(t *testing.T) {
+	a := "line1\nline2"
+	b := "line1\nchanged"
+	err := compareReports(a, b)
+	if err == nil {
+		t.Fatal("compareReports should return error on mismatch")
+	}
+	if !strings.Contains(err.Error(), "differs") {
+		t.Errorf("error = %q, should mention 'differs'", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// printReportDiff tests
+// --------------------------------------------------------------------------
+
+// captureStderr redirects os.Stderr to a pipe for the duration of fn, returns
+// whatever fn wrote to stderr. Handles pipe errors and restores os.Stderr via
+// t.Cleanup so it is always restored even if fn panics.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = old; r.Close() })
+	fn()
+	w.Close()
+	os.Stderr = old
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestPrintReportDiff_IdenticalProducesNoOutput(t *testing.T) {
+	out := captureStderr(t, func() { printReportDiff("same\nlines", "same\nlines") })
+	if out != "" {
+		t.Errorf("identical strings should produce no diff output, got %q", out)
+	}
+}
+
+func TestPrintReportDiff_ShowsChangedLines(t *testing.T) {
+	out := captureStderr(t, func() { printReportDiff("aaa\nbbb\nccc", "aaa\nBBB\nccc") })
+	if !strings.Contains(out, "- bbb") {
+		t.Errorf("diff should show removed line '- bbb', got %q", out)
+	}
+	if !strings.Contains(out, "+ BBB") {
+		t.Errorf("diff should show added line '+ BBB', got %q", out)
+	}
+}
+
+func TestPrintReportDiff_DifferentLengths(t *testing.T) {
+	out := captureStderr(t, func() { printReportDiff("a\nb", "a\nb\nc") })
+	if !strings.Contains(out, "+ c") {
+		t.Errorf("diff should show added line '+ c', got %q", out)
+	}
+}
+
+// --------------------------------------------------------------------------
+// extractObserved tests
+// --------------------------------------------------------------------------
+
+func TestExtractObserved_AllFields(t *testing.T) {
+	report := &attestation.VerificationReport{
+		Metadata: map[string]string{
+			"mrseam":         "aabb",
+			"mrtd":           "ccdd",
+			"rtmr0":          "1111",
+			"rtmr1":          "2222",
+			"rtmr2":          "3333",
+			"gateway_mrseam": "gw-mrseam",
+			"gateway_mrtd":   "gw-mrtd",
+			"gateway_rtmr0":  "gw-rtmr0",
+			"gateway_rtmr1":  "gw-rtmr1",
+			"gateway_rtmr2":  "gw-rtmr2",
+		},
+	}
+	obs := extractObserved(report)
+	if obs.MRSeam != "aabb" {
+		t.Errorf("MRSeam = %q", obs.MRSeam)
+	}
+	if obs.MRTD != "ccdd" {
+		t.Errorf("MRTD = %q", obs.MRTD)
+	}
+	if obs.RTMR0 != "1111" {
+		t.Errorf("RTMR0 = %q", obs.RTMR0)
+	}
+	if obs.RTMR1 != "2222" {
+		t.Errorf("RTMR1 = %q", obs.RTMR1)
+	}
+	if obs.RTMR2 != "3333" {
+		t.Errorf("RTMR2 = %q", obs.RTMR2)
+	}
+	if obs.GatewayMRSeam != "gw-mrseam" {
+		t.Errorf("GatewayMRSeam = %q", obs.GatewayMRSeam)
+	}
+	if obs.GatewayMRTD != "gw-mrtd" {
+		t.Errorf("GatewayMRTD = %q", obs.GatewayMRTD)
+	}
+	if obs.GatewayRTMR0 != "gw-rtmr0" {
+		t.Errorf("GatewayRTMR0 = %q", obs.GatewayRTMR0)
+	}
+	if obs.GatewayRTMR1 != "gw-rtmr1" {
+		t.Errorf("GatewayRTMR1 = %q", obs.GatewayRTMR1)
+	}
+	if obs.GatewayRTMR2 != "gw-rtmr2" {
+		t.Errorf("GatewayRTMR2 = %q", obs.GatewayRTMR2)
+	}
+}
+
+func TestExtractObserved_MissingKeys(t *testing.T) {
+	report := &attestation.VerificationReport{
+		Metadata: map[string]string{
+			"mrtd": "only-mrtd",
+		},
+	}
+	obs := extractObserved(report)
+	if obs.MRTD != "only-mrtd" {
+		t.Errorf("MRTD = %q, want 'only-mrtd'", obs.MRTD)
+	}
+	if obs.MRSeam != "" {
+		t.Errorf("MRSeam should be empty, got %q", obs.MRSeam)
+	}
+	if obs.GatewayMRTD != "" {
+		t.Errorf("GatewayMRTD should be empty, got %q", obs.GatewayMRTD)
+	}
+}
+
+func TestExtractObserved_EmptyMetadata(t *testing.T) {
+	report := &attestation.VerificationReport{
+		Metadata: map[string]string{},
+	}
+	obs := extractObserved(report)
+	if obs.MRSeam != "" || obs.MRTD != "" || obs.RTMR0 != "" {
+		t.Error("all fields should be empty for empty metadata")
 	}
 }
 
