@@ -641,9 +641,10 @@ func checkNoMathRand(r *result, files []*ast.File, names []string) {
 // No json.Unmarshal in cmd/teep/main.go (use jsonstrict.UnmarshalWarn).
 func checkNoJSONUnmarshalCLI(r *result, files []*ast.File, names []string, fset *token.FileSet) {
 	const target = "cmd/teep/main.go"
+	normalizedTarget := filepath.ToSlash(filepath.Clean(target))
 	var violations []string
 	for i, f := range files {
-		if names[i] != target {
+		if filepath.ToSlash(filepath.Clean(names[i])) != normalizedTarget {
 			continue
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
