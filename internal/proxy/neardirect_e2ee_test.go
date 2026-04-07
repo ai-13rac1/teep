@@ -193,7 +193,7 @@ func TestNeardirectE2EE_PlaintextFallback(t *testing.T) {
 }
 
 // TestNeardirectE2EE_UnsupportedEndpoint verifies that E2EE requests to
-// endpoints not supported by nearcloud.NewE2EE (embeddings, audio, rerank)
+// endpoints not supported by neardirect.NewE2EE (embeddings, audio, rerank)
 // fail closed — the encryptor returns an error rather than sending plaintext.
 func TestNeardirectE2EE_UnsupportedEndpoint(t *testing.T) {
 	ts := newMockNeardirectE2EEServer(t, true)

@@ -1,6 +1,6 @@
 {
   "method": "GET",
-  "url": "https://qwen35-122b.completions.near.ai/v1/attestation/report?include_tls_fingerprint=true\u0026nonce=6eb76c62de6d4c951703f69c502490634a4c265a4c6739a08d2a292251153d30\u0026signing_algo=ecdsa",
+  "url": "https://qwen35-122b.completions.near.ai/v1/attestation/report?include_tls_fingerprint=true\u0026nonce=6eb76c62de6d4c951703f69c502490634a4c265a4c6739a08d2a292251153d30\u0026signing_algo=ed25519",
   "status": 200,
   "proto": "HTTP/1.1",
   "tls_version": "TLS 1.3",

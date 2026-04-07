@@ -1,4 +1,4 @@
-package nearcloud_test
+package neardirect_test
 
 import (
 	"crypto/ed25519"
@@ -9,7 +9,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/e2ee"
-	"github.com/13rac1/teep/internal/provider/nearcloud"
+	"github.com/13rac1/teep/internal/provider/neardirect"
 )
 
 func ed25519ModelPubHex(t *testing.T) string {
@@ -21,10 +21,10 @@ func ed25519ModelPubHex(t *testing.T) string {
 	return hex.EncodeToString(pub)
 }
 
-func nearcloudChatBody(t *testing.T) []byte {
+func nearE2EEChatBody(t *testing.T) []byte {
 	t.Helper()
 	body := map[string]any{
-		"model":    "nearcloud-model",
+		"model":    "test-model",
 		"messages": []map[string]string{{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}},
 		"stream":   false,
 	}
@@ -35,12 +35,12 @@ func nearcloudChatBody(t *testing.T) []byte {
 	return b
 }
 
-func TestNearCloudE2EE_EncryptRequest(t *testing.T) {
+func TestE2EE_EncryptRequest(t *testing.T) {
 	pubHex := ed25519ModelPubHex(t)
 	raw := &attestation.RawAttestation{SigningKey: pubHex}
 
-	enc := nearcloud.NewE2EE()
-	encBody, decryptor, chutesE2EE, err := enc.EncryptRequest(nearcloudChatBody(t), raw, "/v1/chat/completions")
+	enc := neardirect.NewE2EE()
+	encBody, decryptor, chutesE2EE, err := enc.EncryptRequest(nearE2EEChatBody(t), raw, "/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("EncryptRequest: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestNearCloudE2EE_EncryptRequest(t *testing.T) {
 		t.Fatal("expected non-nil Decryptor")
 	}
 	if chutesE2EE != nil {
-		t.Error("expected nil ChutesE2EE for NearCloud")
+		t.Error("expected nil ChutesE2EE for NEAR AI")
 	}
 
 	t.Logf("encrypted body length: %d", len(encBody))
@@ -102,20 +102,20 @@ func TestNearCloudE2EE_EncryptRequest(t *testing.T) {
 	}
 }
 
-func TestNearCloudE2EE_EncryptRequest_InvalidSigningKey(t *testing.T) {
+func TestE2EE_EncryptRequest_InvalidSigningKey(t *testing.T) {
 	raw := &attestation.RawAttestation{SigningKey: "bad-key"}
-	enc := nearcloud.NewE2EE()
-	_, _, _, err := enc.EncryptRequest(nearcloudChatBody(t), raw, "/v1/chat/completions")
+	enc := neardirect.NewE2EE()
+	_, _, _, err := enc.EncryptRequest(nearE2EEChatBody(t), raw, "/v1/chat/completions")
 	t.Logf("invalid signing key error: %v", err)
 	if err == nil {
 		t.Fatal("expected error for invalid signing key")
 	}
 }
 
-func TestNearCloudE2EE_EncryptRequest_InvalidBody(t *testing.T) {
+func TestE2EE_EncryptRequest_InvalidBody(t *testing.T) {
 	pubHex := ed25519ModelPubHex(t)
 	raw := &attestation.RawAttestation{SigningKey: pubHex}
-	enc := nearcloud.NewE2EE()
+	enc := neardirect.NewE2EE()
 	_, _, _, err := enc.EncryptRequest([]byte("not json"), raw, "/v1/chat/completions")
 	t.Logf("invalid body error: %v", err)
 	if err == nil {
@@ -123,10 +123,10 @@ func TestNearCloudE2EE_EncryptRequest_InvalidBody(t *testing.T) {
 	}
 }
 
-func TestNearCloudE2EE_EncryptRequest_InvalidMessages(t *testing.T) {
+func TestE2EE_EncryptRequest_InvalidMessages(t *testing.T) {
 	pubHex := ed25519ModelPubHex(t)
 	raw := &attestation.RawAttestation{SigningKey: pubHex}
-	enc := nearcloud.NewE2EE()
+	enc := neardirect.NewE2EE()
 	_, _, _, err := enc.EncryptRequest([]byte(`{"model":"m","messages":"not-an-array"}`), raw, "/v1/chat/completions")
 	t.Logf("invalid messages error: %v", err)
 	if err == nil {
@@ -134,7 +134,7 @@ func TestNearCloudE2EE_EncryptRequest_InvalidMessages(t *testing.T) {
 	}
 }
 
-func nearcloudImageBody(t *testing.T) []byte {
+func nearE2EEImageBody(t *testing.T) []byte {
 	t.Helper()
 	body := map[string]any{
 		"model":  "flux-model",
@@ -149,12 +149,12 @@ func nearcloudImageBody(t *testing.T) []byte {
 	return b
 }
 
-func TestNearCloudE2EE_EncryptRequest_Images(t *testing.T) {
+func TestE2EE_EncryptRequest_Images(t *testing.T) {
 	pubHex := ed25519ModelPubHex(t)
 	raw := &attestation.RawAttestation{SigningKey: pubHex}
 
-	enc := nearcloud.NewE2EE()
-	encBody, decryptor, chutesE2EE, err := enc.EncryptRequest(nearcloudImageBody(t), raw, "/v1/images/generations")
+	enc := neardirect.NewE2EE()
+	encBody, decryptor, chutesE2EE, err := enc.EncryptRequest(nearE2EEImageBody(t), raw, "/v1/images/generations")
 	if err != nil {
 		t.Fatalf("EncryptRequest images: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestNearCloudE2EE_EncryptRequest_Images(t *testing.T) {
 		t.Fatal("expected non-nil Decryptor")
 	}
 	if chutesE2EE != nil {
-		t.Error("expected nil ChutesE2EE for NearCloud")
+		t.Error("expected nil ChutesE2EE for NEAR AI")
 	}
 
 	// Parse and verify structure.
@@ -195,10 +195,10 @@ func TestNearCloudE2EE_EncryptRequest_Images(t *testing.T) {
 	}
 }
 
-func TestNearCloudE2EE_EncryptRequest_UnsupportedEndpoint(t *testing.T) {
+func TestE2EE_EncryptRequest_UnsupportedEndpoint(t *testing.T) {
 	pubHex := ed25519ModelPubHex(t)
 	raw := &attestation.RawAttestation{SigningKey: pubHex}
-	enc := nearcloud.NewE2EE()
+	enc := neardirect.NewE2EE()
 
 	unsupported := []string{
 		"/v1/embeddings",
@@ -208,7 +208,7 @@ func TestNearCloudE2EE_EncryptRequest_UnsupportedEndpoint(t *testing.T) {
 		"/unknown",
 	}
 	for _, ep := range unsupported {
-		_, _, _, err := enc.EncryptRequest(nearcloudChatBody(t), raw, ep)
+		_, _, _, err := enc.EncryptRequest(nearE2EEChatBody(t), raw, ep)
 		if err == nil {
 			t.Errorf("expected error for unsupported endpoint %q, got nil", ep)
 		}

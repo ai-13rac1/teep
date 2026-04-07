@@ -19,7 +19,7 @@ import (
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider"
-	nearcloudpkg "github.com/13rac1/teep/internal/provider/nearcloud"
+	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/proxy"
 )
 
@@ -84,7 +84,7 @@ func (m *mockNearPinnedHandler) HandlePinned(_ context.Context, req *provider.Pi
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(respBody)),
 			Report:     report,
-			SigningKey:  m.keys.edPubHex,
+			SigningKey: m.keys.edPubHex,
 		}, nil
 	}
 
@@ -130,7 +130,7 @@ func (m *mockNearPinnedHandler) handleChatE2EE(req *provider.PinnedRequest, repo
 		},
 		Body:       io.NopCloser(strings.NewReader(responseSSE)),
 		Report:     report,
-		SigningKey:  m.keys.edPubHex,
+		SigningKey: m.keys.edPubHex,
 		Session:    session,
 	}, nil
 }
@@ -161,7 +161,7 @@ func (m *mockNearPinnedHandler) handleImageE2EE(req *provider.PinnedRequest, rep
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(responseJSON)),
 		Report:     report,
-		SigningKey:  m.keys.edPubHex,
+		SigningKey: m.keys.edPubHex,
 		Session:    session,
 	}, nil
 }
@@ -383,7 +383,7 @@ func newMockNeardirectE2EEServer(t *testing.T, e2eeEnabled bool) *httptest.Serve
 	prov.PinnedHandler = handler
 	prov.E2EE = e2eeEnabled
 	if e2eeEnabled {
-		prov.Encryptor = nearcloudpkg.NewE2EE()
+		prov.Encryptor = neardirect.NewE2EE()
 	}
 
 	// Prime caches so the proxy doesn't try real attestation.
