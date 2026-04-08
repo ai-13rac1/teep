@@ -1,0 +1,40 @@
+package neardirect_test
+
+import (
+	"testing"
+
+	"github.com/13rac1/teep/internal/provider/neardirect"
+)
+
+func TestDefaultMeasurementPolicy(t *testing.T) {
+	p := neardirect.DefaultMeasurementPolicy()
+
+	if len(p.MRSeamAllow) == 0 {
+		t.Error("MRSeamAllow should not be empty")
+	}
+	for i := range 3 {
+		if len(p.RTMRAllow[i]) == 0 {
+			t.Errorf("RTMRAllow[%d] should not be empty", i)
+		}
+	}
+	t.Logf("MRSeamAllow: %d entries, RTMR0: %d, RTMR1: %d, RTMR2: %d",
+		len(p.MRSeamAllow), len(p.RTMRAllow[0]), len(p.RTMRAllow[1]), len(p.RTMRAllow[2]))
+}
+
+func TestSupplyChainPolicy(t *testing.T) {
+	p := neardirect.SupplyChainPolicy()
+	if p == nil {
+		t.Fatal("SupplyChainPolicy should not be nil")
+	}
+	if len(p.Images) == 0 {
+		t.Fatal("SupplyChainPolicy should have images")
+	}
+
+	// All neardirect images should be model-tier.
+	for _, img := range p.Images {
+		if !img.ModelTier {
+			t.Errorf("image %q should be model-tier", img.Repo)
+		}
+	}
+	t.Logf("SupplyChainPolicy: %d images", len(p.Images))
+}
