@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -370,12 +371,15 @@ func decryptResponseImageData(dataRaw json.RawMessage, session Decryptor) (json.
 
 // ReassembleNonStream reads an SSE stream (forced by E2EE), decrypts each
 // chunk, and reassembles the result into a single non-streaming OpenAI response.
-// Returns the assembled JSON and token throughput stats.
+// Handles tool_calls and finish_reason from delta chunks. Returns the assembled
+// JSON and token throughput stats.
 func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats, error) {
 	scanner, cleanup := newSSEScanner(body)
 	defer cleanup()
 
 	fields := make(map[string]*strings.Builder)
+	toolCalls := make(map[int]*reassembledToolCall)
+	var finishReason string
 	var lastData string
 	var stats StreamStats
 	var firstChunk time.Time
@@ -404,6 +408,20 @@ func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats
 			}
 			b.WriteString(v)
 		}
+
+		meta, err := extractChunkMeta(data)
+		if err != nil {
+			return nil, stats, fmt.Errorf("reassemble: %w", err)
+		}
+		for _, tc := range meta.ToolCalls {
+			if err := mergeToolCallDelta(toolCalls, tc); err != nil {
+				return nil, stats, fmt.Errorf("reassemble: %w", err)
+			}
+		}
+		if meta.FinishReason != "" {
+			finishReason = meta.FinishReason
+		}
+
 		lastData = data
 	}
 	if err := scanner.Err(); err != nil {
@@ -414,37 +432,138 @@ func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats
 		return nil, stats, errors.New("reassemble: no SSE chunks received")
 	}
 
-	var meta struct {
+	var responseMeta struct {
 		ID      string `json:"id"`
 		Model   string `json:"model"`
 		Created int64  `json:"created"`
 	}
-	if err := json.Unmarshal([]byte(lastData), &meta); err != nil {
+	if err := json.Unmarshal([]byte(lastData), &responseMeta); err != nil {
 		return nil, stats, fmt.Errorf("reassemble: parse metadata from last chunk: %w", err)
 	}
 
-	msg := make(map[string]any, len(fields)+1)
+	msg := make(map[string]any, len(fields)+2)
 	msg["role"] = "assistant"
 	for k, b := range fields {
 		msg[k] = b.String()
 	}
+	if len(toolCalls) > 0 {
+		msg["tool_calls"] = sortedToolCalls(toolCalls)
+	}
+
+	if finishReason == "" {
+		finishReason = "stop"
+	}
 
 	resp := map[string]any{
-		"id":      meta.ID,
+		"id":      responseMeta.ID,
 		"object":  "chat.completion",
-		"created": meta.Created,
-		"model":   meta.Model,
+		"created": responseMeta.Created,
+		"model":   responseMeta.Model,
 		"choices": []map[string]any{
 			{
 				"index":         0,
 				"message":       msg,
-				"finish_reason": "stop",
+				"finish_reason": finishReason,
 			},
 		},
 	}
 
 	result, err := json.Marshal(resp)
 	return result, stats, err
+}
+
+// reassembledToolCall accumulates a single tool call from streaming deltas.
+type reassembledToolCall struct {
+	ID       string                  `json:"id"`
+	Type     string                  `json:"type"`
+	Function reassembledToolCallFunc `json:"function"`
+}
+
+type reassembledToolCallFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// chunkMeta holds non-encrypted metadata extracted from an SSE chunk.
+type chunkMeta struct {
+	ToolCalls    []json.RawMessage
+	FinishReason string
+}
+
+// extractChunkMeta extracts tool_calls and finish_reason from the first
+// choice's delta in an SSE chunk.
+func extractChunkMeta(data string) (chunkMeta, error) {
+	var parsed struct {
+		Choices []struct {
+			Delta struct {
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
+		return chunkMeta{}, fmt.Errorf("extractChunkMeta: %w", err)
+	}
+	var m chunkMeta
+	if len(parsed.Choices) > 0 {
+		m.ToolCalls = parsed.Choices[0].Delta.ToolCalls
+		if parsed.Choices[0].FinishReason != nil {
+			m.FinishReason = *parsed.Choices[0].FinishReason
+		}
+	}
+	return m, nil
+}
+
+// toolCallDelta is the streaming delta format for a single tool call entry.
+type toolCallDelta struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Index    int    `json:"index"`
+	Function *struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// mergeToolCallDelta merges a streaming tool_call delta into the accumulated
+// tool calls map, keyed by index. Arguments are concatenated across chunks.
+func mergeToolCallDelta(calls map[int]*reassembledToolCall, raw json.RawMessage) error {
+	var d toolCallDelta
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return fmt.Errorf("parse tool_call delta: %w", err)
+	}
+	tc, ok := calls[d.Index]
+	if !ok {
+		tc = &reassembledToolCall{}
+		calls[d.Index] = tc
+	}
+	if d.ID != "" {
+		tc.ID = d.ID
+	}
+	if d.Type != "" {
+		tc.Type = d.Type
+	}
+	if d.Function != nil {
+		if d.Function.Name != "" {
+			tc.Function.Name = d.Function.Name
+		}
+		tc.Function.Arguments += d.Function.Arguments
+	}
+	return nil
+}
+
+// sortedToolCalls returns the accumulated tool calls sorted by index.
+func sortedToolCalls(calls map[int]*reassembledToolCall) []reassembledToolCall {
+	indices := make([]int, 0, len(calls))
+	for idx := range calls {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	result := make([]reassembledToolCall, 0, len(calls))
+	for _, idx := range indices {
+		result = append(result, *calls[idx])
+	}
+	return result
 }
 
 // RelayStream reads an SSE stream from body, decrypts chunks when session is
