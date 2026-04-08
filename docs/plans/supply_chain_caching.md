@@ -215,7 +215,7 @@ images, Intel PCS, NVIDIA (if applicable), Proof of Cloud, etc.
 | Image (version_unpinned) | inline per-model | Repo in allowlist | Never stale (presence-only) |
 | Intel PCS | `(FMSPC, TeeTCBSVN)` | Within max-age (default 24h) | Re-fetch; offline → `Skip` |
 | NVIDIA NRAS | NVIDIA evidence hash | Within max-age (default 24h) | Re-fetch; offline → `Skip` |
-| Proof of Cloud | PPID | Positive → infinite; negative → 24h TTL | Positive never stale; negative re-fetched after TTL; `teep serve` always re-fetches negative results when online |
+| Proof of Cloud | PPID | Positive → infinite; authenticated negative → `max_cache_age` | Positive never stale; authenticated negative re-fetched after `max_cache_age`; connectivity errors not cached |
 | E2EE test | — | **Not cacheable** (live test) | Always re-run if online; offline → `Skip` |
 
 ---
@@ -253,15 +253,28 @@ If `intel_pcs_verified_at` or `nras_verified_at` is older than max-age:
   configured `allow_fail` list and normal offline factor handling. Log:
   `slog.Warn("stale cache entry in offline mode", "factor", f, "age", age)`.
 
-### 4c. Proof of Cloud Negative Re-fetch
+### 4c. Proof of Cloud Negative Caching
 
-Negative PoC results (`poc_registered: false`) are cached with a 24h TTL to
-avoid hammering the registry. However, when `teep serve` is online and
-encounters a cached negative result, it MUST always re-fetch regardless of
-TTL age. Only positive PoC results (`poc_registered: true`) are trusted from
-cache without re-fetch (positive registrations are append-only and never
-expire). This prevents a false negative from a transient MITM or registry
-outage from persisting as a denial of service.
+PoC results fall into three categories with different caching behavior:
+
+- **Positive results** (`poc_registered: true`): Cached indefinitely. The
+  hardware registry is append-only; positive registrations never expire.
+- **Authenticated negative results** (`poc_registered: false` with a valid,
+  authenticated response from the registry): Cached up to `max_cache_age`
+  (default 7 days, see Section 4d). This avoids hammering the registry for
+  machines that are genuinely not registered. PoC is currently `allow_fail`
+  for all providers.
+- **Connectivity and response errors** (network timeout, DNS failure, HTTP
+  error, malformed response, TLS error): NOT cached. Errors are transient
+  and must not persist as false negatives. The factor evaluates using its
+  normal error-handling path (typically `Skip` or `Fail` depending on the
+  error type and `allow_fail` configuration).
+
+The distinction between an authenticated negative and a connectivity error
+is made at the PoC client level: only a well-formed, successfully
+authenticated response indicating "not registered" is treated as a cacheable
+negative. Any other failure mode is treated as an error and not written to
+the cache.
 
 ### 4d. Maximum Cache Age
 
@@ -683,11 +696,12 @@ Digest-pinned results never go stale. This is the ideal caching candidate. The
 per-model `images` list in the cache stores full Rekor provenance data.
 
 **Proof of Cloud (factors 8–9)**: Hardware registry is append-only. Positive
-registrations never expire. Negative results are cached with a 24h TTL
-(matching Intel PCS) to avoid hammering the registry — PoC is currently
-`allow_fail` for all providers. However, `teep serve` always re-fetches
-negative results when online regardless of TTL age (see Section 4c). Cached
-positive `poc_registered: true` is valid indefinitely.
+registrations never expire. Authenticated negative results (`poc_registered:
+false` with a valid registry response) are cached up to `max_cache_age`
+(default 7 days) to avoid hammering the registry — PoC is currently
+`allow_fail` for all providers. Connectivity and response errors are NOT
+cached (see Section 4c). Cached positive `poc_registered: true` is valid
+indefinitely.
 
 ### 8c. Non-Online Cacheable Data
 
@@ -720,17 +734,33 @@ at the end.
 
 ### 9a. File Locking and Concurrency
 
-**`teep serve` write-back**: Uses a single-writer goroutine pattern. All
-cache mutations (from concurrent request handlers) are serialized through a
-channel to a single goroutine that performs read-merge-write-rename. This
-avoids file-level locking complexity for in-process coordination.
+**In-process coordination (`teep serve`)**: Each `teep serve` process uses a
+single-writer goroutine pattern. All cache mutations from concurrent request
+handlers are serialized through a channel to a single goroutine that performs
+the read-merge-write cycle. This avoids lock contention between request
+handlers within a single process.
 
-**Concurrent `teep cache` invocations** (e.g., `teep cache providerA &
-teep cache providerB &`): Last-writer-wins. Because each invocation replaces
-only its own provider section and preserves others, data loss is limited to
-the case where both invocations write at the exact same instant. This is
-acceptable for an operator-initiated tool; operators should not run concurrent
-`teep cache` commands for the same provider.
+**Cross-process coordination**: Multiple `teep serve` processes (or a `teep
+serve` and a `teep cache`) may share the same cache file. All cache file
+writes use `flock(2)` (advisory file locking) to serialize cross-process
+access:
+
+1. Acquire an exclusive `flock` on a lock file (`<cache-file>.lock`).
+2. Read the current cache file contents.
+3. Merge the new data into the loaded cache.
+4. Write to a temp file and `rename` atomically.
+5. Release the `flock`.
+
+The lock file is separate from the cache file itself so that the atomic
+rename does not invalidate the lock. The `flock` is held across the full
+read-merge-write-rename cycle to prevent lost updates.
+
+`teep cache` uses the same `flock`-based write path, so concurrent `teep
+cache` and `teep serve` invocations are safely serialized. Concurrent `teep
+cache` invocations for different providers are safe (each replaces only its
+own provider section). Concurrent invocations for the same provider are
+serialized by the lock — the second invocation reads the first's output and
+merges on top of it.
 
 ---
 
@@ -872,8 +902,9 @@ verification, or staleness degradation.
   are fully authenticated (new compose hash with all images passing
   Sigstore/Rekor, refreshed Intel PCS / NVIDIA NRAS, new PoC positive
   registrations), write these back to both the in-memory cache and the cache
-  file (if configured). Use atomic write (write → rename) with a single-writer
-  goroutine pattern to handle concurrent proxy requests (see Section 9a).
+  file (if configured). Use atomic write (write → rename) with `flock(2)` for
+  cross-process safety and a single-writer goroutine for in-process
+  coordination (see Section 9a).
 - **Write-back failure handling**: Cache file write failures are logged at
   `slog.Error` level and do not fail requests or block proxy operation.
 - **TDX measurement registers are read-only**: `teep serve` never overwrites
