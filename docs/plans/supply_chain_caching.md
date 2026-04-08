@@ -190,12 +190,17 @@ reference type, not operator-settable. `teep cache` MUST emit a warning when
 encountering `version_unpinned` images, recommending that the provider pin
 images by digest. The `version_unpinned` field is the weakest authentication
 level — the image is authenticated only by its presence in the supply chain
-allowlist (defined in `internal/attestation/compose.go`).
+allowlist (defined in `internal/attestation/compose.go`), and that allowlist
+membership is not a freshness signal.
 
 **Staleness**: Rekor entries are append-only and immutable. Digest-pinned
-entries never go stale. Tag-based entries with resolved digests are fresh as
-long as the same digest appears in the compose. `version_unpinned` entries
-are valid as long as the repo is in the allowlist.
+entries never go stale. For non-digest references, `teep serve` may treat a
+cached entry as fresh only when the current compose material includes the same
+resolved digest that was cached. If the current compose is tag-only (or
+otherwise does not contain a digest), tag re-push is not detectable from the
+cache; the `image_binding` factor (see Section 5d) captures this weakness.
+`version_unpinned` entries remain allowlist-authenticated only and do not have
+a cache-only freshness guarantee.
 
 #### Per-Provider Gateway Section
 
@@ -354,15 +359,43 @@ in the cache for operator visibility. The allowlist is defined in
 `internal/attestation/compose.go`. `teep cache` MUST warn prominently when
 encountering `version_unpinned` images.
 
+### 5d. `image_binding` Report Factor
+
+A new report factor, `image_binding`, evaluates whether **all** images in the
+docker-compose manifest are pinned by digest (`repo@sha256:...`). This factor
+provides a clear signal about the strength of the supply chain binding:
+
+- **Pass**: Every image in the compose is referenced by digest. This is the
+  strongest supply chain guarantee — each image is immutably content-addressed
+  and Sigstore/Rekor verification is bound to the exact content.
+- **Fail**: One or more images are referenced by tag (specific release tag or
+  generic/branch tag) rather than digest. Tag-based references are vulnerable
+  to tag re-push attacks that are not detectable by teep (see 5b).
+
+`image_binding` MUST be included in the **default `allow_fail` list** for all
+providers, since no providers currently pin all images by digest. This means
+the factor is evaluated and reported but does not block requests unless an
+operator explicitly removes it from `allow_fail` to enforce digest pinning.
+
+When `image_binding` fails, the report MUST list which images are not
+digest-pinned, along with their reference type (specific tag or
+`version_unpinned`), so operators can see exactly which images weaken the
+supply chain binding.
+
+The `image_binding` factor is **not an online factor** — it is derived from
+the compose manifest content, not from an external service. It is evaluated
+during both `teep verify` and `teep serve` attestation, and does not require
+cache consultation.
+
 ### Security Ordering
 
 Digest-pinned > specific release tag > version_unpinned.
 
-| Image Reference | Offline Auth | Staleness |
-|----------------|-------------|-----------|
-| `repo@sha256:abc` | Digest match → Pass | Never stale |
-| `repo:v1.2.3` | Previously authenticated tag → Pass | Not detectable if tag re-pushed (see 5b) |
-| `repo:latest` | Allowlist membership → Pass | Never stale (presence-only) |
+| Image Reference | Offline Auth | Staleness | `image_binding` |
+|----------------|-------------|-----------|----------------|
+| `repo@sha256:abc` | Digest match → Pass | Never stale | Pass |
+| `repo:v1.2.3` | Previously authenticated tag → Pass | Not detectable if tag re-pushed (see 5b) | Fail |
+| `repo:latest` | Allowlist membership → Pass | Never stale (presence-only) | Fail |
 
 ---
 
@@ -382,15 +415,18 @@ evidence.
 
 **File permissions and safety**: Because the cache contains trust anchors (for
 example pinned TDX measurements and verified image provenance), cache file
-access must be protected with the same strict local file safety checks used
-for sensitive config: on every read, validate permissions using the same policy
-as `internal/config/config.go` (`checkFilePermissions`), and warn if the file
-is readable/writable by other users or groups (for example, require
-`0600`-style permissions). Permission checks MUST use `os.Lstat` (not
-`os.Stat`) to prevent symlink attacks where a symlink to an attacker-controlled
-file with correct permissions would pass validation. On write, create or
-replace the cache file with restrictive permissions explicitly set (do not rely
-on umask).
+access must be protected with the same strict local file safety policy used
+for sensitive config. On every read, enforce owner-only style permissions (for
+example `0600`-style permissions) and reject the cache file if it is
+readable/writable by other users or groups. Do not silently warn and continue:
+insecure permissions MUST fail closed and the cache MUST NOT be loaded.
+Implementation detail: the current `internal/config/config.go`
+`checkFilePermissions` helper uses `os.Stat`, so it is not symlink-safe as-is.
+Either update that helper or add a cache-specific helper that uses `os.Lstat`
+(not `os.Stat`) before accepting the path, to prevent symlink attacks where a
+symlink to an attacker-controlled file with correct target permissions would
+pass validation. On write, create or replace the cache file with restrictive
+permissions explicitly set (do not rely on umask).
 
 **Strict unmarshalling**: `KnownFields(true)` rejects unknown fields on read
 (fail-closed). Post-unmarshal validation MUST verify that all hex-encoded
@@ -714,6 +750,15 @@ dependent but was previously obtained via `--update-config`:
 | Gateway TDX measurements | `--update-config` → `teep.toml` policy allowlists | `teep cache` → cache file (config fields removed) |
 | Compose hash | Not captured | `teep cache` → cache file |
 | Image list per compose | Not captured | `teep cache` → cache file |
+
+### 8d. Non-Online, Non-Cacheable Factor
+
+The `image_binding` factor (Section 5d) is derived from the compose manifest
+content and is not an online factor. It evaluates whether all images are
+digest-pinned and is computed at attestation time from the live compose data.
+It is included in the default `allow_fail` list for all providers (no
+providers currently pin all images by digest). It does not depend on cache
+data and is evaluated during both `teep verify` and `teep serve`.
 
 ---
 
