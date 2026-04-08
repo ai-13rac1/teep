@@ -169,11 +169,9 @@ Each image in the `images` list within a model section:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `repo` | string | Image repository (e.g., `datadog/agent`) |
-| `digest` | string | `sha256:<hex>` (immutable content address); empty for `version_unpinned` |
-| `tag` | string | Canonical tag (e.g., `v0.4.2`, `latest`); omitted tags stored as `latest`; empty for digest-pinned |
+| `reference` | string | **Identity key**: verbatim image reference from the docker-compose file (e.g., `repo@sha256:...`, `repo:tag`, or bare `repo`). This is the sole key used for cache lookup. |
+| `version_unpinned` | bool | `true` if reference uses a generic/branch tag or bare name (e.g., `latest`, `main`, no tag) |
 | `provenance` | string | `fulcio_signed` / `sigstore_present` / `no_sigstore_entry` |
-| `version_unpinned` | bool | `true` → any version accepted by allowlist membership alone |
 | `key_fingerprint` | string | SHA-256 hex of PKIX public key (for `sigstore_present`) |
 | `oidc_issuer` | string | Fulcio OIDC issuer (for `fulcio_signed`) |
 | `oidc_identity` | string | SAN URI / workflow identity (for `fulcio_signed`) |
@@ -185,6 +183,14 @@ Each image in the `images` list within a model section:
 | `inclusion_verified` | bool | Merkle inclusion proof passed |
 | `verified_at` | timestamp | When Sigstore/Rekor verification was performed |
 
+**Cache lookup semantics**: For each image reference in the docker-compose
+file, cache lookup compares the verbatim reference string against the
+`reference` field in the cached image list. If a matching entry exists, it is
+a cache hit — no further Sigstore/Rekor verification is needed, because
+entries are only stored in the cache after successful authentication. If no
+match exists, it is a cache miss. This comparison is identical in online and
+offline modes.
+
 The `version_unpinned` classification is derived from the compose manifest
 reference type, not operator-settable. `teep cache` MUST emit a warning when
 encountering `version_unpinned` images, recommending that the provider pin
@@ -193,14 +199,16 @@ level — the image is authenticated only by its presence in the supply chain
 allowlist (defined in `internal/attestation/compose.go`), and that allowlist
 membership is not a freshness signal.
 
-**Staleness**: Rekor entries are append-only and immutable. Digest-pinned
-entries never go stale. For non-digest references, `teep serve` may treat a
-cached entry as fresh only when the current compose material includes the same
-resolved digest that was cached. If the current compose is tag-only (or
-otherwise does not contain a digest), tag re-push is not detectable from the
-cache; the `image_binding` factor (see Section 5d) captures this weakness.
-`version_unpinned` entries remain allowlist-authenticated only and do not have
-a cache-only freshness guarantee.
+**Staleness**: Image cache entries are keyed by the verbatim compose reference
+(`reference` field). If the compose hash has not changed, all image references
+are identical and all cache entries remain valid. If the compose hash changes,
+each image in the new compose is looked up by its reference identity — matches
+are cache hits, new references are cache misses (see Section 4a). Because
+cache lookup is reference-identity-only, tag re-push (where the same tag now
+points to a different image) is not detectable via the cache; the
+`image_binding` factor (see Section 5d) captures this weakness.
+Digest-pinned entries (`repo@sha256:...`) are immutable by definition.
+`version_unpinned` entries are authenticated by allowlist membership only.
 
 #### Per-Provider Gateway Section
 
@@ -215,9 +223,9 @@ images, Intel PCS, NVIDIA (if applicable), Proof of Cloud, etc.
 |-------------|-----------|-----------|-------------------|
 | TDX measurements | (provider, model) | Compose hash matches | Invalidated if compose hash changes |
 | Compose hash | `sha256(app_compose)` | Content-addressed (immutable per-content) | New hash → re-extract images, re-validate |
-| Image (digest-pinned) | inline per-model | Immutable | Never stale |
-| Image (release tag) | inline per-model | Resolved digest matches cached digest | Stale if tag resolves to different digest |
-| Image (version_unpinned) | inline per-model | Repo in allowlist | Never stale (presence-only) |
+| Image (digest-pinned) | compose reference (`repo@sha256:...`) | Reference matches compose | Immutable by definition |
+| Image (release tag) | compose reference (`repo:tag`) | Reference matches compose | Tag re-push not detectable; `image_binding` factor captures risk |
+| Image (version_unpinned) | compose reference (bare `repo` or generic tag) | Reference matches compose and repo in allowlist | Allowlist membership only |
 | Intel PCS | `(FMSPC, TeeTCBSVN)` | Within max-age (default 24h) | Re-fetch; offline → `Skip` |
 | NVIDIA NRAS | NVIDIA evidence hash | Within max-age (default 24h) | Re-fetch; offline → `Skip` |
 | Proof of Cloud | PPID | Positive → infinite; authenticated negative → `max_cache_age` | Positive never stale; authenticated negative re-fetched after `max_cache_age`; connectivity errors not cached |
@@ -237,13 +245,17 @@ If the compose hash from a fresh attestation differs from the cached
 invalidated. Re-validation proceeds as:
 
 1. Extract images from the new compose manifest.
-2. For each image, check the model's cached image list:
-   - **Digest-pinned image with matching digest**: Cache hit — use cached
-     Sigstore data.
-   - **Tag-based image with matching resolved digest**: Cache hit.
-   - **Tag-based image with different digest**: Cache miss — re-verify via
-     Sigstore/Rekor.
-   - **Image not in cache at all**: Cache miss — full Sigstore/Rekor fetch.
+2. For each image, check the model's cached image list by compose reference
+   identity (the `reference` field — the verbatim image string from the
+   docker-compose file):
+   - **Cache hit** (reference matches a cached entry): Use cached
+     Sigstore/Rekor data. No further verification needed — entries are only
+     stored in the cache after successful Sigstore authentication.
+   - **Cache miss** (reference not in cache):
+     - **Online**: Perform full Sigstore/Rekor query and authenticate per
+       the existing `sigstore_verification` code. Update the cache with
+       the fully authenticated result.
+     - **Offline**: Factor evaluates as `Skip` for this image.
 3. After successful re-validation, update `compose_hash` and `images` in
    the model section.
 4. Emit `slog.Info("compose hash changed, re-validated supply chain",
@@ -301,12 +313,14 @@ is used as-is with these rules:
 - **Stale mutable-authority entry**: Factor evaluates as `Skip`. Log emitted.
 - **Missing cache entry**: Factor evaluates as `Skip`. Same behavior as
   current `--offline` without cache.
-- **Immutable entries** (Rekor, PoC positive): Never stale; used directly.
+- **Immutable entries** (Sigstore/Rekor provenance, PoC positive): Never
+  stale; used directly. Cache lookup by compose reference identity (see
+  Section 3b).
 - **E2EE usable**: Always `Skip` in offline mode (non-cacheable).
-- **Compose hash mismatch (no matching images)**: Image provenance factors
-  for unmatched images evaluate as `Skip` — those images cannot be verified
-  without online access. This is logged at notice level, consistent with
-  other non-enforced changes in offline mode.
+- **Compose hash mismatch (cache miss by reference)**: Image provenance
+  factors for images whose compose reference has no matching cache entry
+  evaluate as `Skip` — those images cannot be verified without online
+  access. This is logged at notice level.
 
 ---
 
@@ -318,26 +332,26 @@ different caching and offline authentication behavior:
 ### 5a. Digest-Pinned (`repo@sha256:...`)
 
 The strongest form. The digest is an immutable content address. Sigstore/Rekor
-verification is bound to this exact digest. Cache entries keyed by digest never
-go stale. Offline authentication: cached digest match → Pass.
+verification is bound to this exact digest. Cache entries whose `reference`
+contains a digest are immutable and never go stale. Offline authentication:
+cached reference match → Pass.
 
 ### 5b. Specific Release Tag (`repo:v1.2.3`)
 
-When authenticated via Sigstore/Rekor, the resolved immutable digest is
-persisted as the trust anchor. The tag is stored as readable metadata.
+When authenticated via Sigstore/Rekor, the provenance data is stored in the
+cache entry.
 
-**Cache key is `<repo>:<tag>`, not the resolved digest.** The compose manifest
-specifies images by tag, and we cannot know which digest the provider resolved
-a given tag to on their side. Keying by tag allows direct cache lookup when the
-same tag appears in a compose manifest without requiring a digest resolution
-step. The resolved digest is stored inside the cache entry as the authenticated
-trust anchor, not as the key.
+**Cache key is the compose reference** (e.g., `vllm/vllm-openai:v0.6.6.post1`).
+Cache lookup compares the verbatim image reference from the docker-compose file
+against the `reference` field in the cached image list. If they match, it is a
+cache hit and no further Sigstore/Rekor verification is needed — the entry was
+authenticated when it was stored. There is no digest comparison for cache
+matching; the compose reference is the sole identity key.
 
-**Offline authentication**: If the same tag was previously authenticated via
-Sigstore/Rekor and the compose manifest still references the same tag, the
-cached entry is accepted. In offline mode, there is no way to resolve the
-current tag-to-digest mapping, so the cached provenance for that tag is used
-as-is. This is the expected behavior — the tag was previously authenticated.
+**Online and offline behavior**: Cache lookup by compose reference identity is
+identical in both modes. On cache hit, the cached Sigstore/Rekor provenance is
+used. On cache miss, online mode performs a full Sigstore/Rekor query and
+stores the authenticated result; offline mode evaluates as `Skip`.
 
 **Security limitation — tag re-push**: Because we are the client and have no
 visibility into which digest the provider actually pulled for a given tag, a
@@ -466,16 +480,14 @@ providers:
         # Compose binding
         compose_hash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         images:
-          - repo: "datadog/agent"
-            digest: "sha256:a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890fedcba0987654321"
+          - reference: "datadog/agent@sha256:a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890fedcba0987654321"
             provenance: sigstore_present
             key_fingerprint: "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b"
             signature_verified: true
             set_verified: true
             inclusion_verified: true
             verified_at: "2026-04-05T14:30:00Z"
-          - repo: "nearaidev/compose-manager"
-            digest: "sha256:fedcba0987654321a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890"
+          - reference: "nearaidev/compose-manager@sha256:fedcba0987654321a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890"
             provenance: fulcio_signed
             oidc_issuer: "https://token.actions.githubusercontent.com"
             oidc_identity: "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master"
@@ -488,8 +500,7 @@ providers:
             set_verified: true
             inclusion_verified: true
             verified_at: "2026-04-05T14:30:00Z"
-          - repo: "certbot/dns-cloudflare"
-            digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          - reference: "certbot/dns-cloudflare@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             provenance: no_sigstore_entry
             verified_at: "2026-04-05T14:30:00Z"
 
@@ -532,8 +543,7 @@ providers:
         - "99aabbcc..."
       compose_hash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       images:
-        - repo: "nearaidev/dstack-vpc"
-          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        - reference: "nearaidev/dstack-vpc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           provenance: fulcio_signed
           oidc_issuer: "https://token.actions.githubusercontent.com"
           oidc_identity: "https://github.com/nearai/dstack-vpc/.github/workflows/build.yml@refs/heads/main"
@@ -565,16 +575,14 @@ providers:
           - "564622c7..."
         compose_hash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         images:
-          - repo: "datadog/agent"
-            digest: "sha256:a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890fedcba0987654321"
+          - reference: "datadog/agent@sha256:a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890fedcba0987654321"
             provenance: sigstore_present
             key_fingerprint: "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b"
             signature_verified: true
             set_verified: true
             inclusion_verified: true
             verified_at: "2026-04-05T14:30:00Z"
-          - repo: "nearaidev/compose-manager"
-            digest: "sha256:fedcba0987654321a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890"
+          - reference: "nearaidev/compose-manager@sha256:fedcba0987654321a1b2c3d4e5f67890fedcba0987654321a1b2c3d4e5f67890"
             provenance: fulcio_signed
             oidc_issuer: "https://token.actions.githubusercontent.com"
             oidc_identity: "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master"
@@ -585,8 +593,7 @@ providers:
             set_verified: true
             inclusion_verified: true
             verified_at: "2026-04-05T14:30:00Z"
-          - repo: "certbot/dns-cloudflare"
-            digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          - reference: "certbot/dns-cloudflare@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             provenance: no_sigstore_entry
             verified_at: "2026-04-05T14:30:00Z"
         fmspc: "00906ED50000"
@@ -623,17 +630,14 @@ providers:
           - "..."
         compose_hash: "sha256:eeeeeeee..."
         images:
-          - repo: "vllm/vllm-openai"
-            digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            tag: "v0.6.6.post1"
+          - reference: "vllm/vllm-openai:v0.6.6.post1"
             provenance: sigstore_present
             key_fingerprint: "aabbccdd..."
             signature_verified: true
             set_verified: true
             inclusion_verified: true
             verified_at: "2026-04-05T14:30:00Z"
-          - repo: "alpine"
-            tag: "latest"
+          - reference: "alpine"
             provenance: no_sigstore_entry
             version_unpinned: true
             verified_at: "2026-04-05T14:30:00Z"
@@ -697,12 +701,18 @@ mode:
 | 3 | `tdx_tcb_not_revoked` | (derived from #1) | **Yes** | Max-age 24h |
 | 4 | `nvidia_nras_verified` | NVIDIA NRAS | **Yes** | Max-age 24h |
 | 5 | `e2ee_usable` | Provider inference API | **No** | Non-cacheable |
-| 6 | `build_transparency_log` | Rekor | **Yes** | Immutable (infinite) |
-| 7 | `sigstore_verification` | Rekor | **Yes** | Immutable (infinite) |
+| 6 | `build_transparency_log` | Rekor | **Yes**, when image identified by immutable compose reference | Immutable for digest-pinned; tag-based entries use reference-identity caching (see Section 3b) |
+| 7 | `sigstore_verification` | Rekor | **Yes**, when image identified by immutable compose reference | Immutable for digest-pinned; tag-based entries use reference-identity caching (see Section 3b) |
 | 8 | `cpu_id_registry` | Proof of Cloud | **Yes** (positive) | Append-only (infinite) |
 | 9 | `gateway_cpu_id_registry` | Proof of Cloud | **Yes** (positive) | Append-only (infinite) |
 
-**8 of 9 factors are cacheable. Only `e2ee_usable` is non-cacheable.**
+**8 of 9 factors are cacheable. Only `e2ee_usable` is non-cacheable.** For
+`build_transparency_log` and `sigstore_verification`, cache entries are keyed
+by compose reference identity. Digest-pinned references (`repo@sha256:...`)
+provide the strongest offline guarantee because the reference itself is
+immutable. Tag-based references are cached by their compose reference string;
+tag re-push is not detectable via the cache, which is why the `image_binding`
+factor (Section 5d) exists as a separate signal.
 
 ### 8b. Per-Factor Details
 
@@ -728,7 +738,10 @@ The `e2ee_tested` / `e2ee_passed` fields in the cache are informational only
 (recorded for operator reference, not used for factor evaluation).
 
 **Rekor/Sigstore (factors 6–7)**: Rekor entries are append-only and immutable.
-Digest-pinned results never go stale. This is the ideal caching candidate. The
+Cache entries are keyed by compose reference identity (the `reference` field).
+Digest-pinned references are the ideal caching candidate — the reference
+itself is immutable. Tag-based references are cached by their compose reference
+string; tag re-push is not detectable (see `image_binding`, Section 5d). The
 per-model `images` list in the cache stores full Rekor provenance data.
 
 **Proof of Cloud (factors 8–9)**: Hardware registry is append-only. Positive
