@@ -30,6 +30,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1279,15 +1280,30 @@ func (s *Server) handleE2EEDecryptionFailure(
 
 // pinnedPreDispatchE2EE checks REPORTDATA binding on cached attestation
 // before making a pinned request. Returns false if the request must be aborted.
+//
+// When the attestation report cache is empty but the SPKI cache may still hold
+// a live entry, the SPKI domain is evicted so the pinned handler performs full
+// re-attestation on this connection instead of returning a nil report.
 func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWriter, prov *provider.Provider, upstreamModel string) bool {
 	if !prov.E2EE {
 		return true
 	}
-	if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok && !cached.ReportDataBindingPassed() {
-		slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
-			"provider", prov.Name, "model", upstreamModel)
-		http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
-		return false
+	if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		if !cached.ReportDataBindingPassed() {
+			slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
+				"provider", prov.Name, "model", upstreamModel)
+			http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
+			return false
+		}
+	} else {
+		// Attestation report cache miss (expired or never populated).
+		// Evict the SPKI domain so the pinned handler treats this as an
+		// SPKI miss, forcing a fresh attestation that yields a report.
+		if u, err := url.Parse(prov.BaseURL); err == nil && u.Hostname() != "" {
+			s.spkiCache.DeleteDomain(u.Hostname())
+			slog.InfoContext(ctx, "evicted SPKI cache to force re-attestation (attestation report expired)",
+				"provider", prov.Name, "model", upstreamModel, "domain", u.Hostname())
+		}
 	}
 	return true
 }

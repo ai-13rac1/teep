@@ -145,6 +145,15 @@ func (c *SPKICache) Add(domain, spkiHex string) {
 	c.domains[domain][spkiHex] = spkiEntry{addedAt: time.Now()}
 }
 
+// DeleteDomain removes all SPKI entries for the given domain. This forces
+// re-attestation on the next connection to that domain. Used when the
+// attestation report cache expires while SPKI entries are still live.
+func (c *SPKICache) DeleteDomain(domain string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.domains, domain)
+}
+
 // evictOldestDomain removes the domain whose oldest SPKI entry was
 // added earliest. Called under the write lock.
 func (c *SPKICache) evictOldestDomain() {
