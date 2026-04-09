@@ -3322,6 +3322,7 @@ func TestSigningKeyCacheReuse(t *testing.T) {
 		t.Fatal("neardirect provider missing")
 	}
 	prov.PinnedHandler = handler
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) { return "completions.near.ai", true }
 
 	proxySrv := httptest.NewServer(srv)
 	defer proxySrv.Close()
@@ -3479,6 +3480,7 @@ func TestPinnedPath_E2EE_ReportDataBindingCacheCheck(t *testing.T) {
 		t.Fatal("neardirect provider missing")
 	}
 	prov.PinnedHandler = handler
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) { return "completions.near.ai", true }
 
 	proxySrv := httptest.NewServer(srv)
 	defer proxySrv.Close()
@@ -3542,6 +3544,7 @@ func TestPinnedPath_E2EE_NilReportBlocked(t *testing.T) {
 		t.Fatal("neardirect provider missing")
 	}
 	prov.PinnedHandler = handler
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) { return "completions.near.ai", true }
 
 	// Do NOT populate the attestation cache — simulate cache expiry.
 	proxySrv := httptest.NewServer(srv)
@@ -4093,5 +4096,34 @@ func TestChutesRetry_AllAttemptsFail(t *testing.T) {
 	// All 3 instances are marked failed (including the final attempt).
 	if fetcher.markFailedCalls != 3 {
 		t.Errorf("markFailedCalls = %d, want 3", fetcher.markFailedCalls)
+	}
+}
+
+func TestChutesRetryableError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		resp *http.Response
+		want bool
+	}{
+		{"nil error, nil resp", nil, nil, true},
+		{"connection error", errors.New("dial tcp: connection refused"), nil, true},
+		{"context canceled", context.Canceled, nil, false},
+		{"429 not retried", nil, &http.Response{StatusCode: http.StatusTooManyRequests}, false},
+		{"500 retried", nil, &http.Response{StatusCode: http.StatusInternalServerError}, true},
+		{"502 retried", nil, &http.Response{StatusCode: http.StatusBadGateway}, true},
+		{"503 retried", nil, &http.Response{StatusCode: http.StatusServiceUnavailable}, true},
+		{"504 retried", nil, &http.Response{StatusCode: http.StatusGatewayTimeout}, true},
+		{"200 not retried", nil, &http.Response{StatusCode: http.StatusOK}, false},
+		{"400 not retried", nil, &http.Response{StatusCode: http.StatusBadRequest}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := proxy.ChutesRetryableError(tc.err, tc.resp)
+			if got != tc.want {
+				t.Errorf("ChutesRetryableError(%v, status=%v) = %v, want %v",
+					tc.err, proxy.RespStatusCode(tc.resp), got, tc.want)
+			}
+		})
 	}
 }

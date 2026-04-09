@@ -320,3 +320,31 @@ func TestSPKICache_LenAndDomainCount(t *testing.T) {
 		t.Errorf("DomainCount = %d, want 2", got)
 	}
 }
+
+func TestSPKICache_DeleteDomain(t *testing.T) {
+	c := NewSPKICacheWithTTL(time.Hour)
+	c.Add("a.com", "hash1")
+	c.Add("a.com", "hash2")
+	c.Add("b.com", "hash3")
+
+	c.DeleteDomain("a.com")
+
+	if c.Contains("a.com", "hash1") {
+		t.Error("hash1 should be gone after DeleteDomain")
+	}
+	if c.Contains("a.com", "hash2") {
+		t.Error("hash2 should be gone after DeleteDomain")
+	}
+	if !c.Contains("b.com", "hash3") {
+		t.Error("hash3 on b.com should be unaffected")
+	}
+	if got := c.DomainCount(); got != 1 {
+		t.Errorf("DomainCount = %d, want 1", got)
+	}
+
+	// Deleting a non-existent domain is a no-op.
+	c.DeleteDomain("nonexistent.com")
+	if got := c.DomainCount(); got != 1 {
+		t.Errorf("DomainCount after no-op delete = %d, want 1", got)
+	}
+}

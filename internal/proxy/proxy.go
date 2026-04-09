@@ -53,16 +53,16 @@ import (
 
 const (
 	// attestationCacheTTL is how long a VerificationReport is considered fresh.
-	attestationCacheTTL = 5 * time.Minute
+	// Uses the shared AttestationCacheTTL so all attestation caches expire together.
+	attestationCacheTTL = attestation.AttestationCacheTTL
 
 	// negativeCacheTTL is how long a failed attestation blocks retries.
 	negativeCacheTTL = 30 * time.Second
 
 	// signingKeyCacheTTL is how long a REPORTDATA-verified signing key is
-	// reused for E2EE without re-fetching attestation. Must be ≥ the SPKI
-	// cache TTL (1 h) to avoid "no signing key available" errors on pinned
-	// connections where an SPKI cache hit skips attestation.
-	signingKeyCacheTTL = 1 * time.Hour
+	// reused for E2EE without re-fetching attestation. Uses the shared
+	// AttestationCacheTTL so all attestation caches expire together.
+	signingKeyCacheTTL = attestation.AttestationCacheTTL
 
 	// upstreamNonStreamTimeout is the context deadline for non-streaming
 	// upstream requests. Must be generous — attestation + E2EE setup can
@@ -194,6 +194,10 @@ func extractMultipartField(contentType string, body []byte, fieldName string) (s
 // indicates a Chutes instance-level failure that warrants failover to a
 // different instance. Returns false for client-induced cancellations
 // (context.Canceled) so we don't burn retries after the caller is gone.
+//
+// Note: 429 (Too Many Requests) is explicitly NOT retried. Chutes rate
+// limits are account-level, not instance-level, so retrying with a
+// different instance amplifies the rate limit and burns nonces uselessly.
 func chutesRetryableError(err error, resp *http.Response) bool {
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -205,8 +209,7 @@ func chutesRetryableError(err error, resp *http.Response) bool {
 		return true
 	}
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests,
-		http.StatusInternalServerError,
+	case http.StatusInternalServerError,
 		http.StatusBadGateway,
 		http.StatusServiceUnavailable,
 		http.StatusGatewayTimeout:
@@ -468,6 +471,13 @@ func fromConfig(
 			rdVerifier,
 			rekorClient,
 		)
+		p.SPKIDomainForModel = func(ctx context.Context, model string) (string, bool) {
+			d, err := resolver.Resolve(ctx, model)
+			if err != nil {
+				return "", false
+			}
+			return d, true
+		}
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
@@ -493,6 +503,9 @@ func fromConfig(
 			rdVerifier,
 			rekorClient,
 		)
+		p.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+			return nearcloud.GatewayHost(), true
+		}
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "nanogpt":
 		p.ChatPath = "/v1/chat/completions"
@@ -533,6 +546,14 @@ func fromConfig(
 	default:
 		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt, phalacloud, chutes)", cp.Name)
 	}
+
+	// Invariant: any provider with a PinnedHandler must have SPKIDomainForModel
+	// so the proxy can evict SPKI entries when the attestation cache expires.
+	// This check prevents future providers from silently omitting the resolver.
+	if p.PinnedHandler != nil && p.SPKIDomainForModel == nil {
+		return nil, fmt.Errorf("provider %q has PinnedHandler but no SPKIDomainForModel; SPKI eviction would fail", cp.Name)
+	}
+
 	return p, nil
 }
 
@@ -1279,15 +1300,46 @@ func (s *Server) handleE2EEDecryptionFailure(
 
 // pinnedPreDispatchE2EE checks REPORTDATA binding on cached attestation
 // before making a pinned request. Returns false if the request must be aborted.
+//
+// When the attestation report cache is empty but the SPKI cache may still hold
+// a live entry, the SPKI domain is evicted so the pinned handler performs full
+// re-attestation on this connection instead of returning a nil report.
 func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWriter, prov *provider.Provider, upstreamModel string) bool {
 	if !prov.E2EE {
 		return true
 	}
-	if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok && !cached.ReportDataBindingPassed() {
-		slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
-			"provider", prov.Name, "model", upstreamModel)
-		http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
-		return false
+	if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		if !cached.ReportDataBindingPassed() {
+			slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
+				"provider", prov.Name, "model", upstreamModel)
+			http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
+			return false
+		}
+	} else if prov.PinnedHandler != nil {
+		// Attestation report cache miss (expired or never populated) on a
+		// pinned provider. Evict the SPKI domain so the pinned handler
+		// treats this as an SPKI miss, forcing fresh attestation.
+		//
+		// Use SPKIDomainForModel to resolve the correct SPKI cache key.
+		// If unavailable, fail closed — an unresolvable domain means we
+		// cannot guarantee the stale SPKI entry will be evicted, risking
+		// a nil report on the next pinned request.
+		if prov.SPKIDomainForModel == nil {
+			slog.ErrorContext(ctx, "E2EE pinned provider has no SPKIDomainForModel; cannot evict SPKI cache; refusing request",
+				"provider", prov.Name, "model", upstreamModel)
+			http.Error(w, "E2EE pinned provider configuration error", http.StatusInternalServerError)
+			return false
+		}
+		domain, ok := prov.SPKIDomainForModel(ctx, upstreamModel)
+		if !ok || domain == "" {
+			slog.ErrorContext(ctx, "E2EE pinned provider could not resolve SPKI domain; refusing request",
+				"provider", prov.Name, "model", upstreamModel)
+			http.Error(w, "E2EE SPKI domain resolution failed", http.StatusInternalServerError)
+			return false
+		}
+		s.spkiCache.DeleteDomain(domain)
+		slog.InfoContext(ctx, "evicted SPKI cache to force re-attestation (attestation report expired)",
+			"provider", prov.Name, "model", upstreamModel, "domain", domain)
 	}
 	return true
 }

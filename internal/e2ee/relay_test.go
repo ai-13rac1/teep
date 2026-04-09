@@ -313,6 +313,229 @@ func TestReassembleNonStream(t *testing.T) {
 	}
 }
 
+func TestReassembleNonStream_ToolCalls(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	// Build SSE stream with reasoning (encrypted) then tool_calls (plaintext).
+	reasoning := encryptForClient(t, "Use the weather tool.", session)
+
+	var sb strings.Builder
+
+	// Chunk 1: reasoning content (encrypted).
+	chunk1 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"reasoning":         reasoning,
+				"reasoning_content": reasoning,
+			},
+		}},
+	}
+	b1, _ := json.Marshal(chunk1)
+	fmt.Fprintf(&sb, "data: %s\n\n", b1)
+
+	// Chunk 2: first tool_call delta with id, type, name.
+	chunk2 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{{
+					"id": "call-abc", "type": "function", "index": 0,
+					"function": map[string]string{"name": "get_weather", "arguments": ""},
+				}},
+			},
+		}},
+	}
+	b2, _ := json.Marshal(chunk2)
+	fmt.Fprintf(&sb, "data: %s\n\n", b2)
+
+	// Chunk 3: tool_call arguments fragment.
+	chunk3 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{{
+					"index":    0,
+					"function": map[string]string{"arguments": `{"location"`},
+				}},
+			},
+		}},
+	}
+	b3, _ := json.Marshal(chunk3)
+	fmt.Fprintf(&sb, "data: %s\n\n", b3)
+
+	// Chunk 4: tool_call arguments fragment.
+	chunk4 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{{
+					"index":    0,
+					"function": map[string]string{"arguments": `: "SF"}`},
+				}},
+			},
+		}},
+	}
+	b4, _ := json.Marshal(chunk4)
+	fmt.Fprintf(&sb, "data: %s\n\n", b4)
+
+	// Chunk 5: finish_reason = "tool_calls".
+	chunk5 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": "tool_calls",
+		}},
+	}
+	b5, _ := json.Marshal(chunk5)
+	fmt.Fprintf(&sb, "data: %s\n\n", b5)
+
+	sb.WriteString("data: [DONE]\n\n")
+
+	result, _, err := ReassembleNonStream(strings.NewReader(sb.String()), session)
+	if err != nil {
+		t.Fatalf("ReassembleNonStream: %v", err)
+	}
+	t.Logf("reassembled: %s", result)
+
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Role      string `json:"role"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Choices) == 0 {
+		t.Fatal("no choices")
+	}
+	if resp.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", resp.Choices[0].FinishReason)
+	}
+	if len(resp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool_calls len = %d, want 1", len(resp.Choices[0].Message.ToolCalls))
+	}
+	tc := resp.Choices[0].Message.ToolCalls[0]
+	if tc.ID != "call-abc" {
+		t.Errorf("tool_call.id = %q, want call-abc", tc.ID)
+	}
+	if tc.Type != "function" {
+		t.Errorf("tool_call.type = %q, want function", tc.Type)
+	}
+	if tc.Function.Name != "get_weather" {
+		t.Errorf("tool_call.function.name = %q, want get_weather", tc.Function.Name)
+	}
+	wantArgs := `{"location": "SF"}`
+	if tc.Function.Arguments != wantArgs {
+		t.Errorf("tool_call.function.arguments = %q, want %q", tc.Function.Arguments, wantArgs)
+	}
+}
+
+func TestReassembleNonStream_MultipleToolCalls(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	var sb strings.Builder
+
+	// Two tool calls in parallel (different indices).
+	chunk1 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{
+					{"id": "call-1", "type": "function", "index": 0, "function": map[string]string{"name": "fn_a", "arguments": ""}},
+					{"id": "call-2", "type": "function", "index": 1, "function": map[string]string{"name": "fn_b", "arguments": ""}},
+				},
+			},
+		}},
+	}
+	b1, _ := json.Marshal(chunk1)
+	fmt.Fprintf(&sb, "data: %s\n\n", b1)
+
+	// Arguments for both calls.
+	chunk2 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{
+					{"index": 0, "function": map[string]string{"arguments": `{"x":1}`}},
+					{"index": 1, "function": map[string]string{"arguments": `{"y":2}`}},
+				},
+			},
+		}},
+	}
+	b2, _ := json.Marshal(chunk2)
+	fmt.Fprintf(&sb, "data: %s\n\n", b2)
+
+	// Final chunk.
+	chunk3 := map[string]any{
+		"id": "chatcmpl-1", "model": "test-model", "created": 1234567890,
+		"choices": []map[string]any{{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": "tool_calls",
+		}},
+	}
+	b3, _ := json.Marshal(chunk3)
+	fmt.Fprintf(&sb, "data: %s\n\n", b3)
+	sb.WriteString("data: [DONE]\n\n")
+
+	result, _, err := ReassembleNonStream(strings.NewReader(sb.String()), session)
+	if err != nil {
+		t.Fatalf("ReassembleNonStream: %v", err)
+	}
+	t.Logf("reassembled: %s", result)
+
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Choices[0].Message.ToolCalls) != 2 {
+		t.Fatalf("tool_calls len = %d, want 2", len(resp.Choices[0].Message.ToolCalls))
+	}
+	if resp.Choices[0].Message.ToolCalls[0].Function.Name != "fn_a" {
+		t.Errorf("first tool call name = %q, want fn_a", resp.Choices[0].Message.ToolCalls[0].Function.Name)
+	}
+	if resp.Choices[0].Message.ToolCalls[1].Function.Name != "fn_b" {
+		t.Errorf("second tool call name = %q, want fn_b", resp.Choices[0].Message.ToolCalls[1].Function.Name)
+	}
+	if resp.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", resp.Choices[0].FinishReason)
+	}
+}
+
 func TestRelayStream(t *testing.T) {
 	session := testVeniceSession(t)
 	defer session.Zero()
@@ -866,5 +1089,52 @@ func TestRelayStream_MidStreamScannerError_ReturnsRelayFailed(t *testing.T) {
 	}
 	if errors.Is(err, ErrDecryptionFailed) {
 		t.Error("error should NOT be ErrDecryptionFailed")
+	}
+}
+
+func TestMergeToolCallDelta_MissingIndex(t *testing.T) {
+	calls := make(map[int]*reassembledToolCall)
+
+	// Delta with no "index" field → should error.
+	raw := []byte(`{"id":"call_1","type":"function","function":{"name":"foo","arguments":""}}`)
+	err := mergeToolCallDelta(calls, raw)
+	if err == nil {
+		t.Fatal("expected error for missing index")
+	}
+	if !strings.Contains(err.Error(), "missing required index") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("calls map should be empty after error, got %d entries", len(calls))
+	}
+}
+
+func TestMergeToolCallDelta_NullIndex(t *testing.T) {
+	calls := make(map[int]*reassembledToolCall)
+
+	// Delta with explicit null index → should error.
+	raw := []byte(`{"id":"call_1","type":"function","index":null,"function":{"name":"foo","arguments":""}}`)
+	err := mergeToolCallDelta(calls, raw)
+	if err == nil {
+		t.Fatal("expected error for null index")
+	}
+	if !strings.Contains(err.Error(), "missing required index") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestMergeToolCallDelta_ValidIndex(t *testing.T) {
+	calls := make(map[int]*reassembledToolCall)
+
+	raw := []byte(`{"id":"call_1","type":"function","index":0,"function":{"name":"foo","arguments":"bar"}}`)
+	if err := mergeToolCallDelta(calls, raw); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(calls))
+	}
+	tc := calls[0]
+	if tc.ID != "call_1" || tc.Function.Name != "foo" || tc.Function.Arguments != "bar" {
+		t.Errorf("unexpected tool call: %+v", tc)
 	}
 }
