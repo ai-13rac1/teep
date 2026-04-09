@@ -36,3 +36,13 @@ func (s *Server) PutAttestationCache(providerName, model string, report *attesta
 func (s *Server) PutSigningKeyCache(providerName, model, key string) {
 	s.signingKeyCache.Put(providerName, model, key)
 }
+
+// ChutesRetryableError exposes chutesRetryableError for external tests.
+func ChutesRetryableError(err error, resp *http.Response) bool {
+	return chutesRetryableError(err, resp)
+}
+
+// RespStatusCode exposes respStatusCode for external tests.
+func RespStatusCode(resp *http.Response) int {
+	return respStatusCode(resp)
+}

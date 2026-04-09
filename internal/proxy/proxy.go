@@ -198,6 +198,10 @@ func extractMultipartField(contentType string, body []byte, fieldName string) (s
 // indicates a Chutes instance-level failure that warrants failover to a
 // different instance. Returns false for client-induced cancellations
 // (context.Canceled) so we don't burn retries after the caller is gone.
+//
+// Note: 429 (Too Many Requests) is explicitly NOT retried. Chutes rate
+// limits are account-level, not instance-level, so retrying with a
+// different instance amplifies the rate limit and burns nonces uselessly.
 func chutesRetryableError(err error, resp *http.Response) bool {
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -209,8 +213,7 @@ func chutesRetryableError(err error, resp *http.Response) bool {
 		return true
 	}
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests,
-		http.StatusInternalServerError,
+	case http.StatusInternalServerError,
 		http.StatusBadGateway,
 		http.StatusServiceUnavailable,
 		http.StatusGatewayTimeout:
