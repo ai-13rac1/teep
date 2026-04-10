@@ -4235,3 +4235,17 @@ func TestChutesRetryableError(t *testing.T) {
 		})
 	}
 }
+
+func TestRespStatusCode_Nil(t *testing.T) {
+	if got := proxy.RespStatusCode(nil); got != 0 {
+		t.Errorf("RespStatusCode(nil) = %d, want 0", got)
+	}
+	t.Logf("RespStatusCode(nil) = 0")
+}
+
+func TestRespStatusCode_NonNil(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK}
+	if got := proxy.RespStatusCode(resp); got != http.StatusOK {
+		t.Errorf("RespStatusCode(200 resp) = %d, want 200", got)
+	}
+}

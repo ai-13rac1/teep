@@ -365,3 +365,27 @@ func TestGatewayRepoNames_NoGateway(t *testing.T) {
 		t.Errorf("GatewayRepoNames() = %v, want empty", names)
 	}
 }
+
+func TestHasRTMRPolicy_OutOfRange(t *testing.T) {
+	p := attestation.MeasurementPolicy{}
+	if p.HasRTMRPolicy(-1) {
+		t.Error("HasRTMRPolicy(-1) = true, want false")
+	}
+	if p.HasRTMRPolicy(4) {
+		t.Error("HasRTMRPolicy(4) = true, want false (out of range)")
+	}
+}
+
+func TestHasRTMRPolicy_WithPolicy(t *testing.T) {
+	p := attestation.MeasurementPolicy{
+		RTMRAllow: [4]map[string]struct{}{
+			0: {"allowed_mrtd": {}},
+		},
+	}
+	if !p.HasRTMRPolicy(0) {
+		t.Error("HasRTMRPolicy(0) = false, want true")
+	}
+	if p.HasRTMRPolicy(1) {
+		t.Error("HasRTMRPolicy(1) = true, want false (no policy for RTMR1)")
+	}
+}

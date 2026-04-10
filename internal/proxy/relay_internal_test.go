@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider"
 )
@@ -257,6 +258,7 @@ func TestVerifyNVIDIA_EmptyPayload(t *testing.T) {
 // newMinimalServer builds a Server with only the fields needed for internal unit tests.
 func newMinimalServer() *Server {
 	return &Server{
+		cfg:             &config.Config{},
 		cache:           attestation.NewCache(time.Minute),
 		signingKeyCache: attestation.NewSigningKeyCache(time.Minute),
 		stats:           stats{startTime: time.Now(), models: make(map[string]*modelStats)},
@@ -378,5 +380,66 @@ func TestRelayError_DecryptionVsRelay(t *testing.T) {
 	}
 	if errors.Is(wrapped, relayErr) {
 		t.Error("wrapped decryption error should NOT match ErrRelayFailed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// enforceReport
+// ---------------------------------------------------------------------------
+
+// blockedReport returns a VerificationReport with one enforced-fail factor.
+func blockedReport() *attestation.VerificationReport {
+	return &attestation.VerificationReport{
+		Factors: []attestation.FactorResult{
+			{Tier: "model", Name: "tdx_quote_present", Status: attestation.Fail, Enforced: true, Detail: "no quote"},
+		},
+	}
+}
+
+func TestEnforceReport_NilReport(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, nil, prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true for nil report")
+	}
+}
+
+func TestEnforceReport_NotBlocked(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	report := &attestation.VerificationReport{} // no blocked factors
+	proceed := s.enforceReport(context.Background(), w, report, prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true for non-blocked report")
+	}
+}
+
+func TestEnforceReport_BlockedWithForce(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: true}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, blockedReport(), prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true when Force=true bypasses blocked report")
+	}
+}
+
+func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: false}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, blockedReport(), prov, "model")
+	if proceed {
+		t.Error("expected proceed=false when blocked report and Force=false")
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
 	}
 }

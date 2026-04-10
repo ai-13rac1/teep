@@ -605,3 +605,19 @@ func TestSigningKeyCacheDelete_NoopOnMiss(t *testing.T) {
 	// Should not panic when deleting a missing key.
 	c.Delete("venice", "nonexistent")
 }
+
+func TestNoncePrefix_Long(t *testing.T) {
+	hex := "abcdef1234567890"
+	got := NoncePrefix(hex)
+	if got != "abcdef12" {
+		t.Errorf("NoncePrefix(%q) = %q, want %q", hex, got, "abcdef12")
+	}
+}
+
+func TestNoncePrefix_Short(t *testing.T) {
+	hex := "abc"
+	got := NoncePrefix(hex)
+	if got != "abc" {
+		t.Errorf("NoncePrefix(%q) = %q, want %q", hex, got, "abc")
+	}
+}
