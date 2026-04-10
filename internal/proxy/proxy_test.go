@@ -2969,6 +2969,33 @@ func TestPrepareUpstreamHeaders_WithSession(t *testing.T) {
 	}
 }
 
+func TestPrepareUpstreamHeaders_NearCloudSession(t *testing.T) {
+	// Exercises the *e2ee.NearCloudSession type-switch branch.
+	mock := &mockPreparer{apiKey: "nearcloud-key"}
+	prov := &provider.Provider{
+		Name:     "nearcloud",
+		Preparer: mock,
+	}
+
+	session, err := e2ee.NewNearCloudSession()
+	if err != nil {
+		t.Fatalf("NewNearCloudSession: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false, "/v1/chat/completions"); err != nil {
+		t.Fatalf("PrepareUpstreamHeaders: %v", err)
+	}
+
+	if !mock.called {
+		t.Error("Preparer.PrepareRequest was not called")
+	}
+}
+
 // --------------------------------------------------------------------------
 // relayStream tests
 // --------------------------------------------------------------------------

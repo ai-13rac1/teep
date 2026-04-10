@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -441,5 +445,60 @@ func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// extractMultipartField — missing branches
+// ---------------------------------------------------------------------------
+
+func TestExtractMultipartField_NotMultipart(t *testing.T) {
+	_, err := extractMultipartField("application/json", []byte(`{}`), "model")
+	if err == nil {
+		t.Error("expected error for non-multipart content-type")
+	}
+	if !strings.Contains(err.Error(), "not multipart") {
+		t.Errorf("error = %q, should mention 'not multipart'", err)
+	}
+}
+
+func TestExtractMultipartField_MissingBoundary(t *testing.T) {
+	// multipart/form-data without boundary parameter.
+	_, err := extractMultipartField("multipart/form-data", []byte{}, "model")
+	if err == nil {
+		t.Error("expected error for missing boundary")
+	}
+	if !strings.Contains(err.Error(), "missing boundary") {
+		t.Errorf("error = %q, should mention 'missing boundary'", err)
+	}
+}
+
+func TestExtractMultipartField_FieldNotFound(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, _ := w.CreateFormField("other_field")
+	fmt.Fprint(fw, "value")
+	w.Close()
+	_, err := extractMultipartField(w.FormDataContentType(), buf.Bytes(), "missing_field")
+	if err == nil {
+		t.Error("expected error when field not found")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, should mention 'not found'", err)
+	}
+}
+
+func TestExtractMultipartField_Success(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, _ := w.CreateFormField("model")
+	fmt.Fprint(fw, "deepseek-v3")
+	w.Close()
+	val, err := extractMultipartField(w.FormDataContentType(), buf.Bytes(), "model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "deepseek-v3" {
+		t.Errorf("val = %q, want %q", val, "deepseek-v3")
 	}
 }
