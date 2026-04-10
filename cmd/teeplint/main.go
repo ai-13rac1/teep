@@ -761,7 +761,7 @@ func checkProxyWiring(r *result, providers []string) {
 
 func checkCLIMain(r *result, providers []string) {
 	fmt.Println("  cmd/teep/main.go")
-	path := "cmd/teep/main.go"
+	path := "internal/verify/factory.go"
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
@@ -769,8 +769,8 @@ func checkCLIMain(r *result, providers []string) {
 		return
 	}
 
-	// providerEnvVars map has key for each provider.
-	envVarKeys := collectCompositeLitKeys(f, "providerEnvVars")
+	// ProviderEnvVars map has key for each provider.
+	envVarKeys := collectCompositeLitKeys(f, "ProviderEnvVars")
 	for _, prov := range providers {
 		if envVarKeys[prov] {
 			r.passf("providerEnvVars has key %q", prov)
@@ -1185,9 +1185,9 @@ func extractFuncStringLiterals(f *ast.File, funcName string) string {
 	return b.String()
 }
 
-// readProviderEnvVars extracts the providerEnvVars map from cmd/teep/main.go.
+// readProviderEnvVars extracts the ProviderEnvVars map from internal/verify/factory.go.
 func readProviderEnvVars() map[string]string {
-	path := "cmd/teep/main.go"
+	path := "internal/verify/factory.go"
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
@@ -1205,7 +1205,7 @@ func readProviderEnvVars() map[string]string {
 				continue
 			}
 			for i, name := range vs.Names {
-				if name.Name != "providerEnvVars" || i >= len(vs.Values) {
+				if name.Name != "ProviderEnvVars" || i >= len(vs.Values) {
 					continue
 				}
 				cl, ok := vs.Values[i].(*ast.CompositeLit)
