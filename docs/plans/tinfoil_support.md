@@ -231,7 +231,7 @@ model.
 | Measurement baseline maintenance | Manual operator burden | Automated via Sigstore transparency log |
 | GPU attestation (boot-time) | Not enforced at boot | nvattest + SPDM verified at boot; fail-closed |
 | GPU-CPU binding | Not implemented (`cpu_gpu_chain` = Fail) | `tinfoil_v2`: Not externally verifiable (Skip). `tinfoil_v3`: GPU evidence hash in REPORTDATA (Option 2, Pass). |
-| GPU topology validation | Not validated | 8-GPU + 4-NVSwitch PPCIe mesh validated at boot |
+| GPU topology validation | Not validated | 8-GPU + 4-NVSwitch PCIe mesh validated at boot |
 | TEE.fail defense | Proof of Cloud (conditional) | None (same vulnerability) |
 | vTPM / DCEA | Not implemented | Not implemented |
 
@@ -550,7 +550,7 @@ The two providers handle GPU attestation very differently:
 - At CVM boot, the `nvattest` tool performs local NVIDIA GPU attestation
   (`nvattest attest --device gpu --verifier local`).
 - SPDM reports are collected from each GPU and validated locally.
-- For 8-GPU HGX systems: NVSwitch attestation and full PPCIe topology
+- For 8-GPU HGX systems: NVSwitch attestation and full PCIe topology
   validation (8 GPUs + 4 NVSwitches mesh integrity) are also enforced.
 - If GPU attestation fails, the CVM sets GPU ready state to
   `ACCEPTING_CLIENT_REQUESTS_FALSE` and boot aborts. **No enclave starts
@@ -1682,8 +1682,7 @@ New Go module dependencies:
 - `github.com/google/go-sev-guest` — AMD SEV-SNP verification (Phase 3)
 - `github.com/cloudflare/circl/hpke` or `crypto/hpke` (Go 1.24+) — HPKE
   operations for EHBP (Phase 4)
-- `github.com/sigstore/sigstore-go` — Sigstore bundle verification (Phase 2;
-  already a dependency via existing `attestation/sigstore.go`)
+- `github.com/sigstore/sigstore-go` — Sigstore bundle verification (Phase 2)
 
 ## Public Documentation References
 
