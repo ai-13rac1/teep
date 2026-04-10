@@ -1242,8 +1242,10 @@ GitHub Releases.
      `repos/{repo}/attestations/sha256:{digest}`.
 
 2. **Sigstore Bundle Verifier**:
-   - Use `sigstore-go` library (same as used by teep's existing
-     `attestation/sigstore.go`) to verify the DSSE bundle.
+   - Use the `sigstore-go` library to verify the DSSE bundle. This is a new
+     dependency for Tinfoil bundle verification; teep's existing
+     `internal/attestation/sigstore.go` does not use `sigstore-go` and should
+     only be referenced for any reusable Rekor/Sigstore validation patterns.
    - Certificate identity: OIDC issuer =
      `https://token.actions.githubusercontent.com`.
    - Workflow regex: `^https://github.com/{repo}/.github/workflows/.*@refs/tags/*`.
