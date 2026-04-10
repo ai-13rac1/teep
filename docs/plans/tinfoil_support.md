@@ -22,7 +22,6 @@ Reference providers for implementation patterns: **nearcloud**, **neardirect**,
 | E2EE | Yes (EHBP: HPKE + AES-256-GCM full-body encryption) |
 | Connection model | Standard TLS with SPKI pinning (not connection-pinned) |
 | Attestation endpoint | `GET /.well-known/tinfoil-attestation` on the enclave |
-| HPKE key endpoint | `GET /.well-known/hpke-keys` on the enclave |
 | Nonce model | No client-supplied nonces — keys are embedded in attestation |
 | PinnedHandler | No — uses standard HTTP client with SPKI verification |
 | Supply chain | Sigstore DSSE bundles from GitHub attestations API |
@@ -69,8 +68,10 @@ construction, like Chutes.
    nonce or signing address in REPORTDATA.
 4. **E2EE protocol**: EHBP (RFC 9180 HPKE + AES-256-GCM), not
    Ed25519/XChaCha20-Poly1305 or ML-KEM-768/ChaCha20-Poly1305.
-5. **Key discovery**: HPKE public key fetched from `/.well-known/hpke-keys`
-   (RFC 9458 key config format), not from attestation signing key or nonce pool.
+5. **HPKE key from attestation**: HPKE X25519 public key is embedded in
+   REPORTDATA[32:64] and verified as part of attestation. The cipher suite
+   is fixed (X25519_HKDF_SHA256 / HKDF_SHA256 / AES_256_GCM) per the EHBP
+   spec, so no key config endpoint is needed.
 6. **Hardware measurement verification**: TDX hardware platforms (MRTD, RTMR0)
    matched against a separate Sigstore-attested hardware measurements registry
    (`tinfoilsh/hardware-measurements`).
@@ -269,19 +270,39 @@ After attestation verification:
 
 This binding ensures the TLS connection terminates inside the attested enclave.
 
-### HPKE Key Verification
+### TLS-Fingerprint-Bound Transport
 
-The HPKE public key from REPORTDATA bytes [32:64] must match the key served
-at `/.well-known/hpke-keys`:
+Tinfoil does not use a PinnedHandler (no in-band attestation on inference
+connections). Instead, the proxy creates a **fingerprint-bound
+`http.Transport`** that enforces the attested TLS identity on every
+connection to the enclave.
 
-1. Fetch `GET /.well-known/hpke-keys` from the enclave.
-2. Parse the response as an RFC 9458 Section 3 key configuration:
-   - Format: `key_id(1) || kem_id(2) || public_key_length(2) || public_key(32) || cipher_suites_length(2) || kdf_id(2) || aead_id(2)`
-   - Expected: key_id=0, kem_id=0x0020 (X25519_HKDF_SHA256), kdf_id=0x0001
-     (HKDF_SHA256), aead_id=0x0002 (AES_256_GCM).
-3. Extract the 32-byte X25519 public key from the key config.
-4. Constant-time compare with REPORTDATA bytes [32:64].
-5. On mismatch: fail closed. Store the verified key config for EHBP.
+Implementation pattern (similar to Tinfoil SDK's `TLSBoundRoundTripper`):
+
+1. After attestation, extract the TLS SPKI fingerprint from
+   REPORTDATA[0:32].
+2. Create a custom `http.Transport` with a `VerifyPeerCertificate` callback:
+   - Compute SHA-256 of the peer's PKIX-encoded public key.
+   - Constant-time compare against the attested fingerprint.
+   - On mismatch: return error (connection refused).
+3. Set `DisableKeepAlives: false` — reuse TLS connections to the same
+   enclave while the attestation is fresh.
+4. Set `Connection: close` only when re-attestation is needed (attestation
+   boundary).
+
+**Re-attestation trigger**: When the SPKI cache entry expires or a TLS
+handshake presents a new certificate fingerprint, the transport triggers
+re-attestation before allowing any request through. On re-attestation:
+
+1. Close existing connections (`Transport.CloseIdleConnections()`).
+2. Fetch fresh attestation from `/.well-known/tinfoil-attestation`.
+3. Verify the new attestation (full pipeline: TDX/SEV-SNP + supply chain).
+4. Update the fingerprint in the transport's `VerifyPeerCertificate` callback.
+5. Verify the HPKE key in the new REPORTDATA for E2EE continuity.
+
+This approach avoids the overhead of per-request attestation while maintaining
+the invariant that every byte transits a connection verified against an
+attested enclave.
 
 ### E2EE: Encrypted HTTP Body Protocol (EHBP)
 
@@ -301,8 +322,9 @@ The protocol encrypts entire HTTP request and response bodies using HPKE
 
 #### Request Encryption
 
-1. Fetch the server's HPKE public key from `/.well-known/hpke-keys` (already
-   fetched and verified against attestation REPORTDATA during attestation).
+1. Use the HPKE public key from REPORTDATA[32:64] (already extracted and
+   verified during attestation). The cipher suite is hardcoded:
+   X25519_HKDF_SHA256 / HKDF_SHA256 / AES_256_GCM.
 2. Establish an HPKE encryption context (`SetupBaseS`) using the server's
    public key and a fresh ephemeral keypair.
 3. Encrypt the request body as a stream of length-prefixed chunks:
@@ -379,8 +401,9 @@ SEV-SNP deferred to Phase 3).
    - For TDX: hex-encode the binary, set `raw.IntelQuote`.
    - Set `raw.BackendFormat = attestation.FormatTinfoil`.
    - Extract REPORTDATA from the parsed quote: `raw.TLSFingerprint` =
-     hex(REPORTDATA[0:32]), and store the HPKE key
-     hex(REPORTDATA[32:64]) in a new field or via `raw.SigningKey`.
+     hex(REPORTDATA[0:32]).
+   - Store the HPKE public key from REPORTDATA[32:64] via `raw.SigningKey`
+     (hex-encoded). EHBP cipher suite is hardcoded — no key config fetch needed.
    - The `nonce` parameter is not sent to the server (Tinfoil does not use
      client-supplied nonces). It is stored in the RawAttestation for
      report building.
@@ -402,7 +425,7 @@ SEV-SNP deferred to Phase 3).
      - Validate MR_CONFIG_ID, MR_OWNER, MR_OWNER_CONFIG are all zeros.
      - Validate RTMR3 is all zeros.
      - Validate TEE_TCB_SVN >= minimum.
-   - Store results as additional verification factors in the report.
+   - Store results as `tee_hardware_config` factor details in the report.
 
 4. **MR_SEAM Whitelist** (initial values):
    ```
@@ -472,7 +495,8 @@ GitHub Releases.
      - Multi-platform vs. TDX: compare RTMR1 and RTMR2; verify RTMR3 == 0.
      - Multi-platform vs. SEV-SNP: compare snp_measurement.
    - All comparisons constant-time.
-   - Record results as verification factors.
+   - Record code match as `sigstore_code_verified` factor.
+   - Record hardware match as `cpu_id_registry` factor.
 
 6. **Configuration Repo Mapping**:
    - Per-model Sigstore repo (from Tinfoil's published docs):
@@ -549,8 +573,6 @@ encryption and response decryption.
 - `internal/e2ee/ehbp.go` — EHBP client transport (encrypt request, decrypt
   response)
 - `internal/e2ee/ehbp_test.go` — Unit tests
-- `internal/e2ee/hpkekeys.go` — RFC 9458 key config parser
-- `internal/e2ee/hpkekeys_test.go` — Key config parser tests
 - `internal/provider/tinfoil/e2ee.go` — Tinfoil RequestEncryptor
 
 **Go dependency**: Use `github.com/cloudflare/circl/hpke` or the standard
@@ -558,21 +580,7 @@ encryption and response decryption.
 
 **Implementation**:
 
-1. **RFC 9458 Key Config Parser** (`hpkekeys.go`):
-   - Parse binary key config from `/.well-known/hpke-keys`.
-   - Wire format (RFC 9458 Section 3):
-     ```
-     key_id       (1 byte)
-     kem_id       (2 bytes, big-endian)
-     public_key   (Npk bytes, preceded by 2-byte length)
-     cipher_suites_length (2 bytes, big-endian)
-     [kdf_id (2 bytes) || aead_id (2 bytes)] × N
-     ```
-   - Validate: key_id=0, kem_id=0x0020, kdf_id=0x0001, aead_id=0x0002.
-   - Extract the 32-byte X25519 public key.
-   - Reject unknown KEM/KDF/AEAD — fail closed.
-
-2. **EHBP Encryption** (`ehbp.go`):
+1. **EHBP Encryption** (`ehbp.go`):
    - `EncryptRequest(body []byte, serverPubKey [32]byte) (encBody []byte, encapKey [32]byte, senderCtx, error)`:
      - Call HPKE `SetupBaseS` with X25519_HKDF_SHA256 / HKDF_SHA256 /
        AES_256_GCM and the server's public key.
@@ -582,7 +590,7 @@ encryption and response decryption.
      - Return the encrypted body bytes, the encapsulated key, and the
        retained HPKE sender context for response decryption.
 
-3. **EHBP Decryption** (`ehbp.go`):
+2. **EHBP Decryption** (`ehbp.go`):
    - `DecryptResponse(encBody io.Reader, responseNonce [32]byte, encapKey [32]byte, senderCtx) ([]byte, error)`:
      - Export secret: `secret = senderCtx.Export("ehbp response", 32)`.
      - Construct salt: `salt = encapKey || responseNonce`.
@@ -594,23 +602,22 @@ encryption and response decryption.
        nonce = `aead_nonce XOR chunk_index`.
      - On any auth failure: fail closed, return error immediately.
 
-4. **Streaming Response Decryption**:
+3. **Streaming Response Decryption**:
    - `DecryptResponseStream(body io.Reader, nonce, encapKey, ctx) (io.Reader, error)`:
      - Wraps response body in a reader that decrypts chunks on-the-fly.
      - Used for SSE streaming responses.
      - Each read returns one decrypted chunk.
 
-5. **Tinfoil RequestEncryptor** (`tinfoil/e2ee.go`):
+4. **Tinfoil RequestEncryptor** (`tinfoil/e2ee.go`):
    - Implements `provider.RequestEncryptor`.
    - `EncryptRequest(body, raw, endpointPath)`:
      - Extract HPKE public key from raw attestation (REPORTDATA[32:64]).
-     - Optionally, also verify against `/.well-known/hpke-keys`.
      - Call `ehbp.EncryptRequest(body, pubKey)`.
      - Return encrypted body bytes and a Decryptor for the response.
    - Return a `Decryptor` that reads `Ehbp-Response-Nonce` from the response
      headers and calls `ehbp.DecryptResponse`.
 
-6. **Proxy Integration**:
+5. **Proxy Integration**:
    - The existing proxy E2EE flow calls `Encryptor.EncryptRequest()` and then
      uses the returned Decryptor. The EHBP encryptor follows this same pattern.
    - Set `Ehbp-Encapsulated-Key` header on the outgoing request.
@@ -618,7 +625,6 @@ encryption and response decryption.
    - If `Ehbp-Response-Nonce` is missing: fail closed.
 
 **Unit tests**:
-- Test key config parsing: valid config, wrong KEM, wrong AEAD, truncated.
 - Test encryption round-trip: encrypt with a test key, decrypt with known
   private key.
 - Test chunked framing: single chunk, multiple chunks, zero-length chunks.
@@ -672,19 +678,19 @@ dispatch.
    }
    ```
 
-4. **TLS Fingerprint Verification**: Since Tinfoil is not connection-pinned
-   (no PinnedHandler), the proxy must extract the upstream TLS certificate
-   fingerprint during the HTTP request and compare against the attested value.
-   This may require a custom `http.Transport` with a `VerifyPeerCertificate`
-   callback that checks the fingerprint. Follow the `TLSBoundRoundTripper`
-   pattern from the Tinfoil Go SDK.
+4. **TLS-Fingerprint-Bound Transport**: Create a `tinfoil.NewTransport()`
+   that returns an `http.Transport` with `VerifyPeerCertificate` enforcing the
+   attested SPKI fingerprint on every connection (see the TLS-Fingerprint-
+   Bound Transport protocol section above). The transport is shared between
+   the Attester, E2EE Encryptor, and inference request forwarding. On
+   fingerprint mismatch during inference, trigger re-attestation before
+   retrying.
 
 5. **Allow-Fail Defaults**: Create `attestation.TinfoilDefaultAllowFail`
    with factors that may initially be advisory:
-   - `tinfoil_sigstore_verified` — supply chain (non-blocking initially)
-   - `tinfoil_hardware_measured` — hardware platform matching
-   - `sev_snp_verified` — SEV path (until Phase 3 complete)
-   - Standard TDX, NVIDIA factors that don't apply to Tinfoil
+   - `sigstore_code_verified` — supply chain (non-blocking initially)
+   - `cpu_id_registry` — hardware platform matching (non-blocking initially)
+   - Standard NVIDIA factors that don't apply to Tinfoil
 
 6. **TTS Endpoint**: If TTS (`/v1/audio/speech`) is not yet a proxy endpoint,
    add it to `proxy.go` following the pattern of other endpoints.
@@ -780,15 +786,27 @@ dispatch.
 - `docs/api_support.md` — Add Tinfoil provider section
 - `docs/measurement_allowlists.md` — Add Tinfoil MR_SEAM values
 
-**New Verification Factors**:
-- `tinfoil_attestation_format` — Document format is recognized
-- `tinfoil_tdx_policy` — TDX policy checks (attributes, XFAM, MR_SEAM, etc.)
-- `tinfoil_sev_policy` — SEV-SNP policy checks (guest policy, TCB)
-- `tinfoil_sigstore_verified` — Code measurement verified via Sigstore
-- `tinfoil_hardware_measured` — Hardware platform matched (TDX only)
-- `tinfoil_hpke_key_binding` — HPKE key from attestation matches key endpoint
-- `ehbp_encrypted` — Request was encrypted via EHBP
-- `ehbp_response_authenticated` — Response was decrypted and authenticated
+**Verification factor mapping** (reusing existing factors where possible):
+
+Existing factors reused as-is:
+- `tls_key_binding` — TLS fingerprint matches REPORTDATA
+- `e2ee_capable` — HPKE key extracted from attestation (subsumes key binding)
+- `e2ee_usable` — Request encrypted and response authenticated via EHBP
+
+Existing factors proposed for TEE-generic rename (`tdx_*` → `tee_*`):
+- `tee_quote_present` (was `tdx_quote_present`) — Hardware quote fetched
+- `tee_quote_structure` (was `tdx_quote_structure`) — Quote parses correctly
+- `tee_hardware_config` (was `tdx_hardware_config`) — Platform-specific policy
+  (TDX: attributes, XFAM, MR_SEAM, RTMR3; SEV-SNP: guest policy, TCB)
+- `tee_boot_config` (was `tdx_boot_config`) — Boot measurements match expected
+- `tee_tcb_current` (was `tdx_tcb_current`) — TCB SVN meets minimum
+- `intel_pcs_collateral` — Remains Intel-specific (TDX only); AMD equivalent
+  covered by VCEK chain validation within `tee_quote_structure`
+
+New cross-provider factors:
+- `sigstore_code_verified` — Code measurement verified via Sigstore DSSE bundle
+- `cpu_id_registry` — Hardware platform matched against Sigstore-attested
+  registry (reuses existing factor name)
 
 **Documentation updates**:
 - Add Tinfoil to the endpoint support matrix in `api_support.md`.
@@ -803,17 +821,24 @@ dispatch.
 
 | Factor | Enforced | Description |
 |---|---|---|
-| `tdx_quote_verified` | Yes | TDX quote cryptographic verification (reusing existing) |
-| `sev_snp_verified` | Yes (when implemented) | SEV-SNP report verification |
-| `tinfoil_attestation_format` | Yes | Attestation format is recognized |
-| `tinfoil_tdx_policy` | Yes | TDX attributes, XFAM, MR_SEAM, RTMR3 zero |
-| `tinfoil_sev_policy` | Yes (when implemented) | SEV-SNP guest policy, TCB minimums |
-| `tls_key_binding` | Yes | TLS fingerprint matches REPORTDATA |
-| `tinfoil_hpke_key_binding` | Yes | HPKE key matches attestation and key endpoint |
-| `tinfoil_sigstore_verified` | Advisory initially | Code measurement verified via Sigstore |
-| `tinfoil_hardware_measured` | Advisory initially | Hardware platform matched |
-| `ehbp_encrypted` | Yes | Request body encrypted via EHBP |
-| `ehbp_response_authenticated` | Yes | Response decrypted and AEAD-authenticated |
+| `tee_quote_present` | Yes | Hardware quote fetched and non-empty |
+| `tee_quote_structure` | Yes | Quote parses and signature verifies (TDX or SEV-SNP) |
+| `tee_hardware_config` | Yes | Platform policy (TDX: attrs/XFAM/MR_SEAM/RTMR3; SEV-SNP: guest policy/TCB) |
+| `tee_boot_config` | Yes | Boot measurements match expected (MRTD/RTMR0 or measurement) |
+| `tee_tcb_current` | Yes | TCB SVN meets minimum threshold |
+| `intel_pcs_collateral` | Yes (TDX only) | Intel collateral valid; N/A for SEV-SNP |
+| `tls_key_binding` | Yes | TLS fingerprint matches REPORTDATA[0:32] |
+| `e2ee_capable` | Yes | HPKE key extracted from attestation and verified |
+| `e2ee_usable` | Yes | EHBP request encrypted + response AEAD-authenticated |
+| `sigstore_code_verified` | Advisory initially | Code measurement verified via Sigstore DSSE |
+| `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
+
+The `tee_*` factors are proposed renames of the existing `tdx_*` factors,
+generalized to cover both Intel TDX and AMD SEV-SNP. This rename should be
+applied across all providers (not just Tinfoil) as a prerequisite or
+co-requisite refactoring step. Until the rename lands, Tinfoil can emit the
+existing `tdx_*` factor names for TDX attestations and introduce `sev_*`
+equivalents for SEV-SNP.
 
 ## Dependencies
 
