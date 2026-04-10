@@ -618,3 +618,101 @@ func TestExtractGPUDiags(t *testing.T) {
 		t.Errorf("expected decode error, got %q", diags[0].MeasRes)
 	}
 }
+
+func TestAllSameError(t *testing.T) {
+	tests := []struct {
+		name  string
+		diags []NRASGPUDiag
+		want  bool
+	}{
+		{
+			name:  "empty slice",
+			diags: nil,
+			want:  false,
+		},
+		{
+			name:  "single diag (less than 2)",
+			diags: []NRASGPUDiag{{ErrorDetails: "some error"}},
+			want:  false,
+		},
+		{
+			name:  "two diags same non-empty error",
+			diags: []NRASGPUDiag{{ErrorDetails: "OOM"}, {ErrorDetails: "OOM"}},
+			want:  true,
+		},
+		{
+			name:  "two diags different errors",
+			diags: []NRASGPUDiag{{ErrorDetails: "OOM"}, {ErrorDetails: "timeout"}},
+			want:  false,
+		},
+		{
+			name:  "two diags both empty error",
+			diags: []NRASGPUDiag{{ErrorDetails: ""}, {ErrorDetails: ""}},
+			want:  false, // first == "" so returns false
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := allSameError(tt.diags)
+			t.Logf("allSameError(%d diags) = %v", len(tt.diags), got)
+			if got != tt.want {
+				t.Errorf("allSameError = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNRASDiagDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   *NvidiaVerifyResult
+		wantSubs []string
+	}{
+		{
+			name:     "no GPU diags",
+			result:   &NvidiaVerifyResult{},
+			wantSubs: []string{"NRAS result: false"},
+		},
+		{
+			name: "all GPUs same error",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", ErrorDetails: "measurement mismatch"},
+					{GPUID: "GPU-1", ErrorDetails: "measurement mismatch"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "2 GPUs", "measurement mismatch"},
+		},
+		{
+			name: "different errors per GPU",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", ErrorDetails: "error A"},
+					{GPUID: "GPU-1", ErrorDetails: "error B"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "GPU-0", "error A", "GPU-1", "error B"},
+		},
+		{
+			name: "GPU with measres (no error)",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", MeasRes: "FAIL", DriverVersion: "570.0", HWModel: "GH100"},
+					{GPUID: "GPU-1", MeasRes: "OK", DriverVersion: "570.0", HWModel: "GH100"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "GPU-0", "measres=FAIL"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nrasDiagDetail(tt.result)
+			t.Logf("nrasDiagDetail = %q", got)
+			for _, sub := range tt.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("detail %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
