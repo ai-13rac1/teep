@@ -363,3 +363,9 @@ func TestPreparer_PrepareRequest_NilHeaders(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer test-api-key")
 	}
 }
+
+func TestAttester_SetClient(t *testing.T) {
+	a := venice.NewAttester("https://api.venice.ai", "key")
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}

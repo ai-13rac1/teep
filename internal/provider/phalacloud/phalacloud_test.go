@@ -315,3 +315,9 @@ func TestPreparer_SetsAuthHeader(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", req.Header.Get("Authorization"), "Bearer sk-test-123")
 	}
 }
+
+func TestAttester_SetClient(t *testing.T) {
+	a := phalacloud.NewAttester("https://attest.phala.network", "sk-key")
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}

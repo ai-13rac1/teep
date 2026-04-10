@@ -355,3 +355,17 @@ func TestAttester_FetchAttestation_SetsQueryParams(t *testing.T) {
 	}
 	t.Logf("attester created successfully")
 }
+
+func TestGatewayHost(t *testing.T) {
+	host := nearcloud.GatewayHost()
+	if host == "" {
+		t.Fatal("GatewayHost() returned empty string")
+	}
+	t.Logf("GatewayHost = %q", host)
+}
+
+func TestAttester_SetClient(t *testing.T) {
+	a := nearcloud.NewAttester("key", true)
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}

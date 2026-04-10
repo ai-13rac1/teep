@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/e2ee"
 )
 
@@ -188,6 +190,61 @@ func TestE2EEFailed_IsolationByKey(t *testing.T) {
 	}
 	if _, failed := e2eeFailed.Load(key2); failed {
 		t.Error("key2 should NOT be failed (different model)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// httpError.Unwrap
+// ---------------------------------------------------------------------------
+
+func TestHTTPError_Unwrap(t *testing.T) {
+	cause := errors.New("underlying cause")
+	he := &httpError{code: 502, status: "test_status", err: cause}
+	// Verify Unwrap allows errors.Is to see the wrapped error.
+	if !errors.Is(he, cause) {
+		t.Error("errors.Is(httpError, cause) = false, want true")
+	}
+	if he.Error() != cause.Error() {
+		t.Errorf("Error() = %q, want %q", he.Error(), cause.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// zeroE2EESessions
+// ---------------------------------------------------------------------------
+
+type noopDecryptor struct{ zeroed bool }
+
+func (n *noopDecryptor) IsEncryptedChunk(string) bool   { return false }
+func (n *noopDecryptor) Decrypt(string) ([]byte, error) { return nil, nil }
+func (n *noopDecryptor) Zero()                          { n.zeroed = true }
+
+func TestZeroE2EESessions_NilBoth(t *testing.T) {
+	zeroE2EESessions(nil, nil) // must not panic
+}
+
+func TestZeroE2EESessions_WithSession(t *testing.T) {
+	dec := &noopDecryptor{}
+	zeroE2EESessions(dec, nil)
+	if !dec.zeroed {
+		t.Error("Zero() not called on non-nil session")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// verifyNVIDIA
+// ---------------------------------------------------------------------------
+
+func TestVerifyNVIDIA_EmptyPayload(t *testing.T) {
+	ctx := context.Background()
+	raw := &attestation.RawAttestation{} // no NvidiaPayload, no GPUEvidence
+	result, dur := verifyNVIDIA(ctx, raw, attestation.Nonce{}, "test-provider")
+	if result != nil {
+		t.Errorf("expected nil result for empty raw, got %v", result)
+	}
+	if dur != 0 {
+		t.Errorf("expected 0 duration for empty raw, got %v", dur)
 	}
 }
 

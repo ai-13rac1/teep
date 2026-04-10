@@ -1063,3 +1063,28 @@ base_url = "https://api.near.ai"
 		t.Error("MergedAllowFail returned a shared slice; callers can mutate defaults")
 	}
 }
+
+func TestMergedGatewayMeasurementPolicy_NoPerProvider(t *testing.T) {
+	cfg := &Config{}
+	defaults := attestation.MeasurementPolicy{MRTDAllow: map[string]struct{}{"aabbcc": {}}}
+	p := MergedGatewayMeasurementPolicy("venice", cfg, defaults)
+	if _, ok := p.MRTDAllow["aabbcc"]; !ok {
+		t.Errorf("unexpected MRTDAllow: %v (want key aabbcc)", p.MRTDAllow)
+	}
+}
+
+func TestMergedGatewayMeasurementPolicy_WithPerProvider(t *testing.T) {
+	cfg := &Config{
+		ProviderGatewayPolicies: map[string]attestation.MeasurementPolicy{
+			"venice": {MRTDAllow: map[string]struct{}{"override": {}}},
+		},
+	}
+	defaults := attestation.MeasurementPolicy{MRTDAllow: map[string]struct{}{"default": {}}}
+	p := MergedGatewayMeasurementPolicy("venice", cfg, defaults)
+	if _, ok := p.MRTDAllow["override"]; !ok {
+		t.Errorf("unexpected MRTDAllow: %v (want key override)", p.MRTDAllow)
+	}
+	if _, ok := p.MRTDAllow["default"]; ok {
+		t.Errorf("MRTDAllow should not contain 'default' after per-provider override")
+	}
+}

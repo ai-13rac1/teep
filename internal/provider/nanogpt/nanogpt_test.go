@@ -438,3 +438,9 @@ func TestSupplyChainPolicy(t *testing.T) {
 		t.Error("NanoGPT policy should have no gateway images")
 	}
 }
+
+func TestAttester_SetClient(t *testing.T) {
+	a := nanogpt.NewAttester("https://api.nano-gpt.com", "key")
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}

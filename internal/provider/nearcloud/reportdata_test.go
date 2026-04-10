@@ -110,3 +110,29 @@ func TestGatewayReportDataVerifier_InvalidHex(t *testing.T) {
 		t.Errorf("error should mention 'hex': %v", err)
 	}
 }
+
+func TestGatewayReportDataVerifier_VerifyReportData_NilRaw(t *testing.T) {
+	v := nearcloud.GatewayReportDataVerifier{}
+	_, err := v.VerifyReportData([64]byte{}, nil, attestation.Nonce{})
+	if err == nil {
+		t.Fatal("expected error for nil raw")
+	}
+	if !strings.Contains(err.Error(), "nil") {
+		t.Errorf("error should mention nil: %v", err)
+	}
+}
+
+func TestGatewayReportDataVerifier_VerifyReportData_HappyPath(t *testing.T) {
+	nonce := attestation.NewNonce()
+	fpBytes := []byte("test-fp")
+	fpHex := hex.EncodeToString(fpBytes)
+	rd := buildGatewayReportData(fpBytes, nonce)
+
+	raw := &attestation.RawAttestation{GatewayTLSFingerprint: fpHex}
+	v := nearcloud.GatewayReportDataVerifier{}
+	detail, err := v.VerifyReportData(rd, raw, nonce)
+	if err != nil {
+		t.Fatalf("VerifyReportData: %v", err)
+	}
+	t.Logf("detail: %s", detail)
+}
