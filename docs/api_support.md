@@ -17,7 +17,7 @@ Teep exposes these proxy endpoints to clients:
 
 `/v1/models` is a proxy-aggregated endpoint that returns the combined model list from all configured providers. It is not included in the per-provider matrices below because it is handled entirely by the proxy, does not forward requests to individual providers, and is not E2EE-encrypted (GET request, no sensitive data).
 
-Not all providers support all endpoints. If a provider has no path configured for an endpoint, the proxy returns HTTP 400 with "provider does not support {endpoint}".
+Not all providers support all endpoints. If a provider has no path configured for an endpoint, the proxy returns HTTP 400 with an error indicating that the named provider does not support the requested endpoint (for example, `provider "nearcloud" does not support reranking`).
 
 ## Endpoint Support Matrix
 
@@ -42,7 +42,7 @@ Not all providers support all endpoints. If a provider has no path configured fo
 | Reranking | Fail closed | — | — | — | — |
 
 **Encrypted** = E2EE is applied to request and response fields.
-**Fail closed** = Proxy rejects the request with an error because the upstream TEE cannot decrypt E2EE for this endpoint.
+**Fail closed** = Proxy rejects the request with an error because E2EE is not supported for this endpoint in the end-to-end path, either because the proxy does not implement E2EE field dispatch for that request type or because the upstream TEE cannot decrypt it.
 **Plaintext (pinned)** = Request and response transit in plaintext, but the connection is TLS-pinned to the attested TEE (no E2EE field encryption).
 **No E2EE** = Provider does not support E2EE. Requests transit in plaintext over TLS to the attested TEE.
 **—** = Endpoint not available for this provider.

@@ -658,10 +658,13 @@ arbitrary code. However, this is defense-in-obscurity, not a cryptographic
 mitigation.
 
 **What teep should do (both providers):**
-1. `cpu_id_registry`: Advisory. Validate and surface failures, but do not
-   block requests until registry coverage and rollout are confirmed complete.
-   (TEE.fail means Proof of Cloud is the only way to truly verify, but the
-   hardware platform registry still provides defense-in-depth.)
+1. `cpu_id_registry`: Listed as a default `allow_fail` factor for both
+   Tinfoil providers until Tinfoil supports the hardware platform registry.
+   When Tinfoil publishes registry data, remove from `allow_fail` defaults
+   to enforce it. Users may also remove it from their own `allow_fail` list
+   at that time. (TEE.fail means Proof of Cloud is the only way to truly
+   verify, but the hardware platform registry still provides
+   defense-in-depth when enforced.)
 2. Apply the same TEE.fail residual risk assessment as for other providers.
 3. When DCEA/vTPM support becomes available, add verification support.
 
@@ -1066,6 +1069,13 @@ inference handler.
 **Goal**: Fetch and verify Tinfoil attestation documents (TDX path only;
 SEV-SNP deferred to Phase 3). Create separate V2 and V3 attesters and
 REPORTDATA verifiers in the same package.
+
+**Note on phase ordering**: The deployed `tinfoil_v2` router currently serves
+SEV-SNP attestation (not TDX). Phase 1 builds shared provider plumbing, V2/V3
+attester interfaces, REPORTDATA verifiers, and TDX policy checks — all of
+which can be unit-tested with TDX fixtures. However, `tinfoil_v2` cannot be
+validated against the live deployment until Phase 3 (SEV-SNP verification)
+lands. Phase 1 is not independently deployable for `tinfoil_v2`.
 
 **Files to create**:
 - `internal/provider/tinfoil/tinfoil.go` — Shared types, constants, Preparer
@@ -1480,13 +1490,15 @@ config, and endpoint dispatch.
        advantage is Sigstore-based code measurement; an attacker running
        modified code in a valid enclave environment passes attestation
        if this factor is advisory)
-     - `cpu_id_registry` — advisory initially
+     - `cpu_id_registry` — default `allow_fail` (not yet supported by
+       Tinfoil; remove from defaults when registry data is available)
    - `attestation.TinfoilV3DefaultAllowFail`:
      - `nonce_in_reportdata` — enforced
      - `cpu_gpu_chain` — enforced
      - `nvidia_gpu_attestation` — enforced
      - `sigstore_code_verified` — enforced (same rationale as V2)
-     - `cpu_id_registry` — advisory initially
+     - `cpu_id_registry` — default `allow_fail` (same as V2; remove
+       from defaults when registry data is available)
 
 6. **Config example** (`teep.toml.example`):
    ```toml
@@ -1687,7 +1699,7 @@ Existing factors with provider-specific behavior:
 | `e2ee_capable` | Yes | HPKE key extracted from REPORTDATA[32:64] and verified |
 | `e2ee_usable` | Yes | EHBP request encrypted + response AEAD-authenticated |
 | `sigstore_code_verified` | Yes | Code measurement verified via Sigstore DSSE |
-| `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
+| `cpu_id_registry` | Default `allow_fail` | Hardware platform matched against registry |
 | `measured_model_weights` | Yes (transitive) | Model weights attested via dm-verity + Sigstore chain |
 | `nonce_in_reportdata` | Advisory | V2: no client nonces; TLS key lifecycle freshness |
 | `cpu_gpu_chain` | Skip | V2: GPU evidence not in attestation response |
@@ -1707,7 +1719,7 @@ Existing factors with provider-specific behavior:
 | `e2ee_capable` | Yes | HPKE key from `report_data.hpke_key`, authenticated via REPORTDATA hash |
 | `e2ee_usable` | Yes | EHBP request encrypted + response AEAD-authenticated |
 | `sigstore_code_verified` | Yes | Code measurement verified via Sigstore DSSE |
-| `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
+| `cpu_id_registry` | Default `allow_fail` | Hardware platform matched against registry |
 | `measured_model_weights` | Yes (transitive) | Model weights attested via dm-verity + Sigstore chain |
 | `nonce_in_reportdata` | Yes | V3: client nonce in REPORTDATA hash |
 | `cpu_gpu_chain` | Yes | V3: GPU evidence hash verified in REPORTDATA |
@@ -1775,10 +1787,12 @@ New Go module dependencies:
 ## Risk Assessment
 
 1. **SEV-SNP is new attestation hardware for teep**: No existing SEV-SNP
-   verification code. Phase 3 adds this. Can proceed with TDX-only initially
-   since the deployed router (`tinfoil_v2`) currently serves SEV-SNP
-   attestation (as observed from live API). Note: SEV-SNP is the deployed
-   platform, so SEV-SNP support is required for `tinfoil_v2` to work.
+   verification code. Phase 3 adds this. Shared provider plumbing can be
+   implemented before Phase 3, but `tinfoil_v2` cannot be validated or used
+   against the current deployment until SEV-SNP verification lands, because
+   the deployed router currently serves SEV-SNP attestation (as observed
+   from the live API). TDX-only support is insufficient for the deployed
+   `tinfoil_v2` environment.
 
 2. **EHBP is a new E2EE protocol**: Unlike existing field-level or ML-KEM
    protocols, EHBP uses HPKE (RFC 9180). The protocol is well-specified with
@@ -1814,9 +1828,10 @@ New Go module dependencies:
    TDX/SEV-SNP quotes with arbitrary measurements and REPORTDATA, defeating
    all software-layer security guarantees including Sigstore measurement
    matching and E2EE key binding. This is the same vulnerability affecting
-   all TEE providers. The `cpu_id_registry` factor should be advisory for
-   both `tinfoil_v2` and `tinfoil_v3` (validate and surface failures, but
-   do not block until registry coverage and rollout are confirmed complete).
+   all TEE providers. The `cpu_id_registry` factor should be listed as a
+   default `allow_fail` for both `tinfoil_v2` and `tinfoil_v3` until Tinfoil
+   supports the hardware platform registry. When registry data becomes
+   available, remove from `allow_fail` defaults to enforce it.
    See "Authentication Chain 5" for full analysis and the
    gpu_cpu_binding.md staged mitigation trajectory.
 
