@@ -22,10 +22,13 @@ Reference providers for implementation patterns: **nearcloud**, **neardirect**,
 | E2EE | Yes (EHBP: HPKE + AES-256-GCM full-body encryption) |
 | Connection model | Standard TLS with SPKI pinning (not connection-pinned) |
 | Attestation endpoint | `GET /.well-known/tinfoil-attestation` on the enclave |
-| Nonce model | No client-supplied nonces — keys are embedded in attestation |
+| Nonce model | V2: No client nonces (keys embedded in attestation). V3: Client nonce via `?nonce=<hex>` query parameter. |
 | PinnedHandler | No — uses standard HTTP client with SPKI verification |
 | Supply chain | Sigstore DSSE bundles from GitHub attestations API |
 | Hardware platforms | Intel TDX and AMD SEV-SNP (multi-platform code measurements) |
+| GPU support | NVIDIA H100/H200 (Hopper), Blackwell; 1-GPU and 8-GPU (HGX) configurations |
+| GPU attestation | SPDM via NVML; boot-time fail-closed; V3 binds GPU evidence to CPU quote |
+| TEE.fail mitigation | None (same as all current TDX providers) |
 
 ## Supported Endpoints
 
@@ -81,6 +84,13 @@ construction, like Chutes.
 8. **SEV-SNP support**: Tinfoil enclaves can run on AMD SEV-SNP (not just TDX).
    The attestation format field determines which hardware verification path to
    take.
+9. **GPU attestation binding (V3)**: Tinfoil is the first provider that
+   actually implements GPU evidence hash in REPORTDATA (Option 2 from
+   gpu_cpu_binding.md). GPU SPDM evidence and NVSwitch evidence are
+   hash-bound into the CPU quote. Boot-time GPU attestation is fail-closed.
+10. **No TEE.fail mitigations**: Like all current providers, Tinfoil has no
+    Proof of Cloud participation, no vTPM, and no DCEA. TEE.fail is an open
+    vulnerability. See "Authentication Chain 5" for full analysis.
 
 ---
 
@@ -161,6 +171,11 @@ model.
 | Model identity in attestation | Not present | config.yml commitment → kernel cmdline → RTMR2 |
 | Configuration authenticity | Compose hash in MRCONFIGID | config.yml hash in kernel cmdline + Sigstore |
 | Measurement baseline maintenance | Manual operator burden | Automated via Sigstore transparency log |
+| GPU attestation (boot-time) | Not enforced at boot | nvattest + SPDM verified at boot; fail-closed |
+| GPU-CPU binding | Not implemented (`cpu_gpu_chain` = Fail) | GPU evidence hash in V3 REPORTDATA (Option 2) |
+| GPU topology validation | Not validated | 8-GPU + 4-NVSwitch PPCIe mesh validated at boot |
+| TEE.fail defense | Proof of Cloud (conditional) | None (same vulnerability) |
+| vTPM / DCEA | Not implemented | Not implemented |
 
 ### Authentication Chain 1: CVM Environment (Hardware → Code)
 
@@ -228,6 +243,8 @@ Link 1: Hardware Root of Trust
 │           GPU CC mode validated before service startup
 │           Failure aborts boot (no enclave starts)
 │           Transitively verified via CPU attestation
+│           V3: GPU evidence hash bound into REPORTDATA (see Chain 5)
+│           V3: SPDM evidence independently verifiable by client
 │
 └── Link 1a: Sigstore Supply Chain Anchor
         Sigstore bundle from pri-build-action (GitHub Actions)
@@ -269,8 +286,11 @@ Link 1: Key Generation Inside Enclave
 │   Destroyed when enclave terminates (stateless CVM).
 │
 ├── Link 2: Key Binding to Attestation
-│   │   REPORTDATA[0:31] = SHA-256(TLS public key, PKIX DER)
-│   │   REPORTDATA[32:63] = HPKE X25519 public key (raw 32 bytes)
+│   │   V2: REPORTDATA[0:31] = SHA-256(TLS public key, PKIX DER)
+│   │       REPORTDATA[32:63] = HPKE X25519 public key (raw 32 bytes)
+│   │   V3: REPORTDATA[0:31] = SHA-256(TLS FP || HPKE key || nonce || GPU hash || NVSwitch hash)
+│   │       REPORTDATA[32:63] = zeros
+│   │       (GPU and NVSwitch evidence hashes bind GPU attestation to CPU quote)
 │   │   REPORTDATA is part of the hardware-signed attestation report.
 │   │   Verified by: extracting REPORTDATA from verified quote.
 │   │
@@ -446,11 +466,150 @@ Teep's role is to verify the chain that makes dm-verity trustworthy:
    transitively authenticates the model weights via config.yml → dm-verity.
    Detail string should explain the transitive chain.
 
+### Authentication Chain 5: GPU Attestation and CPU-GPU Binding
+
+Tinfoil uses NVIDIA GPUs (Hopper H100/H200, Blackwell) with NVIDIA
+Confidential Computing. This section analyses Tinfoil's GPU attestation
+model against the gaps documented in `docs/attestation_gaps/gpu_cpu_binding.md`.
+
+#### What Tinfoil Implements
+
+**Boot-time GPU attestation (fail-closed):**
+- At CVM boot, the `nvattest` tool performs local NVIDIA GPU attestation
+  (`nvattest attest --device gpu --verifier local`).
+- SPDM reports are collected from each GPU and validated locally.
+- For 8-GPU HGX systems: NVSwitch attestation and full PPCIe topology
+  validation (8 GPUs + 4 NVSwitches mesh integrity) are also enforced.
+- If GPU attestation fails, the CVM sets GPU ready state to
+  `ACCEPTING_CLIENT_REQUESTS_FALSE` and boot aborts. **No enclave starts
+  without passing GPU attestation.**
+
+**Runtime GPU evidence collection:**
+- The V3 attestation endpoint (`/.well-known/tinfoil-attestation?nonce=<hex>`)
+  collects fresh SPDM evidence from all GPUs and NVSwitches.
+- Evidence is collected via NVML APIs (`GetConfComputeGpuAttestationReport`)
+  with the client-supplied nonce passed through to the GPU.
+- GPU evidence is returned in the attestation response as `gpu` and
+  `nvswitch` JSON fields alongside the CPU report.
+
+**GPU evidence hash in REPORTDATA (V3 format):**
+- For V3 attestation, REPORTDATA is computed as:
+  ```
+  REPORTDATA[0:32] = SHA-256(tls_key_fp || hpke_key || nonce || gpu_evidence_hash || nvswitch_evidence_hash)
+  REPORTDATA[32:64] = zeros
+  ```
+  Where `gpu_evidence_hash = SHA-256(gpu_evidence_json)` and
+  `nvswitch_evidence_hash = SHA-256(nvswitch_evidence_json)`.
+- This cryptographically binds GPU evidence to the TDX/SEV-SNP CPU quote.
+  The CPU hardware signs REPORTDATA, so the GPU evidence hash is
+  hardware-authenticated.
+
+**This implements Option 2 from gpu_cpu_binding.md** (GPU evidence hash in
+TDX REPORTDATA). Tinfoil also extends it to include NVSwitch evidence.
+
+#### V2 vs V3 Attestation Formats
+
+Tinfoil serves two attestation formats from the same endpoint:
+
+| Aspect | V2 (legacy, no nonce) | V3 (fresh, nonce-based) |
+|---|---|---|
+| Endpoint | `GET /.well-known/tinfoil-attestation` | `GET /.well-known/tinfoil-attestation?nonce=<64hex>` |
+| REPORTDATA layout | `[0:32] SHA-256(TLS pubkey)` \| `[32:64] HPKE key` | `[0:32] SHA-256(tls_fp\|\|hpke\|\|nonce\|\|gpu_hash\|\|nvswitch_hash)` \| `[32:64] zeros` |
+| GPU evidence | Not included | Included in response (`gpu`, `nvswitch` fields) |
+| GPU binding | None | SHA-256 hash in REPORTDATA |
+| Freshness | TLS key lifecycle | Client-supplied nonce |
+| Signed by | TLS private key (ECDSA) | TLS private key (ECDSA) |
+| Client verification | tinfoil-go verifier (existing) | Not yet verified by tinfoil-go |
+
+**Important**: The tinfoil-go client library currently only verifies V2
+attestation (no nonce, no GPU). The V3 format with GPU evidence binding
+exists only on the CVM side. This means:
+- Boot-time GPU attestation is enforced inside the CVM (fail-closed).
+- GPU evidence is available in V3 responses but no client currently verifies it.
+
+**Teep should implement V3 verification** to gain GPU binding, which also
+provides client nonce freshness as a bonus. This is documented in the
+implementation phases below.
+
+#### Gap Analysis: GPU CPU Binding (gpu_cpu_binding.md)
+
+| Issue from gpu_cpu_binding.md | Tinfoil Status | Details |
+|---|---|---|
+| **Gap 1: TEE.fail (TDX key extraction)** | **Unmitigated** | No Proof of Cloud, no vTPM, no DCEA. Same vulnerability as all TDX providers. |
+| **Gap 2: CPU-to-GPU binding** | **Partially mitigated (V3 only)** | GPU evidence hash in REPORTDATA (Option 2). Only effective with V3 attestation. V2 has no GPU binding. |
+| **GPU nonce freshness** | **Yes (V3 only)** | Client nonce passed through to GPU SPDM report in V3. Not applicable for V2. |
+| **GPU topology validation** | **Yes (boot-time)** | 8-GPU + 4-NVSwitch mesh validation enforced at boot. |
+| **vTPM / DCEA (Option 3)** | **Not implemented** | No vTPM in Tinfoil CVM image. |
+| **TDX Connect / TDISP (Option 5)** | **Not implemented** | No silicon-level GPU binding. |
+| **Proof of Cloud (Option 1)** | **Not implemented** | No hardware identity registry participation. |
+
+#### TEE.fail Implications for Tinfoil
+
+Tinfoil's security posture against TEE.fail is identical to other TDX
+providers (NearAI, dstack): **no specific mitigation exists**. If an attacker
+extracts TDX attestation signing keys via DDR5 memory bus interposition:
+
+1. The attacker can forge TDX quotes with arbitrary REPORTDATA, including
+   fabricated TLS key fingerprints and HPKE keys.
+2. The attacker can forge measurement registers (MRTD, RTMRs) that match the
+   Sigstore-expected values.
+3. The Sigstore supply chain verification would pass (it only checks that
+   measurements match — it cannot detect that the quote was forged).
+4. E2EE would be defeated: the attacker's fabricated HPKE key would be
+   accepted as the enclave's key.
+
+For V3 attestation, the GPU evidence relay attack described in
+gpu_cpu_binding.md applies: an attacker with extracted TDX keys can relay
+real GPU evidence from the legitimate machine while fabricating the CPU quote
+to bind their own keys. The GPU hash in REPORTDATA provides no defense when
+the attacker controls REPORTDATA (via TEE.fail).
+
+**Tinfoil-specific nuance**: Tinfoil's hermetically built CVM image is
+stronger than dstack in one respect — if an attacker forges a TDX quote,
+they must also provide a complete Tinfoil CVM environment (or intercept
+connections), which is harder than with dstack where the attacker could run
+arbitrary code. However, this is defense-in-obscurity, not a cryptographic
+mitigation.
+
+**What teep should do:**
+1. Implement Tinfoil with the same `cpu_id_registry` and `cpu_gpu_chain`
+   factors as other providers.
+2. `cpu_id_registry`: Set to `Skip` for Tinfoil (no Proof of Cloud
+   participation). If Tinfoil joins Proof of Cloud in the future, this can
+   be upgraded.
+3. `cpu_gpu_chain`:
+   - V2 attestation: `Fail` (no GPU binding in REPORTDATA).
+   - V3 attestation: `Pass` (GPU evidence hash verified in REPORTDATA).
+4. Apply the same TEE.fail residual risk assessment as for other providers.
+5. When DCEA/vTPM support becomes available, add verification support.
+
+#### V3 REPORTDATA Verification (New for Teep)
+
+For V3 attestation, the REPORTDATA verification is different from V2:
+
+1. Recompute `gpu_evidence_hash = SHA-256(raw_gpu_json)` from the `gpu` field
+   in the attestation response.
+2. Recompute `nvswitch_evidence_hash = SHA-256(raw_nvswitch_json)` from the
+   `nvswitch` field (if present; empty for single-GPU systems).
+3. Recompute the expected REPORTDATA:
+   ```
+   expected[0:32] = SHA-256(tls_key_fp || hpke_key || nonce || gpu_evidence_hash || nvswitch_evidence_hash)
+   expected[32:64] = zeros
+   ```
+4. Constant-time compare against the CPU quote's actual REPORTDATA.
+5. Verify each GPU evidence SPDM report (nonce matches client nonce,
+   certificate chain validates against NVIDIA root).
+6. Verify the NVSwitch evidence likewise if present.
+
+This gives teep three properties unavailable in V2:
+- **GPU attestation binding**: GPU evidence is hardware-authenticated via CPU quote.
+- **Client nonce freshness**: Nonce in REPORTDATA proves attestation is fresh.
+- **NVSwitch topology**: NVSwitch evidence validates the GPU interconnect.
+
 ### Attestation Freshness Without Client Nonces
 
-Dstack providers and other teep providers use client-supplied nonces embedded
-in REPORTDATA to prove attestation freshness. Tinfoil does not use client
-nonces. Instead, freshness is established through the TLS key lifecycle:
+**V2 attestation** does not use client nonces. Freshness is established
+through the TLS key lifecycle:
 
 1. Each enclave boot generates a fresh TLS key pair and HPKE key pair.
 2. The TLS key fingerprint is embedded in REPORTDATA and signed by hardware.
@@ -460,11 +619,17 @@ nonces. Instead, freshness is established through the TLS key lifecycle:
 
 **What teep must enforce:**
 
-- On SPKI cache miss (new TLS certificate seen), trigger full re-attestation.
-- On attestation, verify TLS key binding matches the current connection.
-- The `nonce_in_reportdata` factor should be advisory (not enforced) for
-  Tinfoil, with detail explaining the TLS-key-lifecycle freshness model.
-- Do NOT treat the absence of a client nonce as a verification failure.
+- **V3 attestation (preferred)**: Use client-supplied nonce in the query
+  parameter. Verify the nonce is included in the REPORTDATA hash (see V3
+  REPORTDATA verification in Authentication Chain 5). This provides
+  cryptographic freshness equivalent to other providers.
+- **V2 fallback**: On SPKI cache miss (new TLS certificate seen), trigger
+  full re-attestation. On attestation, verify TLS key binding matches the
+  current connection. The `nonce_in_reportdata` factor should be advisory
+  for V2 attestation, with detail explaining the TLS-key-lifecycle freshness
+  model.
+- Do NOT treat the absence of a client nonce as a verification failure when
+  using V2 attestation.
 
 ---
 
@@ -502,15 +667,29 @@ attestation report bytes.
 
 #### REPORTDATA Layout (64 bytes)
 
-Both TDX and SEV-SNP reports contain a 64-byte `report_data` field:
+Both TDX and SEV-SNP reports contain a 64-byte `report_data` field. The
+layout depends on whether the attestation is V2 (legacy) or V3 (nonce-based).
+
+**V2 REPORTDATA** (legacy, no nonce):
 
 | Offset | Size | Content |
 |---|---|---|
 | 0–31 | 32 bytes | SHA-256 fingerprint of the enclave's TLS certificate public key (PKIX DER encoding) |
 | 32–63 | 32 bytes | HPKE X25519 public key (raw 32 bytes) |
 
-The TLS fingerprint binds the attestation to the enclave's TLS identity. The
-HPKE key enables E2EE.
+**V3 REPORTDATA** (nonce-based, includes GPU binding):
+
+| Offset | Size | Content |
+|---|---|---|
+| 0–31 | 32 bytes | SHA-256(tls_key_fp \|\| hpke_key \|\| nonce \|\| gpu_evidence_hash \|\| nvswitch_evidence_hash) |
+| 32–63 | 32 bytes | All zeros |
+
+V3 attestation is returned when the client supplies a nonce query parameter.
+It includes GPU evidence binding and client nonce freshness — see
+"Authentication Chain 5: GPU Attestation and CPU-GPU Binding" for details.
+
+Teep should use V3 attestation (with nonce) when available, falling back to
+V2 only for compatibility. V3 provides strictly stronger properties.
 
 ### TDX Verification (Reuse Existing)
 
@@ -776,30 +955,60 @@ SEV-SNP deferred to Phase 3).
 1. **Attester** (`tinfoil.NewAttester(baseURL, apiKey, offline)`):
    - `FetchAttestation(ctx, model, nonce)` fetches
      `GET {baseURL}/.well-known/tinfoil-attestation`.
-   - Parse the JSON response `{format, body}`.
-   - Reject unknown format URIs — only accept
-     `https://tinfoil.sh/predicate/sev-snp-guest/v2` and
-     `https://tinfoil.sh/predicate/tdx-guest/v2`.
-   - Decode and decompress: base64 → gzip → binary. Bound decompressed size
-     to 10 MiB.
+   - **V3 attestation (preferred)**: If nonce is available, append
+     `?nonce=<hex>` query parameter (32 bytes → 64 hex chars). The response
+     will include GPU/NVSwitch evidence and nonce-bound REPORTDATA.
+   - **V2 fallback**: If no nonce is available, fetch without query parameter.
+     The response uses legacy REPORTDATA layout (no GPU binding, no nonce).
+   - Parse the JSON response. For V3, the response is:
+     ```json
+     {
+       "format": "<attestation_format_v3_uri>",
+       "report_data": { "tls_key_fp": "...", "hpke_key": "...", "nonce": "...",
+                         "gpu_evidence_hash": "...", "nvswitch_evidence_hash": "..." },
+       "cpu": { "platform": "tdx|sev-snp", "report": "<base64>" },
+       "gpu": { "evidences": [...] },
+       "nvswitch": { "evidences": [...] },
+       "certificate": "<PEM>",
+       "signature": "<base64 ECDSA>"
+     }
+     ```
+     For V2, the response is `{ "format": "...", "body": "<base64(gzip(report))>" }`.
+   - Detect V2 vs V3 by the presence of the `report_data` field (V3) or
+     `body` field (V2).
+   - Reject unknown format URIs — only accept known predicate type URIs.
+   - **V3 parsing**: Base64-decode `cpu.report`, bound size to 10 MiB.
+   - **V2 parsing**: Base64-decode and gzip-decompress `body`, bound
+     decompressed size to 10 MiB.
    - For TDX: hex-encode the binary, set `raw.IntelQuote`.
    - Set `raw.BackendFormat = attestation.FormatTinfoil`.
-   - Extract REPORTDATA from the parsed quote: `raw.TLSFingerprint` =
-     hex(REPORTDATA[0:32]).
-   - Store the HPKE public key from REPORTDATA[32:64] via `raw.SigningKey`
-     (hex-encoded). EHBP cipher suite is hardcoded — no key config fetch needed.
-   - The `nonce` parameter is not sent to the server (Tinfoil does not use
-     client-supplied nonces). It is stored in the RawAttestation for
-     report building.
+   - **V2**: Extract REPORTDATA from the parsed quote: `raw.TLSFingerprint` =
+     hex(REPORTDATA[0:32]). Store HPKE key from REPORTDATA[32:64].
+   - **V3**: Extract `tls_key_fp` and `hpke_key` from `report_data` fields.
+     Store GPU evidence JSON for later REPORTDATA verification and GPU
+     attestation validation.
+   - Store the HPKE public key via `raw.SigningKey` (hex-encoded). EHBP
+     cipher suite is hardcoded — no key config fetch needed.
+   - The `nonce` parameter is stored in the RawAttestation for report
+     building.
 
 2. **REPORTDATA Verifier** (`tinfoil.ReportDataVerifier{}`):
    - `VerifyReportData(reportData [64]byte, raw, nonce)`:
-     - Extract `tlsFP = hex(reportData[0:32])`.
-     - Extract `hpkeKey = hex(reportData[32:64])`.
-     - Verify `tlsFP` matches `raw.TLSFingerprint` (constant-time).
-     - Return detail string: `"tls_fp={first8}... hpke_key={first8}..."`.
-   - Note: Nonce is not verified in REPORTDATA (Tinfoil doesn't embed
-     client nonces). Set the `nonce_in_reportdata` factor to advisory.
+     - **V2 attestation** (no nonce in response, no GPU evidence):
+       - Extract `tlsFP = hex(reportData[0:32])`.
+       - Extract `hpkeKey = hex(reportData[32:64])`.
+       - Verify `tlsFP` matches `raw.TLSFingerprint` (constant-time).
+       - Return detail string: `"v2: tls_fp={first8}... hpke_key={first8}..."`.
+     - **V3 attestation** (nonce present, GPU evidence available):
+       - Recompute `expected = SHA-256(tls_fp || hpke_key || nonce || gpu_hash || nvswitch_hash)`.
+       - Constant-time compare `expected` against `reportData[0:32]`.
+       - Verify `reportData[32:64]` is all zeros.
+       - Return detail string: `"v3: reportdata_hash verified, gpu_bound=true"`.
+     - Detect V2 vs V3 by presence of GPU evidence in the raw attestation
+       response. If the attestation JSON contains a `gpu` field, it is V3.
+   - Note: In V2, client nonce is not verified in REPORTDATA. In V3, client
+     nonce is part of the REPORTDATA hash. Set the `nonce_in_reportdata`
+     factor accordingly.
 
 3. **Tinfoil TDX Policy** (additional checks beyond `VerifyTDXQuote`):
    - After standard TDX verification, apply Tinfoil-specific policy:
@@ -822,11 +1031,17 @@ SEV-SNP deferred to Phase 3).
    pattern used for other provider measurement allowlists.
 
 **Unit tests**:
-- Test document parsing with captured attestation responses (save a real
+- Test V2 document parsing with captured attestation responses (save a real
   response as testdata).
+- Test V3 document parsing with captured nonce-based attestation (with GPU
+  evidence).
+- Test V2/V3 format detection (presence of `report_data` vs `body` field).
 - Test decompression: valid gzip, truncated gzip, oversized gzip (>10 MiB).
 - Test format rejection: unknown format URI.
-- Test REPORTDATA extraction: verify correct byte offsets.
+- Test V2 REPORTDATA extraction: verify correct byte offsets (TLS FP + HPKE).
+- Test V3 REPORTDATA verification: recompute SHA-256 hash, compare
+  constant-time. Verify zeros in [32:64].
+- Test V3 GPU evidence hash computation: SHA-256 of raw GPU JSON.
 - Test MR_SEAM whitelist matching.
 
 **Commit**: Phase 1 — Tinfoil attestation document parsing and TDX verification.
@@ -1226,7 +1441,9 @@ Existing factors with Tinfoil-specific behavior:
 | `sigstore_code_verified` | Advisory initially | Code measurement verified via Sigstore DSSE |
 | `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
 | `measured_model_weights` | Yes (transitive) | Model weights attested via dm-verity + Sigstore chain |
-| `nonce_in_reportdata` | Advisory | TLS key lifecycle freshness; no client nonces |
+| `nonce_in_reportdata` | Yes (V3) / Advisory (V2) | V3: client nonce in REPORTDATA hash; V2: TLS key lifecycle freshness |
+| `cpu_gpu_chain` | Advisory initially | V3: GPU evidence hash in REPORTDATA; V2: Fail (no binding) |
+| `nvidia_gpu_attestation` | Advisory initially | V3: SPDM evidence verified per GPU; V2: not available |
 
 The `tee_*` factors are proposed renames of the existing `tdx_*` factors,
 generalized to cover both Intel TDX and AMD SEV-SNP. This rename should be
@@ -1268,11 +1485,12 @@ New Go module dependencies:
    protocols, EHBP uses HPKE (RFC 9180). The protocol is well-specified with
    reference implementations in Go, JS, and Swift.
 
-3. **No client nonces**: Tinfoil does not use client-supplied nonces in
-   attestation. Freshness comes from the enclave's ephemeral TLS key (rotated
-   on reboot). The proxy must re-attest on TLS certificate rotation (SPKI
-   cache miss). The `nonce_in_reportdata` verification factor should be
-   advisory for Tinfoil, not enforced.
+3. **V2 has no client nonces**: Tinfoil's V2 (legacy) attestation does not use
+   client-supplied nonces in attestation. Freshness comes from the enclave's
+   ephemeral TLS key (rotated on reboot). The V3 format supports client nonces
+   and should be preferred. The proxy must re-attest on TLS certificate
+   rotation (SPKI cache miss). The `nonce_in_reportdata` factor should be
+   enforced for V3 and advisory for V2.
 
 4. **Supply chain model differs**: Tinfoil uses Sigstore/GitHub Actions
    attestations rather than compose-hash/IMA. This is a stronger model (code
@@ -1292,3 +1510,24 @@ New Go module dependencies:
    supply chain verification succeeds (see Authentication Chain 4 above).
    This is a significant advantage over dstack providers where
    `measured_model_weights` always returns `Fail`.
+
+7. **TEE.fail is unmitigated**: Tinfoil has no Proof of Cloud participation,
+   no vTPM, and no DCEA. DDR5 memory bus key extraction attacks can forge
+   TDX quotes with arbitrary measurements and REPORTDATA, defeating all
+   software-layer security guarantees including Sigstore measurement
+   matching and E2EE key binding. This is the same vulnerability affecting
+   all TDX providers. The `cpu_id_registry` factor should be `Skip` for
+   Tinfoil. See "Authentication Chain 5" for full analysis and the
+   gpu_cpu_binding.md staged mitigation trajectory.
+
+8. **GPU-CPU binding is partially available**: Tinfoil's V3 attestation
+   binds GPU evidence into REPORTDATA (Option 2 from gpu_cpu_binding.md).
+   This prevents GPU splicing attacks in the absence of TEE.fail. However,
+   it does not defend against TEE.fail (the attacker can fabricate
+   REPORTDATA including the GPU hash). The V2 format has no GPU binding.
+   Teep should prefer V3 attestation and set `cpu_gpu_chain` accordingly.
+
+9. **V3 attestation is not yet verified by any client**: The tinfoil-go
+   library only verifies V2 attestation. Teep will be the first independent
+   client to verify V3, including GPU evidence binding and REPORTDATA hash
+   verification. Extra care is needed for test coverage.
