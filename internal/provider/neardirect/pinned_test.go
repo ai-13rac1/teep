@@ -1504,3 +1504,53 @@ func TestEncryptBody_FailsOnBadBinding(t *testing.T) {
 		t.Errorf("error should mention tdx_reportdata_binding: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ConstantTimeHexEqual
+// ---------------------------------------------------------------------------
+
+func TestConstantTimeHexEqual_Equal(t *testing.T) {
+	ok, err := ConstantTimeHexEqual("deadbeef", "deadbeef")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("equal hex strings should be equal")
+	}
+}
+
+func TestConstantTimeHexEqual_NotEqual(t *testing.T) {
+	ok, err := ConstantTimeHexEqual("deadbeef", "cafebabe")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("different hex strings should not be equal")
+	}
+}
+
+func TestConstantTimeHexEqual_DifferentLengths(t *testing.T) {
+	ok, err := ConstantTimeHexEqual("deadbeef", "dead")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("different-length hex should not be equal")
+	}
+}
+
+func TestConstantTimeHexEqual_InvalidFirst(t *testing.T) {
+	_, err := ConstantTimeHexEqual("not-hex!", "deadbeef")
+	if err == nil {
+		t.Error("expected error for invalid first hex string")
+	}
+	t.Logf("error: %v", err)
+}
+
+func TestConstantTimeHexEqual_InvalidSecond(t *testing.T) {
+	_, err := ConstantTimeHexEqual("deadbeef", "not-hex!")
+	if err == nil {
+		t.Error("expected error for invalid second hex string")
+	}
+	t.Logf("error: %v", err)
+}

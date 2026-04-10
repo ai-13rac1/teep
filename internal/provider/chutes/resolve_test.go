@@ -184,3 +184,21 @@ func TestLooksLikeUUID(t *testing.T) {
 		}
 	}
 }
+
+func TestLooksLikeUUID_WrongDashCount(t *testing.T) {
+	// 36 chars but only 3 dashes → wrong number of parts.
+	// Format: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx---x (3 dashes, len=36)
+	s := "0df3133dc47756d2b4dbf2093bb150a1---" // len=36, 4 parts when split by "-"
+	if chutes.LooksLikeUUID(s) {
+		t.Errorf("LooksLikeUUID(%q) = true, want false (wrong dash count)", s)
+	}
+}
+
+func TestLooksLikeUUID_NonHexChar(t *testing.T) {
+	// Valid UUID structure (length 36, 5 parts) but with a non-hex character.
+	// Replace one digit with 'g' (outside hex range).
+	s := "0df3133d-c477-56d2-b4db-f2093bb150g1"
+	if chutes.LooksLikeUUID(s) {
+		t.Errorf("LooksLikeUUID(%q) = true, want false (non-hex char)", s)
+	}
+}
