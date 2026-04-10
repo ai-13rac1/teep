@@ -6,14 +6,18 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/transparency-dev/merkle/rfc6962"
@@ -702,5 +706,293 @@ func TestFetchRekorProvenance_SETAndInclusionErrors(t *testing.T) {
 	// IntegratedTime should be populated.
 	if prov.IntegratedTime != 1700000000 {
 		t.Errorf("IntegratedTime: got %d, want 1700000000", prov.IntegratedTime)
+	}
+}
+
+// --------------------------------------------------------------------------
+// buildPAE
+// --------------------------------------------------------------------------
+
+func TestBuildPAE_Format(t *testing.T) {
+	payloadType := "application/vnd.in-toto+json"
+	payload := []byte("hello")
+	pae := buildPAE(payloadType, payload)
+	got := string(pae)
+	// DSSEv1 SP len(payloadType) SP payloadType SP len(payload) SP payload
+	want := "DSSEv1 28 application/vnd.in-toto+json 5 hello"
+	if got != want {
+		t.Errorf("buildPAE:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// --------------------------------------------------------------------------
+// verifyDSSESignature error paths
+// --------------------------------------------------------------------------
+
+func TestVerifyDSSESignature_InvalidJSON(t *testing.T) {
+	err := verifyDSSESignature([]byte("not json"), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestVerifyDSSESignature_WrongKind(t *testing.T) {
+	body := `{"kind":"hashedrekord","spec":{"content":{"envelope":{"signatures":[]}}}}`
+	err := verifyDSSESignature([]byte(body), nil)
+	if err == nil {
+		t.Fatal("expected error for wrong kind")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("error should mention 'not supported': %v", err)
+	}
+}
+
+func TestVerifyDSSESignature_NoSignatures(t *testing.T) {
+	body := `{"kind":"dsse","spec":{"content":{"envelope":{"signatures":[]}}}}`
+	err := verifyDSSESignature([]byte(body), nil)
+	if err == nil {
+		t.Fatal("expected error for no signatures")
+	}
+	if !strings.Contains(err.Error(), "no signatures") {
+		t.Errorf("error should mention 'no signatures': %v", err)
+	}
+}
+
+func TestVerifyDSSESignature_BadSigBase64(t *testing.T) {
+	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"not-base64!!!"}]}}}}`
+	err := verifyDSSESignature([]byte(body), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid sig base64")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestVerifyDSSESignature_BadPayloadBase64(t *testing.T) {
+	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"not-base64!!!","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
+	err := verifyDSSESignature([]byte(body), nil)
+	if err == nil {
+		t.Fatal("expected error for invalid payload base64")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestVerifyDSSESignature_NoPEMBlock(t *testing.T) {
+	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
+	err := verifyDSSESignature([]byte(body), []byte("not a pem block"))
+	if err == nil {
+		t.Fatal("expected error for no PEM block")
+	}
+	if !strings.Contains(err.Error(), "no PEM block") {
+		t.Errorf("error should mention 'no PEM block': %v", err)
+	}
+}
+
+func TestVerifyDSSESignature_InvalidCertInPEM(t *testing.T) {
+	// PEM block present but contains garbage — x509 parse will fail.
+	certPEM := "-----BEGIN CERTIFICATE-----\naW52YWxpZA==\n-----END CERTIFICATE-----\n"
+	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
+	err := verifyDSSESignature([]byte(body), []byte(certPEM))
+	if err == nil {
+		t.Fatal("expected error for invalid certificate")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestVerifyDSSESignature_WrongSignature(t *testing.T) {
+	// Generate a real self-signed ECDSA cert and provide a wrong signature.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	certDER, err := selfSignedCert(key)
+	if err != nil {
+		t.Fatalf("selfSignedCert: %v", err)
+	}
+	certPEM := fmt.Sprintf("-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n",
+		base64.StdEncoding.EncodeToString(certDER))
+	// Use a valid base64 signature that is wrong (all zeros).
+	wrongSig := base64.StdEncoding.EncodeToString(make([]byte, 64))
+	body := fmt.Sprintf(`{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":%q}]}}}}`,
+		wrongSig)
+	err = verifyDSSESignature([]byte(body), []byte(certPEM))
+	if err == nil {
+		t.Fatal("expected ECDSA verification failure")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+// selfSignedCert creates a minimal self-signed DER-encoded certificate for testing.
+func selfSignedCert(key *ecdsa.PrivateKey) ([]byte, error) {
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	return x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+}
+
+// --------------------------------------------------------------------------
+// extractVerifierPEM error paths
+// --------------------------------------------------------------------------
+
+func TestExtractVerifierPEM_InvalidJSON(t *testing.T) {
+	_, err := extractVerifierPEM([]byte("not json"))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	t.Logf("expected error: %v", err)
+}
+
+func TestExtractVerifierPEM_NoSignatures(t *testing.T) {
+	_, err := extractVerifierPEM([]byte(`{"spec":{"signatures":[]}}`))
+	if err == nil {
+		t.Fatal("expected error for no signatures")
+	}
+	if !strings.Contains(err.Error(), "no signatures") {
+		t.Errorf("error should mention 'no signatures': %v", err)
+	}
+}
+
+func TestExtractVerifierPEM_EmptyVerifier(t *testing.T) {
+	body := `{"spec":{"signatures":[{"verifier":""}]}}`
+	_, err := extractVerifierPEM([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for empty verifier")
+	}
+	if !strings.Contains(err.Error(), "empty verifier") {
+		t.Errorf("error should mention 'empty verifier': %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// FetchRekorProvenance: entry fetch error path
+// --------------------------------------------------------------------------
+
+func TestFetchRekorProvenance_EntryFetchError(t *testing.T) {
+	// UUID lookup returns a UUID, but the entry fetch returns HTTP 500.
+	testUUID := "24296fb24b8ad77afailentry123456"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Rekor mock: %s %s", r.Method, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v1/index/retrieve":
+			w.Header().Set("Content-Type", "application/json")
+			resp, _ := json.Marshal([]string{testUUID})
+			w.Write(resp)
+		case "/api/v1/log/entries/retrieve":
+			http.Error(w, "server error", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
+	if prov.Err == nil {
+		t.Fatal("expected error when entry fetch fails")
+	}
+	t.Logf("expected error: %v", prov.Err)
+}
+
+// TestFetchRekorProvenance_UnexpectedPEMType tests the unexpected PEM type branch.
+func TestFetchRekorProvenance_UnexpectedPEMType(t *testing.T) {
+	// Build an entry body with a PEM block of type "PRIVATE KEY" — neither
+	// "PUBLIC KEY" nor "CERTIFICATE", so the unexpected type branch fires.
+	unexpectedPEM := `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7
+-----END PRIVATE KEY-----`
+	dsseBody := buildMockDSSEBody(unexpectedPEM)
+	entryResp := buildMockEntryResponse("test-unexpected-pem-uuid", dsseBody)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/index/retrieve":
+			w.Header().Set("Content-Type", "application/json")
+			resp, _ := json.Marshal([]string{"test-unexpected-pem-uuid"})
+			w.Write(resp)
+		case "/api/v1/log/entries/retrieve":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(entryResp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
+	t.Logf("FetchRekorProvenance with unexpected PEM type: Err=%v", prov.Err)
+	// The function should return some error (no usable entry found).
+	if prov.Err == nil {
+		t.Error("expected non-nil error for unexpected PEM type")
+	}
+}
+
+// TestSetRekorPublicKeyOverride verifies the override setter and restore.
+func TestSetRekorPublicKeyOverride(t *testing.T) {
+	orig := rekorPublicKeyOverride
+	t.Cleanup(func() { rekorPublicKeyOverride = orig })
+
+	SetRekorPublicKeyOverride("fake-pem-key")
+	if rekorPublicKeyOverride != "fake-pem-key" {
+		t.Errorf("rekorPublicKeyOverride = %q, want %q", rekorPublicKeyOverride, "fake-pem-key")
+	}
+
+	SetRekorPublicKeyOverride("")
+	if rekorPublicKeyOverride != "" {
+		t.Errorf("rekorPublicKeyOverride after reset = %q, want empty", rekorPublicKeyOverride)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// truncateStr
+// ---------------------------------------------------------------------------
+
+func TestTruncateStr_Short(t *testing.T) {
+	s := "hello"
+	if got := truncateStr(s); got != s {
+		t.Errorf("truncateStr short = %q, want %q", got, s)
+	}
+}
+
+func TestTruncateStr_Exact256(t *testing.T) {
+	s := strings.Repeat("a", 256)
+	if got := truncateStr(s); got != s {
+		t.Errorf("truncateStr exact 256 chars should be unchanged, got len=%d", len(got))
+	}
+}
+
+func TestTruncateStr_Long(t *testing.T) {
+	s := strings.Repeat("b", 300)
+	got := truncateStr(s)
+	if len(got) != 259 { // 256 + len("...")
+		t.Errorf("truncateStr long: len = %d, want 259", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Error("truncateStr long: should end with \"...\"")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decodeExtensionValue
+// ---------------------------------------------------------------------------
+
+func TestDecodeExtensionValue_RawUTF8Fallback(t *testing.T) {
+	// Pass raw UTF-8 bytes (not ASN.1-encoded). The fallback branch is taken.
+	raw := []byte("hello world")
+	got := decodeExtensionValue(raw)
+	if got != "hello world" {
+		t.Errorf("decodeExtensionValue UTF-8 fallback = %q, want \"hello world\"", got)
+	}
+}
+
+func TestDecodeExtensionValue_InvalidUTF8(t *testing.T) {
+	// Invalid UTF-8 and not ASN.1 → returns empty string.
+	raw := []byte{0xff, 0xfe, 0x00}
+	got := decodeExtensionValue(raw)
+	if got != "" {
+		t.Errorf("decodeExtensionValue invalid UTF-8 = %q, want \"\"", got)
 	}
 }

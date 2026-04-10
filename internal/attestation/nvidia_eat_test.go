@@ -183,3 +183,30 @@ func TestLoadPinnedNVIDIARootCA(t *testing.T) {
 		t.Error("root CA is not marked as CA")
 	}
 }
+
+// TestGPUEvidenceToEAT_Basic verifies the JSON envelope structure.
+func TestGPUEvidenceToEAT_Basic(t *testing.T) {
+	evidence := []GPUEvidence{
+		{Arch: "HOPPER", Certificate: "cert1", Evidence: "ev1"},
+		{Arch: "HOPPER", Certificate: "cert2", Evidence: "ev2"},
+	}
+	out := GPUEvidenceToEAT(evidence, "testnonce")
+	if !strings.Contains(out, `"arch":"HOPPER"`) {
+		t.Errorf("expected arch field, got: %s", out)
+	}
+	if !strings.Contains(out, `"nonce":"testnonce"`) {
+		t.Errorf("expected nonce field, got: %s", out)
+	}
+	if !strings.Contains(out, `"evidence_list"`) {
+		t.Errorf("expected evidence_list field, got: %s", out)
+	}
+	t.Logf("GPUEvidenceToEAT output: %s", out)
+}
+
+// TestGPUEvidenceToEAT_Empty verifies zero-evidence case.
+func TestGPUEvidenceToEAT_Empty(t *testing.T) {
+	out := GPUEvidenceToEAT([]GPUEvidence{}, "nonce")
+	if !strings.Contains(out, `"arch":""`) {
+		t.Errorf("expected empty arch for no evidence, got: %s", out)
+	}
+}

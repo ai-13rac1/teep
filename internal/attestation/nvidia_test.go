@@ -770,3 +770,52 @@ func TestShutdownJWKS(t *testing.T) {
 	ShutdownJWKS()
 	t.Log("ShutdownJWKS completed twice without panic")
 }
+
+// ---------------------------------------------------------------------------
+// jsonString / jsonBool utility functions
+// ---------------------------------------------------------------------------
+
+func TestJSONString_MissingKey(t *testing.T) {
+	m := map[string]any{"other": "value"}
+	if got := jsonString(m, "missing"); got != "" {
+		t.Errorf("jsonString missing key = %q, want \"\"", got)
+	}
+}
+
+func TestJSONString_StringValue(t *testing.T) {
+	m := map[string]any{"k": "hello"}
+	if got := jsonString(m, "k"); got != "hello" {
+		t.Errorf("jsonString string value = %q, want \"hello\"", got)
+	}
+}
+
+func TestJSONString_NonStringValue(t *testing.T) {
+	// Non-string value triggers the fmt.Sprintf fallback branch.
+	m := map[string]any{"k": 42}
+	got := jsonString(m, "k")
+	if got != "42" {
+		t.Errorf("jsonString non-string = %q, want \"42\"", got)
+	}
+}
+
+func TestJSONBool_MissingKey(t *testing.T) {
+	m := map[string]any{"other": true}
+	if got := jsonBool(m, "missing"); got {
+		t.Error("jsonBool missing key should return false")
+	}
+}
+
+func TestJSONBool_TrueValue(t *testing.T) {
+	m := map[string]any{"k": true}
+	if got := jsonBool(m, "k"); !got {
+		t.Error("jsonBool true value should return true")
+	}
+}
+
+func TestJSONBool_NonBoolValue(t *testing.T) {
+	// Non-bool value triggers the type-assertion failure branch.
+	m := map[string]any{"k": "yes"}
+	if got := jsonBool(m, "k"); got {
+		t.Error("jsonBool non-bool value should return false")
+	}
+}

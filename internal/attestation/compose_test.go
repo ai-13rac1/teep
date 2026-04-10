@@ -2,6 +2,8 @@ package attestation
 
 import (
 	"crypto/sha256"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -247,6 +249,35 @@ image: ghcr.io/nearai/router:v2@sha256:0000111122223333444455556666777788889999a
 	}
 	if repos[0] != "ghcr.io/nearai/router" {
 		t.Fatalf("unexpected repository: %s", repos[0])
+	}
+}
+
+func TestNormalizeImageRepository_Empty(t *testing.T) {
+	got := normalizeImageRepository("")
+	if got != "" {
+		t.Errorf("normalizeImageRepository(\"\") = %q, want \"\"", got)
+	}
+}
+
+func TestExtractImageDigests_Capped(t *testing.T) {
+	// Build text with maxImageDigests+1 unique digests; only maxImageDigests should be returned.
+	var b strings.Builder
+	for i := 0; i <= maxImageDigests; i++ {
+		fmt.Fprintf(&b, "image: ghcr.io/org/img%d@sha256:%064x\n", i, i)
+	}
+	digests := ExtractImageDigests(b.String())
+	if len(digests) != maxImageDigests {
+		t.Errorf("expected %d digests (capped), got %d", maxImageDigests, len(digests))
+	}
+}
+
+func TestExtractImageDigestToRepoMap_Conflict(t *testing.T) {
+	// Same digest appears with two different image refs — first-writer-wins.
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	text := fmt.Sprintf("repo1@sha256:%s\nrepo2@sha256:%s", digest, digest)
+	m := ExtractImageDigestToRepoMap(text)
+	if m[digest] != "repo1" {
+		t.Errorf("first-writer-wins: got %q, want \"repo1\"", m[digest])
 	}
 }
 
