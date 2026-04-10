@@ -12,6 +12,10 @@ uses the EHBP protocol (HPKE-based full-body encryption).
 Reference providers for implementation patterns: **nearcloud**, **neardirect**,
 **chutes**.
 
+**Byte range notation**: This document uses Go slice notation throughout.
+`REPORTDATA[0:32]` means bytes at indices 0 through 31 (32 bytes).
+`REPORTDATA[32:64]` means bytes at indices 32 through 63 (32 bytes).
+
 ### Two-Provider Model: `tinfoil_v2` and `tinfoil_v3`
 
 Tinfoil has two attestation formats that differ in REPORTDATA layout, nonce
@@ -346,11 +350,11 @@ Link 1: Key Generation Inside Enclave
 │
 ├── Link 2: Key Binding to Attestation
 │   │   tinfoil_v2:
-│   │       REPORTDATA[0:31] = SHA-256(TLS public key, PKIX DER)
-│   │       REPORTDATA[32:63] = HPKE X25519 public key (raw 32 bytes)
+│   │       REPORTDATA[0:32] = SHA-256(TLS public key, PKIX DER)
+│   │       REPORTDATA[32:64] = HPKE X25519 public key (raw 32 bytes)
 │   │   tinfoil_v3:
-│   │       REPORTDATA[0:31] = SHA-256(TLS FP || HPKE key || nonce || GPU hash || NVSwitch hash)
-│   │       REPORTDATA[32:63] = zeros
+│   │       REPORTDATA[0:32] = SHA-256(TLS FP || HPKE key || nonce || GPU hash || NVSwitch hash)
+│   │       REPORTDATA[32:64] = zeros
 │   │       HPKE key in response report_data field (authenticated by hash)
 │   │   REPORTDATA is part of the hardware-signed attestation report.
 │   │   Verified by: extracting REPORTDATA from verified quote.
@@ -358,7 +362,7 @@ Link 1: Key Generation Inside Enclave
 │   ├── Link 3: TLS Key Binding
 │   │   │   Client connects to enclave via TLS.
 │   │   │   Computes SHA-256 of server's TLS public key (PKIX DER).
-│   │   │   Constant-time compares against REPORTDATA[0:31].
+│   │   │   Constant-time compares against REPORTDATA[0:32].
 │   │   │   Mismatch → reject connection (fail closed).
 │   │   │   Guarantees: TLS terminates inside the attested enclave.
 │   │   │   No intermediary can MITM or terminate TLS.
@@ -370,9 +374,9 @@ Link 1: Key Generation Inside Enclave
 │   │           Connection: close on attestation boundary
 │   │
 │   └── Link 4: HPKE Key Binding
-│       │   tinfoil_v2: HPKE public key from REPORTDATA[32:63].
+│       │   tinfoil_v2: HPKE public key from REPORTDATA[32:64].
 │       │   tinfoil_v3: HPKE public key from response report_data.hpke_key
-│       │               (authenticated by REPORTDATA[0:31] hash).
+│       │               (authenticated by REPORTDATA[0:32] hash).
 │       │   Used as the recipient public key for EHBP encryption.
 │       │   Since it is part of the hardware-signed REPORTDATA, the key
 │       │   is authenticated by the same hardware root of trust as the
@@ -407,14 +411,14 @@ Link 1: Key Generation Inside Enclave
 
 **What teep must verify (enforcement checklist):**
 
-1. Extract TLS public key fingerprint from REPORTDATA[0:31] of the verified
+1. Extract TLS public key fingerprint from REPORTDATA[0:32] of the verified
    attestation report. → `tls_key_binding`
 2. On every TLS connection to the enclave, compute SHA-256 of the server's
    PKIX-encoded public key and constant-time compare against the attested
    fingerprint. Mismatch → re-attest → mismatch again → block.
    → `tls_key_binding`
 3. Extract HPKE public key from the verified attestation report:
-   `tinfoil_v2`: from REPORTDATA[32:63]; `tinfoil_v3`: from response
+   `tinfoil_v2`: from REPORTDATA[32:64]; `tinfoil_v3`: from response
    `report_data.hpke_key` (verified via REPORTDATA hash). → `e2ee_capable`
 4. Use **only** this attested HPKE key for EHBP encryption. Never accept a
    key from any other source. The cipher suite is fixed:
@@ -674,9 +678,15 @@ For `tinfoil_v3` attestation, the REPORTDATA verification differs from
 1. Extract `tls_key_fp` and `hpke_key` from the response `report_data`
    field (not from REPORTDATA bytes directly).
 2. Recompute `gpu_evidence_hash = SHA-256(raw_gpu_json)` from the `gpu` field
-   in the attestation response.
+   in the attestation response. **Important**: The hash must be computed over
+   the exact bytes received in the HTTP response, not a parsed-and-reserialized
+   JSON object. Different JSON libraries produce different byte sequences for
+   identical data (key ordering, whitespace). The implementation must extract
+   the `gpu` field as a `json.RawMessage` and hash those raw bytes directly
+   (i.e., `sha256.Sum256([]byte(rawGPUMessage))`) without re-encoding.
 3. Recompute `nvswitch_evidence_hash = SHA-256(raw_nvswitch_json)` from the
-   `nvswitch` field (if present; empty for single-GPU systems).
+   `nvswitch` field (if present; empty for single-GPU systems). Same raw-byte
+   requirement as the GPU evidence hash above.
 4. Recompute the expected REPORTDATA:
    ```
    expected[0:32] = SHA-256(tls_key_fp || hpke_key || nonce || gpu_evidence_hash || nvswitch_evidence_hash)
@@ -704,6 +714,17 @@ through the TLS key lifecycle:
 3. The TLS certificate is issued by a public CA and logged in CT logs.
 4. When the enclave reboots, new keys are generated and a new attestation
    report is produced with different REPORTDATA.
+
+**Critical implementation constraint**: For `tinfoil_v2`, the attestation
+response and the TLS certificate binding **must be verified on the same TCP
+connection**. If teep fetches attestation on connection A (observing its TLS
+certificate) but then opens a separate connection B for inference, an
+adversary with network position can replay a valid-but-stale attestation on
+A while controlling B. The SPKI-pinned transport (see TLS-Fingerprint-Bound
+Transport section) enforces this: the `VerifyPeerCertificate` callback
+computes the TLS fingerprint on every connection and compares it against the
+attested REPORTDATA[0:32] value. This ensures attestation and inference
+share the same TLS identity, even across connection reuse.
 
 **`tinfoil_v3`** supports client-supplied nonces:
 
@@ -1144,15 +1165,22 @@ REPORTDATA verifiers in the same package.
      - Validate TEE_TCB_SVN >= minimum.
    - Store results as `tee_hardware_config` factor details in the report.
 
-8. **MR_SEAM Whitelist** (initial values, in `policy.go`):
+8. **MR_SEAM Whitelist** (in `policy.go`):
+   The Sigstore hardware-measurements registry (`tinfoilsh/hardware-measurements`,
+   already fetched in Phase 2 at lines 904-918) is the authoritative source for
+   MR_SEAM values. At runtime, the implementation should source MR_SEAM values
+   from the verified hardware-measurements predicate. The following hardcoded
+   values serve as an **offline fallback** when the Sigstore registry is
+   unreachable:
    ```
    TDX 2.0.08: 476a2997c62bccc78370913d0a80b956e3721b24272bc66c4d6307ced4be2865c40e26afac75f12df3425b03eb59ea7c
    TDX 1.5.16: 7bf063280e94fb051f5dd7b1fc59ce9aac42bb961df8d44b709c9b0ff87a7b4df648657ba6d1189589feab1d5a3c9a9d
    TDX 2.0.02: 685f891ea5c20e8fa27b151bf34bf3b50fbaf7143cc53662727cbdb167c0ad8385f1f6f3571539a91e104a1c96d75e04
    TDX 1.5.08: 49b66faa451d19ebbdbe89371b8daf2b65aa3984ec90110343e9e2eec116af08850fa20e3b1aa9a874d77a65380ee7e6
    ```
-   These should go in `tinfoil/policy.go` as a hardcoded set, matching the
-   pattern used for other provider measurement allowlists.
+   When Intel releases new TDX firmware, the Sigstore registry will contain
+   the updated MR_SEAM values automatically. The hardcoded fallback should
+   be updated periodically but is not the primary source.
 
 **Unit tests** (split by provider):
 - **Shared**: Test gzip decompression (valid, truncated, oversized >10 MiB).
@@ -1435,13 +1463,16 @@ config, and endpoint dispatch.
      - `nonce_in_reportdata` — advisory (V2 has no nonces)
      - `cpu_gpu_chain` — Skip (V2 has no GPU evidence)
      - `nvidia_gpu_attestation` — Skip (same)
-     - `sigstore_code_verified` — advisory initially
+     - `sigstore_code_verified` — enforced (Tinfoil's core security
+       advantage is Sigstore-based code measurement; an attacker running
+       modified code in a valid enclave environment passes attestation
+       if this factor is advisory)
      - `cpu_id_registry` — advisory initially
    - `attestation.TinfoilV3DefaultAllowFail`:
      - `nonce_in_reportdata` — enforced
      - `cpu_gpu_chain` — enforced
      - `nvidia_gpu_attestation` — enforced
-     - `sigstore_code_verified` — advisory initially
+     - `sigstore_code_verified` — enforced (same rationale as V2)
      - `cpu_id_registry` — advisory initially
 
 6. **Config example** (`teep.toml.example`):
@@ -1642,7 +1673,7 @@ Existing factors with provider-specific behavior:
 | `tls_key_binding` | Yes | TLS fingerprint matches REPORTDATA[0:32] |
 | `e2ee_capable` | Yes | HPKE key extracted from REPORTDATA[32:64] and verified |
 | `e2ee_usable` | Yes | EHBP request encrypted + response AEAD-authenticated |
-| `sigstore_code_verified` | Advisory initially | Code measurement verified via Sigstore DSSE |
+| `sigstore_code_verified` | Yes | Code measurement verified via Sigstore DSSE |
 | `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
 | `measured_model_weights` | Yes (transitive) | Model weights attested via dm-verity + Sigstore chain |
 | `nonce_in_reportdata` | Advisory | V2: no client nonces; TLS key lifecycle freshness |
@@ -1662,19 +1693,50 @@ Existing factors with provider-specific behavior:
 | `tls_key_binding` | Yes | TLS fingerprint matches REPORTDATA[0:32] hash component |
 | `e2ee_capable` | Yes | HPKE key from `report_data.hpke_key`, authenticated via REPORTDATA hash |
 | `e2ee_usable` | Yes | EHBP request encrypted + response AEAD-authenticated |
-| `sigstore_code_verified` | Advisory initially | Code measurement verified via Sigstore DSSE |
+| `sigstore_code_verified` | Yes | Code measurement verified via Sigstore DSSE |
 | `cpu_id_registry` | Advisory initially | Hardware platform matched against registry |
 | `measured_model_weights` | Yes (transitive) | Model weights attested via dm-verity + Sigstore chain |
 | `nonce_in_reportdata` | Yes | V3: client nonce in REPORTDATA hash |
 | `cpu_gpu_chain` | Yes | V3: GPU evidence hash verified in REPORTDATA |
 | `nvidia_gpu_attestation` | Yes | V3: SPDM evidence verified per GPU |
 
+#### Factor Rename Migration (`tdx_*` → `tee_*`)
+
 The `tee_*` factors are proposed renames of the existing `tdx_*` factors,
-generalized to cover both Intel TDX and AMD SEV-SNP. This rename should be
-applied across all providers (not just Tinfoil) as a prerequisite or
-co-requisite refactoring step. Until the rename lands, Tinfoil can emit the
-existing `tdx_*` factor names for TDX attestations and introduce `sev_*`
-equivalents for SEV-SNP.
+generalized to cover both Intel TDX and AMD SEV-SNP. **This rename must be
+performed atomically within a single commit** to avoid silent breakage.
+
+The following references must all be updated together:
+
+1. **`KnownFactors` list** in `internal/attestation/report.go` — rename all
+   `tdx_*` entries (and `gateway_tdx_*` entries) to `tee_*` / `gateway_tee_*`.
+2. **`ReportDataBindingPassed()`** in `internal/attestation/report.go` —
+   currently hardcodes the string `"tdx_reportdata_binding"`. Must be
+   updated to `"tee_reportdata_binding"` (or the new equivalent name).
+3. **All factor emission sites** across provider packages (`nearcloud`,
+   `neardirect`, `chutes`, `venice`, etc.) that emit `tdx_*` factor names.
+4. **`proxy.go`** — lines that gate E2EE on `ReportDataBindingPassed()`
+   (approximately lines 1312, 1372, 1617) are safe if the function is
+   updated, but verify no other string literals reference old names.
+5. **`validateAllowFail()`** in `internal/config/config.go` — validates
+   against `KnownFactors`. After the rename, existing user `teep.toml`
+   files with `allow_fail = ["tdx_hardware_config"]` will fail validation
+   at startup because the factor name is no longer recognized. **This is
+   correct fail-closed behavior** — unrecognized config entries must produce
+   an error (per AGENTS.md: "Unknown or misspelled config values MUST be
+   rejected at startup"). Users must update their config to use the new
+   `tee_*` names.
+6. **Default allow-fail lists** in `internal/defaults/defaults.go` — update
+   all `tdx_*` entries in per-provider defaults.
+7. **Documentation** — update `docs/measurement_allowlists.md`,
+   `docs/api_support.md`, and any other docs referencing `tdx_*` factors.
+8. **Test assertions** — update all test files that assert on `tdx_*` factor
+   name strings.
+
+This rename should be applied across all providers (not just Tinfoil) as a
+prerequisite or co-requisite commit. Until the rename lands, Tinfoil can
+emit the existing `tdx_*` factor names for TDX attestations and introduce
+`sev_*` equivalents for SEV-SNP.
 
 ## Dependencies
 
@@ -1682,7 +1744,7 @@ New Go module dependencies:
 - `github.com/google/go-sev-guest` — AMD SEV-SNP verification (Phase 3)
 - `github.com/cloudflare/circl/hpke` or `crypto/hpke` (Go 1.24+) — HPKE
   operations for EHBP (Phase 4)
-- `github.com/sigstore/sigstore-go` — Sigstore bundle verification (Phase 2)
+- `github.com/sigstore/sigstore-go` — Sigstore bundle verification (new dependency; Phase 2)
 
 ## Public Documentation References
 
