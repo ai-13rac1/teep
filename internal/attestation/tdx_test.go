@@ -4,6 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"encoding/hex"
+	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -194,4 +196,21 @@ func TestPPIDExtraction(t *testing.T) {
 		}
 		t.Logf("FMSPC: %s", result.FMSPC)
 	}
+}
+
+// TestTDXCollateralGetterRace proves that concurrent callers of verify.Run
+// race on the TDXCollateralGetter global. Each goroutine sets the global then
+// calls VerifyTDXQuote, which reads it — matching the pattern in verify.Run.
+// Run with -race to detect.
+func TestTDXCollateralGetterRace(t *testing.T) {
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			TDXCollateralGetter = NewCollateralGetter(&http.Client{})
+			_ = VerifyTDXQuote(context.Background(), realTDXQuoteHex(), NewNonce(), true)
+		}()
+	}
+	wg.Wait()
 }
