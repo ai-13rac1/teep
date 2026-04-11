@@ -3,6 +3,7 @@ package attestation
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	pb "github.com/google/go-tdx-guest/proto/tdx"
 )
 
 // buildMinimalRaw returns a RawAttestation with the given fields populated.
@@ -405,6 +407,17 @@ func TestEvalNonceMatch(t *testing.T) {
 	}
 }
 
+func TestEvalNonceMatch_WithNonceSource(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+	raw := buildMinimalRaw(nonce, sigKey)
+	raw.NonceSource = "enclave"
+	f := assertSingleFactor(t, evalNonceMatch(&ReportInput{Raw: raw, Nonce: nonce}), Pass)
+	if !strings.Contains(f.Detail, "enclave-supplied") {
+		t.Errorf("detail %q should contain 'enclave-supplied'", f.Detail)
+	}
+}
+
 func TestEvalTDXQuotePresent(t *testing.T) {
 	nonce := NewNonce()
 	sigKey := validSigningKey(t)
@@ -622,6 +635,22 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			t.Errorf("detail should mention MRTD: %s", f.Detail)
 		}
 	})
+
+	t.Run("pass_mrseam_only", func(t *testing.T) {
+		tdx := &TDXVerifyResult{
+			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
+			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
+		}
+		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+			TDX: tdx,
+			Policy: MeasurementPolicy{
+				MRSeamAllow: map[string]struct{}{strings.Repeat("22", 48): {}},
+			},
+		}), Pass)
+		if !strings.Contains(f.Detail, "MRSEAM") {
+			t.Errorf("detail should mention MRSEAM: %s", f.Detail)
+		}
+	})
 }
 
 func TestEvalTDXHardwareConfig(t *testing.T) {
@@ -740,6 +769,24 @@ func TestEvalTDXBootConfig(t *testing.T) {
 	})
 }
 
+func TestEvalTDXBootConfig_PassRTMR2Only(t *testing.T) {
+	// Only RTMR2 configured — loop iteration for i=1 hits `continue`.
+	var rtmrs [4][48]byte
+	copy(rtmrs[2][:], bytesFromHex(t, strings.Repeat("cd", 48)))
+	tdx := &TDXVerifyResult{RTMRs: rtmrs}
+	assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		TDX: tdx,
+		Policy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{
+				nil,
+				nil,
+				{strings.Repeat("cd", 48): {}},
+				nil,
+			},
+		},
+	}), Pass)
+}
+
 func TestEvalTDXReportDataBinding(t *testing.T) {
 	nonce := NewNonce()
 	sigKey := validSigningKey(t)
@@ -790,6 +837,18 @@ func TestEvalTDXReportDataBinding(t *testing.T) {
 	}
 }
 
+func TestEvalTDXReportDataBinding_EmptySigningKey(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, "")
+	tdx := &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)} // ParseErr == nil
+	f := assertSingleFactor(t, evalTDXReportDataBinding(&ReportInput{
+		Raw: raw, Nonce: nonce, TDX: tdx,
+	}), Fail)
+	if !strings.Contains(f.Detail, "public key absent") {
+		t.Errorf("detail %q should mention 'public key absent'", f.Detail)
+	}
+}
+
 func TestEvalIntelPCSCollateral(t *testing.T) {
 	nonce := NewNonce()
 	sigKey := validSigningKey(t)
@@ -802,6 +861,7 @@ func TestEvalIntelPCSCollateral(t *testing.T) {
 		{"skip_nil_tdx", nil, Skip},
 		{"pass_with_tcb_status", &TDXVerifyResult{TeeTCBSVN: make([]byte, 16), TcbStatus: "UpToDate"}, Pass},
 		{"skip_offline", &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)}, Skip},
+		{"skip_collateral_err", &TDXVerifyResult{TeeTCBSVN: make([]byte, 16), CollateralErr: errors.New("network error")}, Skip},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1026,6 +1086,17 @@ func TestEvalNvidiaClientNonceBound(t *testing.T) {
 		nv := &NvidiaVerifyResult{Format: "EAT", Nonce: ""}
 		assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Skip)
 	})
+
+	t.Run("pass_non_eat_format", func(t *testing.T) {
+		// Cover nvidiaClientNonceDetail default branch (non-EAT format).
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.NvidiaPayload = `{"evidence_list":[]}`
+		nv := &NvidiaVerifyResult{Format: "NRAS", Nonce: nonce.Hex()}
+		f := assertSingleFactor(t, evalNvidiaClientNonceBound(&ReportInput{Raw: raw, Nonce: nonce, Nvidia: nv}), Pass)
+		if !strings.Contains(f.Detail, "NVIDIA nonce matches") {
+			t.Errorf("detail = %q, want NVIDIA nonce matches", f.Detail)
+		}
+	})
 }
 
 func TestEvalNvidiaNRASVerified(t *testing.T) {
@@ -1111,6 +1182,18 @@ func TestEvalE2EECapable(t *testing.T) {
 	}
 }
 
+func TestEvalE2EECapable_Secp256k1WithAlgo(t *testing.T) {
+	// secp256k1 key with non-empty SigningAlgo — exercises the SigningAlgo annotation branch.
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+	raw := buildMinimalRaw(nonce, sigKey)
+	raw.SigningAlgo = "secp256k1"
+	f := assertSingleFactor(t, evalE2EECapable(&ReportInput{Raw: raw}), Pass)
+	if !strings.Contains(f.Detail, "secp256k1") {
+		t.Errorf("detail %q should contain algo name", f.Detail)
+	}
+}
+
 func TestEvalTLSKeyBinding(t *testing.T) {
 	nonce := NewNonce()
 	sigKey := validSigningKey(t)
@@ -1144,6 +1227,14 @@ func TestEvalCPUGPUChain(t *testing.T) {
 
 func TestEvalMeasuredModelWeights(t *testing.T) {
 	assertSingleFactor(t, evalMeasuredModelWeights(&ReportInput{Raw: &RawAttestation{}}), Fail)
+}
+
+func TestEvalComposeBinding_ChutesFormat(t *testing.T) {
+	raw := &RawAttestation{BackendFormat: FormatChutes}
+	f := assertSingleFactor(t, evalComposeBinding(&ReportInput{Raw: raw, Compose: nil}), Skip)
+	if !strings.Contains(f.Detail, "chutes") {
+		t.Errorf("detail %q should mention 'chutes'", f.Detail)
+	}
 }
 
 func TestEvalComposeBinding(t *testing.T) {
@@ -1214,6 +1305,29 @@ func TestEvalSigstoreVerification(t *testing.T) {
 			Provider: "neardirect", Raw: raw,
 		}), Skip)
 	})
+}
+
+func TestEvalSigstoreVerification_ChutesFormat(t *testing.T) {
+	raw := &RawAttestation{BackendFormat: FormatChutes}
+	f := assertSingleFactor(t, evalSigstoreVerification(&ReportInput{Raw: raw}), Skip)
+	if !strings.Contains(f.Detail, "chutes") {
+		t.Errorf("detail %q should mention 'chutes'", f.Detail)
+	}
+}
+
+func TestEvalSigstoreVerification_FailWithErr(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+	raw := buildMinimalRaw(nonce, sigKey)
+	sig := []SigstoreResult{
+		{Digest: "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234", OK: false, Err: errors.New("connection refused")},
+	}
+	f := assertSingleFactor(t, evalSigstoreVerification(&ReportInput{
+		Provider: "neardirect", Raw: raw, Sigstore: sig,
+	}), Fail)
+	if !strings.Contains(f.Detail, "connection refused") {
+		t.Errorf("detail %q should contain error message", f.Detail)
+	}
 }
 
 func TestEvalEventLogIntegrity(t *testing.T) {
@@ -1644,6 +1758,48 @@ func TestEvalE2EEUsable(t *testing.T) {
 		}
 	})
 
+	t.Run("skip_no_api_key_unknown_env", func(t *testing.T) {
+		// APIKeyEnv is empty → env falls back to "<unknown>".
+		f := assertSingleFactor(t, evalE2EEUsable(&ReportInput{
+			Raw: &RawAttestation{},
+			E2EETest: &E2EETestResult{
+				NoAPIKey:  true,
+				APIKeyEnv: "",
+			},
+		}), Skip)
+		if !strings.Contains(f.Detail, "<unknown>") {
+			t.Errorf("detail %q should contain '<unknown>'", f.Detail)
+		}
+	})
+
+	t.Run("pass_attempted_no_detail", func(t *testing.T) {
+		// Attempted=true, Detail="" → uses default detail.
+		f := assertSingleFactor(t, evalE2EEUsable(&ReportInput{
+			Raw: &RawAttestation{},
+			E2EETest: &E2EETestResult{
+				Attempted: true,
+				Detail:    "",
+			},
+		}), Pass)
+		if !strings.Contains(f.Detail, "succeeded") {
+			t.Errorf("detail %q should contain 'succeeded'", f.Detail)
+		}
+	})
+
+	t.Run("skip_not_attempted_no_detail", func(t *testing.T) {
+		// not Attempted, no err, Detail="" → uses default detail.
+		f := assertSingleFactor(t, evalE2EEUsable(&ReportInput{
+			Raw: &RawAttestation{},
+			E2EETest: &E2EETestResult{
+				Attempted: false,
+				Detail:    "",
+			},
+		}), Skip)
+		if !strings.Contains(f.Detail, "not attempted") {
+			t.Errorf("detail %q should contain 'not attempted'", f.Detail)
+		}
+	})
+
 	t.Run("enforced_no_api_key_promoted_to_fail", func(t *testing.T) {
 		// When E2EETest is populated (teep verify path), the factor is
 		// NOT deferred. If enforced and Skip (no API key), it gets
@@ -1859,6 +2015,156 @@ func TestEvalGatewayEventLogIntegrity_EmptySkips(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{},
 	}), Skip)
+}
+
+// --------------------------------------------------------------------------
+// formatBuildTransparencyResult branches
+// --------------------------------------------------------------------------
+
+func TestFormatBuildTransparencyResult_Default(t *testing.T) {
+	f := formatBuildTransparencyResult(nil, 0, 0, 0, 0, 0, "")
+	if f.Status != Skip {
+		t.Errorf("status = %v, want Skip", f.Status)
+	}
+}
+
+func TestFormatBuildTransparencyResult_NoPolicyFulcio(t *testing.T) {
+	f := formatBuildTransparencyResult(nil, 2, 0, 0, 0, 3, "detail")
+	if f.Status != Pass {
+		t.Errorf("status = %v, want Pass", f.Status)
+	}
+	if !strings.Contains(f.Detail, "2/3") {
+		t.Errorf("detail = %q, want 2/3 fraction", f.Detail)
+	}
+}
+
+func TestFormatBuildTransparencyResult_PolicyFulcioOnly(t *testing.T) {
+	scPolicy := &SupplyChainPolicy{}
+	f := formatBuildTransparencyResult(scPolicy, 2, 0, 0, 0, 2, "detail")
+	if f.Status != Pass {
+		t.Errorf("status = %v, want Pass", f.Status)
+	}
+	if !strings.Contains(f.Detail, "Fulcio") {
+		t.Errorf("detail = %q, want mention of Fulcio", f.Detail)
+	}
+}
+
+func TestFormatBuildTransparencyResult_PolicySigstoreOnly(t *testing.T) {
+	scPolicy := &SupplyChainPolicy{}
+	f := formatBuildTransparencyResult(scPolicy, 0, 1, 0, 0, 1, "detail")
+	if f.Status != Pass {
+		t.Errorf("status = %v, want Pass", f.Status)
+	}
+	if !strings.Contains(f.Detail, "Sigstore") {
+		t.Errorf("detail = %q, want mention of Sigstore", f.Detail)
+	}
+}
+
+func TestFormatBuildTransparencyResult_PolicyBothFulcioAndSigstore(t *testing.T) {
+	scPolicy := &SupplyChainPolicy{}
+	f := formatBuildTransparencyResult(scPolicy, 2, 1, 0, 0, 3, "detail")
+	if f.Status != Pass {
+		t.Errorf("status = %v, want Pass", f.Status)
+	}
+	if !strings.Contains(f.Detail, "Fulcio") || !strings.Contains(f.Detail, "Sigstore") {
+		t.Errorf("detail = %q, want mention of both Fulcio and Sigstore", f.Detail)
+	}
+}
+
+func TestFormatBuildTransparencyResult_LogVerify(t *testing.T) {
+	// When setVerified > 0, logVerify is appended to the detail.
+	f := formatBuildTransparencyResult(nil, 2, 0, 2, 2, 3, "detail")
+	if !strings.Contains(f.Detail, "SET") {
+		t.Errorf("detail = %q, want log integrity info", f.Detail)
+	}
+}
+
+// --------------------------------------------------------------------------
+// evalCPUIDRegistry missing branches
+// --------------------------------------------------------------------------
+
+func TestEvalCPUIDRegistry_Registered(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		PoC: &PoCResult{Registered: true, Label: "test-machine"},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Pass)
+}
+
+func TestEvalCPUIDRegistry_PoCErr(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		PoC: &PoCResult{Registered: false, Err: errors.New("network timeout")},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Skip)
+}
+
+func TestEvalCPUIDRegistry_NotRegistered(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		PoC: &PoCResult{Registered: false},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Fail)
+}
+
+func TestEvalCPUIDRegistry_NoPoCWithPPID(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		TDX: &TDXVerifyResult{PPID: "deadbeef12345678"},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Skip)
+}
+
+func TestEvalCPUIDRegistry_DeviceIDShort(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{DeviceID: "dev1234"},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Skip)
+}
+
+func TestEvalCPUIDRegistry_DeviceIDLong(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{DeviceID: "device-id-that-is-longer-than-eight"},
+	}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Skip)
+}
+
+func TestEvalCPUIDRegistry_Fallthrough(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}}
+	assertSingleFactor(t, evalCPUIDRegistry(in), Fail)
+}
+
+// --------------------------------------------------------------------------
+// evalEventLogIntegrity missing branches
+// --------------------------------------------------------------------------
+
+func TestEvalEventLogIntegrity_ChutesSkip(t *testing.T) {
+	raw := &RawAttestation{BackendFormat: FormatChutes}
+	assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw}), Skip)
+}
+
+func TestEvalEventLogIntegrity_ParseErr(t *testing.T) {
+	digest := strings.Repeat("aa", 48)
+	raw := &RawAttestation{EventLog: []EventLogEntry{{IMR: 0, Digest: digest}}}
+	tdx := &TDXVerifyResult{ParseErr: errors.New("bad quote")}
+	assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw, TDX: tdx}), Skip)
+}
+
+func TestEvalEventLogIntegrity_RTMRMismatch(t *testing.T) {
+	digest := strings.Repeat("bb", 48)
+	raw := &RawAttestation{EventLog: []EventLogEntry{{IMR: 0, Digest: digest}}}
+	tdx := &TDXVerifyResult{} // RTMRs all zero — won't match replayed value
+	assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw, TDX: tdx}), Fail)
+}
+
+func TestEvalEventLogIntegrity_ReplayError(t *testing.T) {
+	// IMR index 4 is out of range [0,3] — ReplayEventLog returns an error.
+	raw := &RawAttestation{EventLog: []EventLogEntry{{IMR: 4, Digest: strings.Repeat("aa", 48)}}}
+	tdx := &TDXVerifyResult{} // ParseErr == nil
+	f := assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw, TDX: tdx}), Fail)
+	if !strings.Contains(f.Detail, "replay failed") {
+		t.Errorf("detail %q should mention 'replay failed'", f.Detail)
+	}
 }
 
 func TestBuildReport_EnforcedPromotion(t *testing.T) {
@@ -2432,4 +2738,812 @@ func TestAllowFailConsistency(t *testing.T) {
 			t.Error("cloned report (Pass) should be unchanged after further Clone+mutation")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// tdxQuoteVersion
+// ---------------------------------------------------------------------------
+
+func TestTDXQuoteVersion_Unknown(t *testing.T) {
+	r := &TDXVerifyResult{} // quote is nil → default branch
+	got := tdxQuoteVersion(r)
+	if got != "Quote (unknown version)" {
+		t.Errorf("tdxQuoteVersion (nil) = %q, want %q", got, "Quote (unknown version)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayNonceMatch
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayNonceMatch_Empty(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayNonceHex: ""}
+	results := evalGatewayNonceMatch(in)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+	t.Logf("result: %s %s", results[0].Status, results[0].Detail)
+}
+
+func TestEvalGatewayNonceMatch_Mismatch(t *testing.T) {
+	nonce := NewNonce()
+	in := &ReportInput{
+		Raw:             &RawAttestation{},
+		GatewayNonce:    nonce,
+		GatewayNonceHex: NewNonce().Hex(), // different nonce
+	}
+	results := evalGatewayNonceMatch(in)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+	t.Logf("result: %s %s", results[0].Status, results[0].Detail)
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayComposeBinding
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayComposeBinding_NilCompose(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayCompose: nil}
+	results := evalGatewayComposeBinding(in)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayComposeBinding_WithError(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		GatewayCompose: &ComposeBindingResult{
+			Checked: true,
+			Err:     errors.New("binding check failed"),
+		},
+	}
+	results := evalGatewayComposeBinding(in)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayComposeBinding_Pass(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		GatewayCompose: &ComposeBindingResult{
+			Checked: true,
+			Err:     nil,
+		},
+	}
+	results := evalGatewayComposeBinding(in)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// classifyRekorEntry — missing branches
+// ---------------------------------------------------------------------------
+
+func TestClassifyRekorEntry_ErrWithFulcioSigned(t *testing.T) {
+	// r.Err != nil && img.Provenance == FulcioSigned → rekorFailed
+	r := &RekorProvenance{Err: errors.New("fetch failed")}
+	img := &ImageProvenance{Provenance: FulcioSigned}
+	kind, detail := classifyRekorEntry(r, img, "myrepo/img", nil)
+	if kind != rekorFailed {
+		t.Errorf("kind = %v, want rekorFailed", kind)
+	}
+	if detail == "" {
+		t.Error("expected non-empty failDetail for FulcioSigned fetch error")
+	}
+}
+
+func TestClassifyRekorEntry_ErrWithoutFulcio(t *testing.T) {
+	// r.Err != nil but img is nil → rekorSigstore
+	r := &RekorProvenance{Err: errors.New("fetch failed")}
+	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", nil)
+	if kind != rekorSigstore {
+		t.Errorf("kind = %v, want rekorSigstore", kind)
+	}
+	if detail != "" {
+		t.Errorf("failDetail = %q, want empty", detail)
+	}
+}
+
+func TestClassifyRekorEntry_NoPolicyNoCert(t *testing.T) {
+	// scPolicy==nil && !r.HasCert → rekorSigstore
+	r := &RekorProvenance{HasCert: false}
+	kind, _ := classifyRekorEntry(r, nil, "myrepo/img", nil)
+	if kind != rekorSigstore {
+		t.Errorf("kind = %v, want rekorSigstore", kind)
+	}
+}
+
+func TestClassifyRekorEntry_NoPolicyWithCertBadIssuer(t *testing.T) {
+	// scPolicy==nil && r.HasCert && bad OIDCIssuer → rekorFailed
+	r := &RekorProvenance{HasCert: true, OIDCIssuer: "https://evil.com"}
+	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", nil)
+	if kind != rekorFailed {
+		t.Errorf("kind = %v, want rekorFailed", kind)
+	}
+	if detail == "" {
+		t.Error("expected non-empty failDetail for bad OIDC issuer")
+	}
+}
+
+func TestClassifyRekorEntry_NoPolicyWithCertGoodIssuer(t *testing.T) {
+	// scPolicy==nil && r.HasCert && correct OIDCIssuer → rekorFulcio
+	r := &RekorProvenance{
+		HasCert:    true,
+		OIDCIssuer: "https://token.actions.githubusercontent.com",
+	}
+	kind, _ := classifyRekorEntry(r, nil, "myrepo/img", nil)
+	if kind != rekorFulcio {
+		t.Errorf("kind = %v, want rekorFulcio", kind)
+	}
+}
+
+func TestClassifyRekorEntry_DefaultNotInPolicy(t *testing.T) {
+	// img==nil && scPolicy!=nil (not nil) → default → rekorFailed
+	r := &RekorProvenance{}
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{{Repo: "other/repo", ModelTier: true}},
+	}
+	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", scPolicy)
+	if kind != rekorFailed {
+		t.Errorf("kind = %v, want rekorFailed", kind)
+	}
+	if detail == "" {
+		t.Error("expected non-empty failDetail for image not in policy")
+	}
+}
+
+func TestClassifyRekorEntry_SigstorePresentNoKeyCheck(t *testing.T) {
+	// img != nil, SigstorePresent, no KeyFingerprint → rekorSigstore
+	r := &RekorProvenance{}
+	img := &ImageProvenance{Provenance: SigstorePresent, KeyFingerprint: ""}
+	kind, _ := classifyRekorEntry(r, img, "myrepo/img", nil)
+	if kind != rekorSigstore {
+		t.Errorf("kind = %v, want rekorSigstore", kind)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildTransparencyNoRekor
+// ---------------------------------------------------------------------------
+
+func TestBuildTransparencyNoRekor_WithScPolicy(t *testing.T) {
+	scPolicy := &SupplyChainPolicy{} // non-nil → Fail
+	in := &ReportInput{Raw: &RawAttestation{}}
+	result := buildTransparencyNoRekor(in, scPolicy)
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+	t.Logf("detail: %s", result.Detail)
+}
+
+func TestBuildTransparencyNoRekor_WithComposeHash(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{ComposeHash: "abc123deadbeef"},
+	}
+	result := buildTransparencyNoRekor(in, nil)
+	if result.Status != Skip {
+		t.Errorf("status = %v, want Skip", result.Status)
+	}
+	t.Logf("detail: %s", result.Detail)
+}
+
+func TestBuildTransparencyNoRekor_Chutes(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{BackendFormat: FormatChutes},
+	}
+	result := buildTransparencyNoRekor(in, nil)
+	if result.Status != Skip {
+		t.Errorf("status = %v, want Skip", result.Status)
+	}
+	t.Logf("detail: %s", result.Detail)
+}
+
+func TestBuildTransparencyNoRekor_NoRekorFail(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{}, // no ComposeHash, not Chutes, scPolicy nil
+	}
+	result := buildTransparencyNoRekor(in, nil)
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkImageRepoPolicy — missing branches
+// ---------------------------------------------------------------------------
+
+func TestCheckImageRepoPolicy_NoImageRepos(t *testing.T) {
+	// len(in.ImageRepos) == 0 → fail immediately.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{{Repo: "myrepo/img", ModelTier: true}},
+	}
+	in := &ReportInput{Raw: &RawAttestation{}, ImageRepos: nil}
+	result, done := checkImageRepoPolicy(in, scPolicy)
+	if !done {
+		t.Error("expected done=true when no image repos")
+	}
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+func TestCheckImageRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
+	// Policy has gateway images but GatewayImageRepos is empty → fail.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{
+			{Repo: "myrepo/model", ModelTier: true},
+			{Repo: "myrepo/gateway", GatewayTier: true},
+		},
+	}
+	in := &ReportInput{
+		Raw:               &RawAttestation{},
+		ImageRepos:        []string{"myrepo/model"},
+		GatewayImageRepos: nil, // no gateway repos
+	}
+	result, done := checkImageRepoPolicy(in, scPolicy)
+	if !done {
+		t.Error("expected done=true when gateway policy exists but no gateway repos")
+	}
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+func TestCheckImageRepoPolicy_GatewayRepoNotInPolicy(t *testing.T) {
+	// Policy has gateway images, but the provided gateway repo is not allowed.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{
+			{Repo: "myrepo/model", ModelTier: true},
+			{Repo: "myrepo/gateway", GatewayTier: true},
+		},
+	}
+	in := &ReportInput{
+		Raw:               &RawAttestation{},
+		ImageRepos:        []string{"myrepo/model"},
+		GatewayImageRepos: []string{"attacker/evil-gateway"},
+	}
+	result, done := checkImageRepoPolicy(in, scPolicy)
+	if !done {
+		t.Error("expected done=true when gateway repo not in policy")
+	}
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+func TestCheckImageRepoPolicy_UnexpectedGatewayRepos(t *testing.T) {
+	// Policy has no gateway images but gateway repos are present → fail.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{
+			{Repo: "myrepo/model", ModelTier: true},
+		},
+	}
+	in := &ReportInput{
+		Raw:               &RawAttestation{},
+		Provider:          "testprovider",
+		ImageRepos:        []string{"myrepo/model"},
+		GatewayImageRepos: []string{"unexpected/gateway"},
+	}
+	result, done := checkImageRepoPolicy(in, scPolicy)
+	if !done {
+		t.Error("expected done=true for unexpected gateway repos")
+	}
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+func TestCheckImageRepoPolicy_AllPass(t *testing.T) {
+	// Model repo in policy, no gateway policy → pass.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{
+			{Repo: "myrepo/model", ModelTier: true},
+		},
+	}
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		ImageRepos: []string{"myrepo/model"},
+	}
+	_, done := checkImageRepoPolicy(in, scPolicy)
+	if done {
+		t.Error("expected done=false when all repos pass")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayTDXMrseamMrtd
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayTDXMrseamMrtd_NilGatewayTDX(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_NoPolicy(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{},
+		// No GatewayPolicy configured → both HasMRTDPolicy and HasMRSeamPolicy are false
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_MRTDFail(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{MRTD: []byte{0xaa, 0xbb}},
+		GatewayPolicy: MeasurementPolicy{
+			MRTDAllow: map[string]struct{}{"ccdd": {}},
+		},
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_MRTDPass(t *testing.T) {
+	mrtd := []byte{0xaa, 0xbb}
+	mrtdHex := hex.EncodeToString(mrtd)
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{MRTD: mrtd},
+		GatewayPolicy: MeasurementPolicy{
+			MRTDAllow: map[string]struct{}{mrtdHex: {}},
+		},
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_MRSeamFail(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{MRSeam: []byte{0x01}},
+		GatewayPolicy: MeasurementPolicy{
+			MRSeamAllow: map[string]struct{}{"ffff": {}},
+		},
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_BothMatch(t *testing.T) {
+	mrtd := []byte{0xaa}
+	mrseam := []byte{0xbb}
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{MRTD: mrtd, MRSeam: mrseam},
+		GatewayPolicy: MeasurementPolicy{
+			MRTDAllow:   map[string]struct{}{hex.EncodeToString(mrtd): {}},
+			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
+		},
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXMrseamMrtd_MRSeamOnlyPass(t *testing.T) {
+	mrseam := []byte{0xcc}
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{MRSeam: mrseam},
+		GatewayPolicy: MeasurementPolicy{
+			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
+		},
+	}
+	results := evalGatewayTDXMrseamMrtd(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+	if !strings.Contains(results[0].Detail, "gateway MRSEAM") {
+		t.Errorf("detail %q should contain 'gateway MRSEAM'", results[0].Detail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayTDXHardwareConfig
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayTDXHardwareConfig_NilGatewayTDX(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
+	results := evalGatewayTDXHardwareConfig(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXHardwareConfig_NoRTMR0Policy(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: &TDXVerifyResult{}}
+	results := evalGatewayTDXHardwareConfig(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXHardwareConfig_RTMR0Fail(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{},
+		GatewayPolicy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{{("wronghex"): {}}},
+		},
+	}
+	results := evalGatewayTDXHardwareConfig(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXHardwareConfig_RTMR0Pass(t *testing.T) {
+	var rtmr0 [48]byte
+	rtmr0Hex := hex.EncodeToString(rtmr0[:])
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{RTMRs: [4][48]byte{rtmr0}},
+		GatewayPolicy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{{rtmr0Hex: {}}},
+		},
+	}
+	results := evalGatewayTDXHardwareConfig(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayTDXBootConfig
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayTDXBootConfig_NilGatewayTDX(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
+	results := evalGatewayTDXBootConfig(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXBootConfig_NoPolicy(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: &TDXVerifyResult{}}
+	results := evalGatewayTDXBootConfig(in)
+	if results[0].Status != Skip {
+		t.Errorf("status = %v, want Skip", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXBootConfig_RTMR1Fail(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{},
+		GatewayPolicy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{
+				0: nil,
+				1: {("wronghex"): {}},
+			},
+		},
+	}
+	results := evalGatewayTDXBootConfig(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXBootConfig_Pass(t *testing.T) {
+	var rtmr1, rtmr2 [48]byte
+	rtmr1Hex := hex.EncodeToString(rtmr1[:])
+	rtmr2Hex := hex.EncodeToString(rtmr2[:])
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{},
+		GatewayPolicy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{
+				0: nil,
+				1: {rtmr1Hex: {}},
+				2: {rtmr2Hex: {}},
+			},
+		},
+	}
+	results := evalGatewayTDXBootConfig(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXBootConfig_PassRTMR2Only(t *testing.T) {
+	// Only RTMR2 configured — loop iteration for i=1 hits `continue`.
+	var rtmrs [4][48]byte
+	rtmr2Hex := hex.EncodeToString(rtmrs[2][:])
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{},
+		GatewayPolicy: MeasurementPolicy{
+			RTMRAllow: [4]map[string]struct{}{
+				1: nil,
+				2: {rtmr2Hex: {}},
+			},
+		},
+	}
+	results := evalGatewayTDXBootConfig(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evalGatewayTDXReportDataBinding
+// ---------------------------------------------------------------------------
+
+func TestEvalGatewayTDXReportDataBinding_ParseErr(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{ParseErr: errors.New("bad quote")},
+	}
+	results := evalGatewayTDXReportDataBinding(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXReportDataBinding_BindingErr(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{ReportDataBindingErr: errors.New("nonce mismatch")},
+	}
+	results := evalGatewayTDXReportDataBinding(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXReportDataBinding_Pass(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{ReportDataBindingDetail: "binding verified"},
+	}
+	results := evalGatewayTDXReportDataBinding(in)
+	if results[0].Status != Pass {
+		t.Errorf("status = %v, want Pass", results[0].Status)
+	}
+}
+
+func TestEvalGatewayTDXReportDataBinding_NoDetail(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{}, // no ParseErr, no BindingErr, no Detail
+	}
+	results := evalGatewayTDXReportDataBinding(in)
+	if results[0].Status != Fail {
+		t.Errorf("status = %v, want Fail", results[0].Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// tdxQuoteVersion — QuoteV4 and QuoteV5 branches
+// ---------------------------------------------------------------------------
+
+func TestTDXQuoteVersion_QuoteV4(t *testing.T) {
+	r := &TDXVerifyResult{quote: &pb.QuoteV4{}}
+	if got := tdxQuoteVersion(r); got != "QuoteV4" {
+		t.Errorf("tdxQuoteVersion(QuoteV4) = %q, want \"QuoteV4\"", got)
+	}
+}
+
+func TestTDXQuoteVersion_QuoteV5(t *testing.T) {
+	r := &TDXVerifyResult{quote: &pb.QuoteV5{}}
+	if got := tdxQuoteVersion(r); got != "QuoteV5" {
+		t.Errorf("tdxQuoteVersion(QuoteV5) = %q, want \"QuoteV5\"", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// validateEd25519Hex — missing branch (invalid hex)
+// ---------------------------------------------------------------------------
+
+func TestValidateEd25519Hex_WrongLength(t *testing.T) {
+	if err := validateEd25519Hex("abc"); err == nil {
+		t.Error("expected error for wrong-length string")
+	}
+}
+
+func TestValidateEd25519Hex_InvalidHex(t *testing.T) {
+	// 64 chars, but not valid hex
+	s := strings.Repeat("g", 64)
+	if err := validateEd25519Hex(s); err == nil {
+		t.Error("expected error for non-hex string")
+	}
+}
+
+// --------------------------------------------------------------------------
+// evalGatewayCPUIDRegistry
+// --------------------------------------------------------------------------
+
+func TestEvalGatewayCPUIDRegistry_Registered(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayPoC: &PoCResult{Registered: true, Label: "test-machine"},
+	}
+	assertSingleFactor(t, evalGatewayCPUIDRegistry(in), Pass)
+}
+
+func TestEvalGatewayCPUIDRegistry_PoCErr(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayPoC: &PoCResult{Registered: false, Err: errors.New("network error")},
+	}
+	assertSingleFactor(t, evalGatewayCPUIDRegistry(in), Skip)
+}
+
+func TestEvalGatewayCPUIDRegistry_NotRegistered(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayPoC: &PoCResult{Registered: false},
+	}
+	assertSingleFactor(t, evalGatewayCPUIDRegistry(in), Fail)
+}
+
+func TestEvalGatewayCPUIDRegistry_NoPoCWithPPID(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{PPID: "deadbeef12345678"},
+	}
+	assertSingleFactor(t, evalGatewayCPUIDRegistry(in), Skip)
+}
+
+func TestEvalGatewayCPUIDRegistry_NoPoCNoTDX(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+	}
+	assertSingleFactor(t, evalGatewayCPUIDRegistry(in), Skip)
+}
+
+// --------------------------------------------------------------------------
+// evalGatewayEventLogIntegrity
+// --------------------------------------------------------------------------
+
+func TestEvalGatewayEventLogIntegrity_ParseErr(t *testing.T) {
+	in := &ReportInput{
+		Raw:             &RawAttestation{},
+		GatewayTDX:      &TDXVerifyResult{ParseErr: errors.New("bad quote")},
+		GatewayEventLog: []EventLogEntry{{IMR: 0, Digest: strings.Repeat("00", 48)}},
+	}
+	assertSingleFactor(t, evalGatewayEventLogIntegrity(in), Skip)
+}
+
+func TestEvalGatewayEventLogIntegrity_BadDigestHex(t *testing.T) {
+	in := &ReportInput{
+		Raw:             &RawAttestation{},
+		GatewayTDX:      &TDXVerifyResult{},
+		GatewayEventLog: []EventLogEntry{{IMR: 0, Digest: "not-hex"}},
+	}
+	assertSingleFactor(t, evalGatewayEventLogIntegrity(in), Fail)
+}
+
+func TestEvalGatewayEventLogIntegrity_RTMRMismatch(t *testing.T) {
+	digest := strings.Repeat("aa", 48) // 96 hex chars
+	in := &ReportInput{
+		Raw:             &RawAttestation{},
+		GatewayTDX:      &TDXVerifyResult{}, // RTMRs all zero — won't match replayed value
+		GatewayEventLog: []EventLogEntry{{IMR: 0, Digest: digest}},
+	}
+	assertSingleFactor(t, evalGatewayEventLogIntegrity(in), Fail)
+}
+
+func TestEvalGatewayEventLogIntegrity_AllMatch(t *testing.T) {
+	// Compute RTMR[0] after extending with all-aa digest from all-zero state.
+	digestBytes := make([]byte, 48)
+	for i := range digestBytes {
+		digestBytes[i] = 0xaa
+	}
+	var zero [48]byte
+	h := sha512.New384()
+	h.Write(zero[:])
+	h.Write(digestBytes)
+	var expectedRTMR [48]byte
+	copy(expectedRTMR[:], h.Sum(nil))
+
+	var rtmrs [4][48]byte
+	rtmrs[0] = expectedRTMR
+
+	in := &ReportInput{
+		Raw:             &RawAttestation{},
+		GatewayTDX:      &TDXVerifyResult{RTMRs: rtmrs},
+		GatewayEventLog: []EventLogEntry{{IMR: 0, Digest: strings.Repeat("aa", 48)}},
+	}
+	assertSingleFactor(t, evalGatewayEventLogIntegrity(in), Pass)
+}
+
+// --------------------------------------------------------------------------
+// evalGatewayTDXQuotePresent
+// --------------------------------------------------------------------------
+
+func TestEvalGatewayTDXQuotePresent_Nil(t *testing.T) {
+	in := &ReportInput{Raw: &RawAttestation{}}
+	assertSingleFactor(t, evalGatewayTDXQuotePresent(in), Fail)
+}
+
+func TestEvalGatewayTDXQuotePresent_Pass(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{GatewayIntelQuote: "deadbeef"},
+		GatewayTDX: &TDXVerifyResult{},
+	}
+	assertSingleFactor(t, evalGatewayTDXQuotePresent(in), Pass)
+}
+
+// --------------------------------------------------------------------------
+// evalGatewayTDXParseDependent
+// --------------------------------------------------------------------------
+
+func TestEvalGatewayTDXParseDependent_ParseErr(t *testing.T) {
+	in := &ReportInput{
+		Raw:        &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{ParseErr: errors.New("bad quote")},
+	}
+	results := evalGatewayTDXParseDependent(in)
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	if results[0].Status != Fail {
+		t.Errorf("first result status = %v, want Fail", results[0].Status)
+	}
+	for i := 1; i < 4; i++ {
+		if results[i].Status != Skip {
+			t.Errorf("result[%d] status = %v, want Skip", i, results[i].Status)
+		}
+	}
+}
+
+func TestEvalGatewayTDXParseDependent_Errors(t *testing.T) {
+	in := &ReportInput{
+		Raw: &RawAttestation{},
+		GatewayTDX: &TDXVerifyResult{
+			CertChainErr: errors.New("cert chain failed"),
+			SignatureErr: errors.New("sig failed"),
+			DebugEnabled: true,
+		},
+	}
+	results := evalGatewayTDXParseDependent(in)
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	// gateway_tdx_quote_structure always passes when ParseErr == nil.
+	if results[0].Status != Pass {
+		t.Errorf("gateway_tdx_quote_structure = %v, want Pass", results[0].Status)
+	}
+	// cert chain, signature, debug should all fail.
+	for _, r := range results[1:] {
+		if r.Status != Fail {
+			t.Errorf("result %q = %v, want Fail", r.Name, r.Status)
+		}
+	}
 }

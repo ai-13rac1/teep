@@ -2,8 +2,118 @@ package attestation
 
 import (
 	"crypto/sha256"
+	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestExtractComposeDigests_WithDockerCompose(t *testing.T) {
+	// app_compose with a docker_compose_file that has an image digest.
+	appCompose := `{"docker_compose_file":"services:\n  app:\n    image: ghcr.io/org/repo@sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\n"}`
+
+	cd := ExtractComposeDigests(appCompose)
+	t.Logf("digests: %v", cd.Digests)
+	t.Logf("repos: %v", cd.Repos)
+	t.Logf("digestToRepo: %v", cd.DigestToRepo)
+	if len(cd.Digests) == 0 {
+		t.Error("expected non-empty Digests from docker_compose_file")
+	}
+	if len(cd.Repos) == 0 {
+		t.Error("expected non-empty Repos from docker_compose_file")
+	}
+}
+
+func TestExtractComposeDigests_PlainYAML(t *testing.T) {
+	// Raw YAML (no docker_compose_file wrapper) — ExtractDockerCompose fails,
+	// falls back to using appCompose directly.
+	appCompose := "services:\n  app:\n    image: ghcr.io/org/repo@sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\n"
+
+	cd := ExtractComposeDigests(appCompose)
+	t.Logf("digests: %v", cd.Digests)
+	if len(cd.Digests) == 0 {
+		t.Error("expected non-empty Digests from plain YAML fallback")
+	}
+}
+
+func TestExtractComposeDigests_Empty(t *testing.T) {
+	cd := ExtractComposeDigests("")
+	t.Logf("empty: digests=%v repos=%v", cd.Digests, cd.Repos)
+	// Should not panic; empty is acceptable.
+	if cd.Digests != nil {
+		t.Error("expected nil Digests for empty compose")
+	}
+}
+
+func TestMergeComposeDigests_Basic(t *testing.T) {
+	model := ComposeDigests{
+		Digests:      []string{"aaa", "bbb"},
+		Repos:        []string{"repo1"},
+		DigestToRepo: map[string]string{"aaa": "repo1", "bbb": "repo2"},
+	}
+	gateway := ComposeDigests{
+		Digests:      []string{"ccc"},
+		Repos:        []string{"repo3"},
+		DigestToRepo: map[string]string{"ccc": "repo3"},
+	}
+
+	allDigests, digestToRepo := MergeComposeDigests(model, gateway)
+	t.Logf("allDigests: %v", allDigests)
+	t.Logf("digestToRepo: %v", digestToRepo)
+
+	if len(allDigests) != 3 {
+		t.Errorf("allDigests len = %d, want 3", len(allDigests))
+	}
+	if digestToRepo["aaa"] != "repo1" {
+		t.Errorf("digestToRepo[aaa] = %q, want repo1", digestToRepo["aaa"])
+	}
+	if digestToRepo["ccc"] != "repo3" {
+		t.Errorf("digestToRepo[ccc] = %q, want repo3", digestToRepo["ccc"])
+	}
+}
+
+func TestMergeComposeDigests_Deduplication(t *testing.T) {
+	// Same digest in both model and gateway — should appear once.
+	model := ComposeDigests{
+		Digests:      []string{"shared", "model-only"},
+		DigestToRepo: map[string]string{"shared": "repo1", "model-only": "repo2"},
+	}
+	gateway := ComposeDigests{
+		Digests:      []string{"shared", "gateway-only"},
+		DigestToRepo: map[string]string{"shared": "repo1", "gateway-only": "repo3"},
+	}
+
+	allDigests, _ := MergeComposeDigests(model, gateway)
+	t.Logf("allDigests: %v", allDigests)
+
+	seen := make(map[string]int)
+	for _, d := range allDigests {
+		seen[d]++
+	}
+	if seen["shared"] != 1 {
+		t.Errorf("shared digest appears %d times, want 1", seen["shared"])
+	}
+	if len(allDigests) != 3 {
+		t.Errorf("allDigests len = %d, want 3 (shared+model-only+gateway-only)", len(allDigests))
+	}
+}
+
+func TestMergeComposeDigests_Conflict(t *testing.T) {
+	// Same digest maps to different repos — first-writer-wins (model).
+	model := ComposeDigests{
+		Digests:      []string{"abc"},
+		DigestToRepo: map[string]string{"abc": "repo-model"},
+	}
+	gateway := ComposeDigests{
+		Digests:      []string{"abc"},
+		DigestToRepo: map[string]string{"abc": "repo-gateway"},
+	}
+
+	_, digestToRepo := MergeComposeDigests(model, gateway)
+	t.Logf("digestToRepo: %v", digestToRepo)
+	if digestToRepo["abc"] != "repo-model" {
+		t.Errorf("first-writer-wins: digestToRepo[abc] = %q, want repo-model", digestToRepo["abc"])
+	}
+}
 
 func TestVerifyComposeBinding_Pass(t *testing.T) {
 	appCompose := `{"docker_compose_file":"version: '3'\nservices:\n  app:\n    image: ghcr.io/org/repo@sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\n"}`
@@ -139,6 +249,35 @@ image: ghcr.io/nearai/router:v2@sha256:0000111122223333444455556666777788889999a
 	}
 	if repos[0] != "ghcr.io/nearai/router" {
 		t.Fatalf("unexpected repository: %s", repos[0])
+	}
+}
+
+func TestNormalizeImageRepository_Empty(t *testing.T) {
+	got := normalizeImageRepository("")
+	if got != "" {
+		t.Errorf("normalizeImageRepository(\"\") = %q, want \"\"", got)
+	}
+}
+
+func TestExtractImageDigests_Capped(t *testing.T) {
+	// Build text with maxImageDigests+1 unique digests; only maxImageDigests should be returned.
+	var b strings.Builder
+	for i := 0; i <= maxImageDigests; i++ {
+		fmt.Fprintf(&b, "image: ghcr.io/org/img%d@sha256:%064x\n", i, i)
+	}
+	digests := ExtractImageDigests(b.String())
+	if len(digests) != maxImageDigests {
+		t.Errorf("expected %d digests (capped), got %d", maxImageDigests, len(digests))
+	}
+}
+
+func TestExtractImageDigestToRepoMap_Conflict(t *testing.T) {
+	// Same digest appears with two different image refs — first-writer-wins.
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	text := fmt.Sprintf("repo1@sha256:%s\nrepo2@sha256:%s", digest, digest)
+	m := ExtractImageDigestToRepoMap(text)
+	if m[digest] != "repo1" {
+		t.Errorf("first-writer-wins: got %q, want \"repo1\"", m[digest])
 	}
 }
 

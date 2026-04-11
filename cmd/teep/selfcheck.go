@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/verify"
 )
 
 // Version and Commit are set by ldflags at build time.
@@ -34,7 +35,7 @@ func runSelfCheck(args []string) {
 	}
 	info, ok := debug.ReadBuildInfo()
 	report := buildSelfCheckReport(info, ok)
-	fmt.Print(formatReport(report))
+	fmt.Print(verify.FormatReport(report))
 	if report.Blocked() {
 		os.Exit(1)
 	}

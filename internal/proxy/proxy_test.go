@@ -2969,6 +2969,33 @@ func TestPrepareUpstreamHeaders_WithSession(t *testing.T) {
 	}
 }
 
+func TestPrepareUpstreamHeaders_NearCloudSession(t *testing.T) {
+	// Exercises the *e2ee.NearCloudSession type-switch branch.
+	mock := &mockPreparer{apiKey: "nearcloud-key"}
+	prov := &provider.Provider{
+		Name:     "nearcloud",
+		Preparer: mock,
+	}
+
+	session, err := e2ee.NewNearCloudSession()
+	if err != nil {
+		t.Fatalf("NewNearCloudSession: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	if err := proxy.PrepareUpstreamHeaders(req, prov, session, nil, false, "/v1/chat/completions"); err != nil {
+		t.Fatalf("PrepareUpstreamHeaders: %v", err)
+	}
+
+	if !mock.called {
+		t.Error("Preparer.PrepareRequest was not called")
+	}
+}
+
 // --------------------------------------------------------------------------
 // relayStream tests
 // --------------------------------------------------------------------------
@@ -4099,6 +4126,114 @@ func TestChutesRetry_AllAttemptsFail(t *testing.T) {
 	}
 }
 
+// TestFetchAndVerify_FakeTDXQuote verifies that verifyTDX is exercised when
+// the attestation response contains a non-empty (but invalid) intel_quote.
+// All factors are in AllowFail so the request still succeeds.
+func TestFetchAndVerify_FakeTDXQuote(t *testing.T) {
+	combined := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/tee/attestation") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			// Use a fake base64-encoded "quote" — VerifyTDXQuote will fail
+			// to parse it, but verifyTDX will still exercise its main path.
+			fmt.Fprintf(w, `{
+				"verified": true,
+				"nonce": %q,
+				"model": "test-model",
+				"tee_provider": "TDX",
+				"signing_key": %q,
+				"signing_address": "0xtest",
+				"intel_quote": "ZmFrZXF1b3Rl",
+				"nvidia_payload": ""
+			}`, nonceHex, modelPubKeyHex())
+			return
+		}
+		if r.URL.Path == "/api/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nonStreamResponse("ok")))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer combined.Close()
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {Name: "venice", BaseURL: combined.URL, APIKey: "key", E2EE: false},
+		},
+		AllowFail: attestation.KnownFactors, // all factors allowed to fail
+	}
+
+	proxySrv := newProxyServer(t, cfg)
+	defer proxySrv.Close()
+
+	resp, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("POST chat: %v", err)
+	}
+	defer resp.Body.Close()
+	t.Logf("status: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+}
+
+// TestFetchAndVerify_FakeNvidiaPayload verifies that verifyNVIDIA is exercised
+// when the attestation response contains a non-empty nvidia_payload.
+// All factors are in AllowFail so the request still succeeds.
+func TestFetchAndVerify_FakeNvidiaPayload(t *testing.T) {
+	combined := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/tee/attestation") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			// Use a fake nvidia_payload (not starting with '{' to avoid NRAS).
+			fmt.Fprintf(w, `{
+				"verified": true,
+				"nonce": %q,
+				"model": "test-model",
+				"tee_provider": "TDX+NVIDIA",
+				"signing_key": %q,
+				"signing_address": "0xtest",
+				"intel_quote": "",
+				"nvidia_payload": "fakenv.payload.notjwt"
+			}`, nonceHex, modelPubKeyHex())
+			return
+		}
+		if r.URL.Path == "/api/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nonStreamResponse("ok")))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer combined.Close()
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {Name: "venice", BaseURL: combined.URL, APIKey: "key", E2EE: false},
+		},
+		Offline:   true, // avoid NRAS online calls
+		AllowFail: attestation.KnownFactors,
+	}
+
+	proxySrv := newProxyServer(t, cfg)
+	defer proxySrv.Close()
+
+	resp, err := postChat(t, proxySrv.URL, "test-model", false)
+	if err != nil {
+		t.Fatalf("POST chat: %v", err)
+	}
+	defer resp.Body.Close()
+	t.Logf("status: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestChutesRetryableError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -4125,5 +4260,19 @@ func TestChutesRetryableError(t *testing.T) {
 					tc.err, proxy.RespStatusCode(tc.resp), got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRespStatusCode_Nil(t *testing.T) {
+	if got := proxy.RespStatusCode(nil); got != 0 {
+		t.Errorf("RespStatusCode(nil) = %d, want 0", got)
+	}
+	t.Logf("RespStatusCode(nil) = 0")
+}
+
+func TestRespStatusCode_NonNil(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK}
+	if got := proxy.RespStatusCode(resp); got != http.StatusOK {
+		t.Errorf("RespStatusCode(200 resp) = %d, want 200", got)
 	}
 }

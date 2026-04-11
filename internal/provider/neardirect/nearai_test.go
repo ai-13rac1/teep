@@ -454,3 +454,9 @@ func TestPreparer_PrepareRequest_NoSessionRequired(t *testing.T) {
 		t.Fatalf("PrepareRequest with nil session: %v", err)
 	}
 }
+
+func TestAttester_SetClient(t *testing.T) {
+	a := neardirect.NewAttester("https://api.near.ai", "key")
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}

@@ -276,3 +276,25 @@ type fakeResolver struct {
 func (r *fakeResolver) Resolve(_ context.Context, _ string) (string, error) {
 	return r.id, nil
 }
+
+// ---------------------------------------------------------------------------
+// NewNoncePool nil-guard panics
+// ---------------------------------------------------------------------------
+
+func TestNewNoncePool_NilResolver(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil resolver")
+		}
+	}()
+	NewNoncePool("http://example.com", "key", nil, &http.Client{})
+}
+
+func TestNewNoncePool_NilClient(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil client")
+		}
+	}()
+	NewNoncePool("http://example.com", "key", &fakeResolver{id: "test"}, nil)
+}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/verify"
 )
 
 // testBuildInfo returns a debug.BuildInfo with controlled settings for testing.
@@ -443,7 +444,7 @@ func TestFormatReport_SelfCheckTitle(t *testing.T) {
 	defer func() { Version = orig }()
 
 	report := buildSelfCheckReport(cleanBuildInfo(), true)
-	out := formatReport(report)
+	out := verify.FormatReport(report)
 
 	if !strings.Contains(out, "Self-Check Report: teep / v0.3.0") {
 		t.Errorf("header not found; output:\n%s", out)
@@ -459,7 +460,7 @@ func TestFormatReport_SelfCheckMetadata(t *testing.T) {
 	defer func() { Version = orig }()
 
 	report := buildSelfCheckReport(cleanBuildInfo(), true)
-	out := formatReport(report)
+	out := verify.FormatReport(report)
 
 	if !strings.Contains(out, "Version:") {
 		t.Errorf("metadata block should contain Version; output:\n%s", out)
@@ -478,7 +479,7 @@ func TestFormatReport_SelfCheckFactors(t *testing.T) {
 	defer func() { Version = orig }()
 
 	report := buildSelfCheckReport(cleanBuildInfo(), true)
-	out := formatReport(report)
+	out := verify.FormatReport(report)
 
 	expectedFactors := []string{"build_info", "vcs_revision", "vcs_clean", "version_set", "commit_set", "module_path", "go_version"}
 	for _, name := range expectedFactors {
@@ -494,9 +495,37 @@ func TestFormatReport_SelfCheckFactors(t *testing.T) {
 
 func TestFormatReport_DefaultTitleUnchanged(t *testing.T) {
 	r := buildTestReport("venice", "e2ee-qwen3")
-	out := formatReport(r)
+	out := verify.FormatReport(r)
 
 	if !strings.Contains(out, "Attestation Report: venice / e2ee-qwen3") {
 		t.Errorf("default title should be Attestation Report; output:\n%s", out)
+	}
+}
+
+// --------------------------------------------------------------------------
+// shortCommit
+// --------------------------------------------------------------------------
+
+func TestShortCommit_Long(t *testing.T) {
+	got := shortCommit("abcdef123456789")
+	if len(got) != 12 {
+		t.Errorf("shortCommit(long) = %q (len %d), want 12 chars", got, len(got))
+	}
+	if got != "abcdef123456" {
+		t.Errorf("shortCommit(long) = %q, want %q", got, "abcdef123456")
+	}
+}
+
+func TestShortCommit_Short(t *testing.T) {
+	got := shortCommit("abc")
+	if got != "abc" {
+		t.Errorf("shortCommit(short) = %q, want %q", got, "abc")
+	}
+}
+
+func TestShortCommit_Exact12(t *testing.T) {
+	got := shortCommit("abcdef123456")
+	if got != "abcdef123456" {
+		t.Errorf("shortCommit(exact12) = %q, want %q", got, "abcdef123456")
 	}
 }

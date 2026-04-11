@@ -338,7 +338,7 @@ func validateAllowFail(names []string) error {
 //
 // When offline is true, factors that require network access (OnlineFactors)
 // are automatically added to the result so they cannot block requests.
-func MergedAllowFail(providerName string, cfg *Config) []string {
+func MergedAllowFail(providerName string, cfg *Config, offline bool) []string {
 	var af []string
 	switch {
 	case cfg.ProviderAllowFail[providerName] != nil:
@@ -356,7 +356,7 @@ func MergedAllowFail(providerName string, cfg *Config) []string {
 			af = DefaultAllowFail
 		}
 	}
-	if cfg.Offline {
+	if offline {
 		return attestation.WithOfflineAllowFail(af)
 	}
 	// Return a copy so callers cannot mutate shared defaults.

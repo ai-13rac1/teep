@@ -1,13 +1,22 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
+	"github.com/13rac1/teep/internal/provider"
 )
 
 // ---------------------------------------------------------------------------
@@ -192,6 +201,167 @@ func TestE2EEFailed_IsolationByKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// httpError.Unwrap
+// ---------------------------------------------------------------------------
+
+func TestHTTPError_Unwrap(t *testing.T) {
+	cause := errors.New("underlying cause")
+	he := &httpError{code: 502, status: "test_status", err: cause}
+	// Verify Unwrap allows errors.Is to see the wrapped error.
+	if !errors.Is(he, cause) {
+		t.Error("errors.Is(httpError, cause) = false, want true")
+	}
+	if he.Error() != cause.Error() {
+		t.Errorf("Error() = %q, want %q", he.Error(), cause.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// zeroE2EESessions
+// ---------------------------------------------------------------------------
+
+type noopDecryptor struct{ zeroed bool }
+
+func (n *noopDecryptor) IsEncryptedChunk(string) bool   { return false }
+func (n *noopDecryptor) Decrypt(string) ([]byte, error) { return nil, nil }
+func (n *noopDecryptor) Zero()                          { n.zeroed = true }
+
+func TestZeroE2EESessions_NilBoth(t *testing.T) {
+	zeroE2EESessions(nil, nil) // must not panic
+}
+
+func TestZeroE2EESessions_WithSession(t *testing.T) {
+	dec := &noopDecryptor{}
+	zeroE2EESessions(dec, nil)
+	if !dec.zeroed {
+		t.Error("Zero() not called on non-nil session")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// verifyNVIDIA
+// ---------------------------------------------------------------------------
+
+func TestVerifyNVIDIA_EmptyPayload(t *testing.T) {
+	ctx := context.Background()
+	raw := &attestation.RawAttestation{} // no NvidiaPayload, no GPUEvidence
+	result, dur := verifyNVIDIA(ctx, raw, attestation.Nonce{}, "test-provider")
+	if result != nil {
+		t.Errorf("expected nil result for empty raw, got %v", result)
+	}
+	if dur != 0 {
+		t.Errorf("expected 0 duration for empty raw, got %v", dur)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Relay error classification
+// ---------------------------------------------------------------------------
+
+// newMinimalServer builds a Server with only the fields needed for internal unit tests.
+func newMinimalServer() *Server {
+	return &Server{
+		cfg:             &config.Config{},
+		cache:           attestation.NewCache(time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(time.Minute),
+		stats:           stats{startTime: time.Now(), models: make(map[string]*modelStats)},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// classifyRelayOutcome
+// ---------------------------------------------------------------------------
+
+func TestClassifyRelayOutcome_NilError(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "test"}
+	ms := &modelStats{}
+	result := s.classifyRelayOutcome(context.Background(), nil, false, prov, "model", ms, false, "")
+	if result != "" {
+		t.Errorf("classifyRelayOutcome(nil) = %q, want empty", result)
+	}
+}
+
+func TestClassifyRelayOutcome_NonDecryptionError(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "test"}
+	ms := &modelStats{}
+	relayErr := errors.New("upstream connection reset")
+	result := s.classifyRelayOutcome(context.Background(), relayErr, false, prov, "model", ms, false, "")
+	if result != "relay_failed" {
+		t.Errorf("classifyRelayOutcome(non-decryption err) = %q, want relay_failed", result)
+	}
+}
+
+func TestClassifyRelayOutcome_DecryptionErrorNotE2EEActive(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "test"}
+	ms := &modelStats{}
+	// ErrDecryptionFailed but e2eeActive=false → should NOT call handleE2EEDecryptionFailure.
+	result := s.classifyRelayOutcome(context.Background(), e2ee.ErrDecryptionFailed, false, prov, "model", ms, false, "")
+	if result != "relay_failed" {
+		t.Errorf("classifyRelayOutcome(decrypt err, not e2ee active) = %q, want relay_failed", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// clearE2EEFailureIfFresh
+// ---------------------------------------------------------------------------
+
+func TestClearE2EEFailureIfFresh_NoFailure(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "venice"}
+	ms := &modelStats{}
+	ar := &attestResult{}
+
+	w := httptest.NewRecorder()
+	proceed := s.clearE2EEFailureIfFresh(context.Background(), w, prov, "model", ar, ms)
+	if !proceed {
+		t.Error("expected proceed=true when no failure recorded")
+	}
+}
+
+func TestClearE2EEFailureIfFresh_FailureWithFreshAttestation(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "venice"}
+	ms := &modelStats{}
+	// Record a failure for this provider+model.
+	key := providerModelKey{prov.Name, "model"}
+	s.e2eeFailed.Store(key, true)
+	// Fresh attestation clears the failure.
+	ar := &attestResult{Raw: &attestation.RawAttestation{}}
+
+	w := httptest.NewRecorder()
+	proceed := s.clearE2EEFailureIfFresh(context.Background(), w, prov, "model", ar, ms)
+	if !proceed {
+		t.Error("expected proceed=true after clearing failure with fresh attestation")
+	}
+	if _, still := s.e2eeFailed.Load(key); still {
+		t.Error("expected failure to be cleared from e2eeFailed")
+	}
+}
+
+func TestClearE2EEFailureIfFresh_FailureWithCachedAttestation(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "venice"}
+	ms := &modelStats{}
+	key := providerModelKey{prov.Name, "model"}
+	s.e2eeFailed.Store(key, true)
+	// Cached attestation (ar.Raw == nil) — should fail closed.
+	ar := &attestResult{Raw: nil}
+
+	w := httptest.NewRecorder()
+	proceed := s.clearE2EEFailureIfFresh(context.Background(), w, prov, "model", ar, ms)
+	if proceed {
+		t.Error("expected proceed=false when failure recorded and attestation is cached")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Relay error classification
 // ---------------------------------------------------------------------------
 
@@ -214,5 +384,121 @@ func TestRelayError_DecryptionVsRelay(t *testing.T) {
 	}
 	if errors.Is(wrapped, relayErr) {
 		t.Error("wrapped decryption error should NOT match ErrRelayFailed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// enforceReport
+// ---------------------------------------------------------------------------
+
+// blockedReport returns a VerificationReport with one enforced-fail factor.
+func blockedReport() *attestation.VerificationReport {
+	return &attestation.VerificationReport{
+		Factors: []attestation.FactorResult{
+			{Tier: "model", Name: "tdx_quote_present", Status: attestation.Fail, Enforced: true, Detail: "no quote"},
+		},
+	}
+}
+
+func TestEnforceReport_NilReport(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, nil, prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true for nil report")
+	}
+}
+
+func TestEnforceReport_NotBlocked(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	report := &attestation.VerificationReport{} // no blocked factors
+	proceed := s.enforceReport(context.Background(), w, report, prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true for non-blocked report")
+	}
+}
+
+func TestEnforceReport_BlockedWithForce(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: true}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, blockedReport(), prov, "model")
+	if !proceed {
+		t.Error("expected proceed=true when Force=true bypasses blocked report")
+	}
+}
+
+func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: false}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	proceed := s.enforceReport(context.Background(), w, blockedReport(), prov, "model")
+	if proceed {
+		t.Error("expected proceed=false when blocked report and Force=false")
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// extractMultipartField — missing branches
+// ---------------------------------------------------------------------------
+
+func TestExtractMultipartField_NotMultipart(t *testing.T) {
+	_, err := extractMultipartField("application/json", []byte(`{}`), "model")
+	if err == nil {
+		t.Error("expected error for non-multipart content-type")
+	}
+	if !strings.Contains(err.Error(), "not multipart") {
+		t.Errorf("error = %q, should mention 'not multipart'", err)
+	}
+}
+
+func TestExtractMultipartField_MissingBoundary(t *testing.T) {
+	// multipart/form-data without boundary parameter.
+	_, err := extractMultipartField("multipart/form-data", []byte{}, "model")
+	if err == nil {
+		t.Error("expected error for missing boundary")
+	}
+	if !strings.Contains(err.Error(), "missing boundary") {
+		t.Errorf("error = %q, should mention 'missing boundary'", err)
+	}
+}
+
+func TestExtractMultipartField_FieldNotFound(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, _ := w.CreateFormField("other_field")
+	fmt.Fprint(fw, "value")
+	w.Close()
+	_, err := extractMultipartField(w.FormDataContentType(), buf.Bytes(), "missing_field")
+	if err == nil {
+		t.Error("expected error when field not found")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, should mention 'not found'", err)
+	}
+}
+
+func TestExtractMultipartField_Success(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, _ := w.CreateFormField("model")
+	fmt.Fprint(fw, "deepseek-v3")
+	w.Close()
+	val, err := extractMultipartField(w.FormDataContentType(), buf.Bytes(), "model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "deepseek-v3" {
+		t.Errorf("val = %q, want %q", val, "deepseek-v3")
 	}
 }

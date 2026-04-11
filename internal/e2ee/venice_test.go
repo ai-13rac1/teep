@@ -438,6 +438,44 @@ func TestVeniceEncryptDecryptViaSession(t *testing.T) {
 	session.Zero()
 }
 
+// TestVeniceSession_ClientPubKeyHex verifies ClientPubKeyHex returns the
+// session's uncompressed secp256k1 public key as 130 hex chars.
+func TestVeniceSession_ClientPubKeyHex(t *testing.T) {
+	s, err := NewVeniceSession()
+	if err != nil {
+		t.Fatalf("NewVeniceSession: %v", err)
+	}
+	got := s.ClientPubKeyHex()
+	t.Logf("ClientPubKeyHex: %s", got[:min(20, len(got))]+"...")
+	if len(got) != 130 {
+		t.Errorf("ClientPubKeyHex length: got %d, want 130", len(got))
+	}
+	if !strings.HasPrefix(got, "04") {
+		t.Errorf("ClientPubKeyHex must start with '04', got %q", got[:2])
+	}
+}
+
+// TestVeniceSession_ModelKeyHex verifies ModelKeyHex returns "" before
+// SetModelKey and the correct key hex after SetModelKey.
+func TestVeniceSession_ModelKeyHex(t *testing.T) {
+	s := &VeniceSession{}
+	if got := s.ModelKeyHex(); got != "" {
+		t.Errorf("ModelKeyHex before SetModelKey: got %q, want empty", got)
+	}
+
+	keyA := mustPrivKey(t, testKeyAScalar())
+	validKey := hex.EncodeToString(keyA.PubKey().SerializeUncompressed())
+	if err := s.SetModelKey(validKey); err != nil {
+		t.Fatalf("SetModelKey: %v", err)
+	}
+
+	got := s.ModelKeyHex()
+	t.Logf("ModelKeyHex after SetModelKey: %s...", got[:min(20, len(got))])
+	if got != validKey {
+		t.Errorf("ModelKeyHex = %q, want %q", got, validKey)
+	}
+}
+
 // TestModelPubKey verifies ModelPubKey returns nil before SetModelKey and
 // the correct key after SetModelKey.
 func TestModelPubKey(t *testing.T) {
@@ -463,4 +501,36 @@ func TestModelPubKey(t *testing.T) {
 	if gotHex != validKey {
 		t.Errorf("ModelPubKey hex mismatch:\n got  %s\n want %s", gotHex, validKey)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// aesgcmSeal / aesgcmOpen error paths
+// ---------------------------------------------------------------------------
+
+func TestAesgcmSeal_BadKeySize(t *testing.T) {
+	// AES requires 16, 24, or 32 byte keys — 7 bytes triggers an error.
+	_, err := aesgcmSeal(make([]byte, 7), make([]byte, 12), []byte("data"))
+	if err == nil {
+		t.Error("expected error for bad AES key size")
+	}
+	t.Logf("aesgcmSeal bad key: %v", err)
+}
+
+func TestAesgcmOpen_BadKeySize(t *testing.T) {
+	_, err := aesgcmOpen(make([]byte, 7), make([]byte, 12), []byte("ciphertext"))
+	if err == nil {
+		t.Error("expected error for bad AES key size")
+	}
+	t.Logf("aesgcmOpen bad key: %v", err)
+}
+
+func TestAesgcmOpen_AuthFail(t *testing.T) {
+	key := make([]byte, 32)
+	nonce := make([]byte, 12)
+	// Tampered ciphertext — authentication should fail.
+	_, err := aesgcmOpen(key, nonce, []byte("not valid ciphertext with tag"))
+	if err == nil {
+		t.Error("expected authentication failure")
+	}
+	t.Logf("aesgcmOpen auth fail: %v", err)
 }

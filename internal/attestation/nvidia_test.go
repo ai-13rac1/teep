@@ -618,3 +618,204 @@ func TestExtractGPUDiags(t *testing.T) {
 		t.Errorf("expected decode error, got %q", diags[0].MeasRes)
 	}
 }
+
+func TestAllSameError(t *testing.T) {
+	tests := []struct {
+		name  string
+		diags []NRASGPUDiag
+		want  bool
+	}{
+		{
+			name:  "empty slice",
+			diags: nil,
+			want:  false,
+		},
+		{
+			name:  "single diag (less than 2)",
+			diags: []NRASGPUDiag{{ErrorDetails: "some error"}},
+			want:  false,
+		},
+		{
+			name:  "two diags same non-empty error",
+			diags: []NRASGPUDiag{{ErrorDetails: "OOM"}, {ErrorDetails: "OOM"}},
+			want:  true,
+		},
+		{
+			name:  "two diags different errors",
+			diags: []NRASGPUDiag{{ErrorDetails: "OOM"}, {ErrorDetails: "timeout"}},
+			want:  false,
+		},
+		{
+			name:  "two diags both empty error",
+			diags: []NRASGPUDiag{{ErrorDetails: ""}, {ErrorDetails: ""}},
+			want:  false, // first == "" so returns false
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := allSameError(tt.diags)
+			t.Logf("allSameError(%d diags) = %v", len(tt.diags), got)
+			if got != tt.want {
+				t.Errorf("allSameError = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNRASDiagDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   *NvidiaVerifyResult
+		wantSubs []string
+	}{
+		{
+			name:     "no GPU diags",
+			result:   &NvidiaVerifyResult{},
+			wantSubs: []string{"NRAS result: false"},
+		},
+		{
+			name: "all GPUs same error",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", ErrorDetails: "measurement mismatch"},
+					{GPUID: "GPU-1", ErrorDetails: "measurement mismatch"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "2 GPUs", "measurement mismatch"},
+		},
+		{
+			name: "different errors per GPU",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", ErrorDetails: "error A"},
+					{GPUID: "GPU-1", ErrorDetails: "error B"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "GPU-0", "error A", "GPU-1", "error B"},
+		},
+		{
+			name: "GPU with measres (no error)",
+			result: &NvidiaVerifyResult{
+				GPUDiags: []NRASGPUDiag{
+					{GPUID: "GPU-0", MeasRes: "FAIL", DriverVersion: "570.0", HWModel: "GH100"},
+					{GPUID: "GPU-1", MeasRes: "OK", DriverVersion: "570.0", HWModel: "GH100"},
+				},
+			},
+			wantSubs: []string{"NRAS result: false", "GPU-0", "measres=FAIL"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nrasDiagDetail(tt.result)
+			t.Logf("nrasDiagDetail = %q", got)
+			for _, sub := range tt.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("detail %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// nvidiaErrorMessage
+// ---------------------------------------------------------------------------
+
+func TestNvidiaErrorMessage_NoKey(t *testing.T) {
+	claims := map[string]any{"foo": "bar"}
+	got := nvidiaErrorMessage(claims)
+	if got != "" {
+		t.Errorf("nvidiaErrorMessage (no key) = %q, want empty", got)
+	}
+}
+
+func TestNvidiaErrorMessage_NotMap(t *testing.T) {
+	claims := map[string]any{"x-nvidia-error-details": "raw string value"}
+	got := nvidiaErrorMessage(claims)
+	if got != "raw string value" {
+		t.Errorf("nvidiaErrorMessage (not-map) = %q, want %q", got, "raw string value")
+	}
+}
+
+func TestNvidiaErrorMessage_WithMessage(t *testing.T) {
+	claims := map[string]any{
+		"x-nvidia-error-details": map[string]any{
+			"message": "GPU attestation failed",
+		},
+	}
+	got := nvidiaErrorMessage(claims)
+	if got != "GPU attestation failed" {
+		t.Errorf("nvidiaErrorMessage (with message) = %q, want %q", got, "GPU attestation failed")
+	}
+}
+
+func TestNvidiaErrorMessage_WithDescription(t *testing.T) {
+	claims := map[string]any{
+		"x-nvidia-error-details": map[string]any{
+			"description": "certificate expired",
+		},
+	}
+	got := nvidiaErrorMessage(claims)
+	if got != "certificate expired" {
+		t.Errorf("nvidiaErrorMessage (with description) = %q, want %q", got, "certificate expired")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ShutdownJWKS
+// ---------------------------------------------------------------------------
+
+func TestShutdownJWKS(t *testing.T) {
+	ShutdownJWKS() // must not panic; idempotent
+	ShutdownJWKS()
+	t.Log("ShutdownJWKS completed twice without panic")
+}
+
+// ---------------------------------------------------------------------------
+// jsonString / jsonBool utility functions
+// ---------------------------------------------------------------------------
+
+func TestJSONString_MissingKey(t *testing.T) {
+	m := map[string]any{"other": "value"}
+	if got := jsonString(m, "missing"); got != "" {
+		t.Errorf("jsonString missing key = %q, want \"\"", got)
+	}
+}
+
+func TestJSONString_StringValue(t *testing.T) {
+	m := map[string]any{"k": "hello"}
+	if got := jsonString(m, "k"); got != "hello" {
+		t.Errorf("jsonString string value = %q, want \"hello\"", got)
+	}
+}
+
+func TestJSONString_NonStringValue(t *testing.T) {
+	// Non-string value triggers the fmt.Sprintf fallback branch.
+	m := map[string]any{"k": 42}
+	got := jsonString(m, "k")
+	if got != "42" {
+		t.Errorf("jsonString non-string = %q, want \"42\"", got)
+	}
+}
+
+func TestJSONBool_MissingKey(t *testing.T) {
+	m := map[string]any{"other": true}
+	if got := jsonBool(m, "missing"); got {
+		t.Error("jsonBool missing key should return false")
+	}
+}
+
+func TestJSONBool_TrueValue(t *testing.T) {
+	m := map[string]any{"k": true}
+	if got := jsonBool(m, "k"); !got {
+		t.Error("jsonBool true value should return true")
+	}
+}
+
+func TestJSONBool_NonBoolValue(t *testing.T) {
+	// Non-bool value triggers the type-assertion failure branch.
+	m := map[string]any{"k": "yes"}
+	if got := jsonBool(m, "k"); got {
+		t.Error("jsonBool non-bool value should return false")
+	}
+}

@@ -561,3 +561,17 @@ func TestPreparer_E2EE_MultiPath(t *testing.T) {
 		})
 	}
 }
+
+func TestAttester_SetClient(t *testing.T) {
+	a := chutes.NewAttester("https://llm.chutes.ai", "key")
+	a.SetClient(&http.Client{})
+	t.Log("SetClient accepted non-nil client")
+}
+
+func TestAttester_Resolver(t *testing.T) {
+	a := chutes.NewAttester("https://llm.chutes.ai", "key")
+	r := a.Resolver()
+	if r == nil {
+		t.Fatal("Resolver() returned nil")
+	}
+}
