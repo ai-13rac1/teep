@@ -2,6 +2,8 @@ package main
 
 import (
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +302,26 @@ func TestExtractObserved_EmptyMetadata(t *testing.T) {
 	obs := extractObserved(report)
 	if obs.MRSeam != "" || obs.MRTD != "" || obs.RTMR0 != "" {
 		t.Error("all fields should be empty for empty metadata")
+	}
+}
+
+// TestRunVerify_CaptureOfflineMutuallyExclusive verifies that --capture and
+// --offline are rejected together. Uses the subprocess "crasher" pattern
+// because runVerify calls os.Exit.
+func TestRunVerify_CaptureOfflineMutuallyExclusive(t *testing.T) {
+	const envKey = "TEEP_TEST_CAPTURE_OFFLINE_CRASHER"
+	if os.Getenv(envKey) == "1" {
+		runVerify([]string{"someprovider", "--model", "m", "--capture", "/tmp/teep-test-cap", "--offline"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunVerify_CaptureOfflineMutuallyExclusive", "-test.v")
+	cmd.Env = append(os.Environ(), envKey+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("subprocess output: %s", out)
+	if err == nil {
+		t.Fatal("expected non-zero exit for --capture + --offline")
+	}
+	if !strings.Contains(string(out), "--capture and --offline are mutually exclusive") {
+		t.Errorf("expected error message in output, got: %s", out)
 	}
 }

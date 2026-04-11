@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/13rac1/teep/internal/verify"
 )
 
 // result tracks pass/fail/skip counts and whether any check failed.
@@ -760,7 +762,7 @@ func checkProxyWiring(r *result, providers []string) {
 }
 
 func checkCLIMain(r *result, providers []string) {
-	fmt.Println("  cmd/teep/main.go")
+	fmt.Println("  internal/verify/factory.go")
 	path := "internal/verify/factory.go"
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
@@ -769,13 +771,12 @@ func checkCLIMain(r *result, providers []string) {
 		return
 	}
 
-	// ProviderEnvVars map has key for each provider.
-	envVarKeys := collectCompositeLitKeys(f, "ProviderEnvVars")
+	// ProviderEnvVars map has key for each provider (checked via direct import).
 	for _, prov := range providers {
-		if envVarKeys[prov] {
-			r.passf("providerEnvVars has key %q", prov)
+		if _, ok := verify.ProviderEnvVars[prov]; ok {
+			r.passf("ProviderEnvVars has key %q", prov)
 		} else {
-			r.failf("providerEnvVars missing key %q", prov)
+			r.failf("ProviderEnvVars missing key %q", prov)
 		}
 	}
 

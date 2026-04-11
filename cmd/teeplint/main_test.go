@@ -1171,7 +1171,7 @@ func TestCheckCLIMain_MissingFile(t *testing.T) {
 	r := newResult()
 	checkCLIMain(r, []string{"alpha"})
 	if r.failed == 0 {
-		t.Error("expected failure when cmd/teep/main.go is absent")
+		t.Error("expected failure when internal/verify/factory.go is absent")
 	}
 }
 

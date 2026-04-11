@@ -211,6 +211,10 @@ func runVerify(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
+	if *captureDir != "" && *offline {
+		fmt.Fprintf(os.Stderr, "teep verify: --capture and --offline are mutually exclusive\n")
+		os.Exit(1)
+	}
 
 	report, err := runVerification(providerName, *modelName, *captureDir, *offline, nil, attestation.Nonce{}, nil)
 	if report != nil {

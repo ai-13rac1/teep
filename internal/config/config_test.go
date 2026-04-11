@@ -232,7 +232,7 @@ allow_fail = []
 		t.Errorf("global AllowFail: got %v, want nil (TOML didn't set global allow_fail)", cfg.AllowFail)
 	}
 	// Per-provider allow_fail should be empty (enforce all).
-	af := MergedAllowFail("venice", cfg)
+	af := MergedAllowFail("venice", cfg, false)
 	if len(af) != 0 {
 		t.Errorf("MergedAllowFail(\"venice\"): got %d entries, want 0 (enforce all)", len(af))
 	}
@@ -323,7 +323,7 @@ base_url = "https://api.venice.ai"
 	if cfg.AllowFail != nil {
 		t.Errorf("AllowFail after TOML with no [policy]: got %v, want nil", cfg.AllowFail)
 	}
-	af := MergedAllowFail("venice", cfg)
+	af := MergedAllowFail("venice", cfg, false)
 	if len(af) != len(DefaultAllowFail) {
 		t.Errorf("MergedAllowFail(venice): got %d entries, want %d", len(af), len(DefaultAllowFail))
 	}
@@ -763,7 +763,7 @@ func TestDefaultAllowFailImmutable(t *testing.T) {
 	}
 
 	// MergedAllowFail for a provider without Go defaults uses DefaultAllowFail.
-	af := MergedAllowFail("venice", cfg)
+	af := MergedAllowFail("venice", cfg, false)
 	if len(af) == 0 {
 		t.Fatal("expected non-empty allow_fail for venice defaults")
 	}
@@ -789,7 +789,7 @@ func TestMergedAllowFailNearcloudGoDefaults(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, false)
 	want := attestation.NearcloudDefaultAllowFail
 	if len(af) != len(want) {
 		t.Fatalf("MergedAllowFail(\"nearcloud\"): got %d entries, want %d", len(af), len(want))
@@ -831,7 +831,7 @@ func TestMergedAllowFailNonNearcloudUsesGlobalDefaults(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	af := MergedAllowFail("venice", cfg)
+	af := MergedAllowFail("venice", cfg, false)
 	if len(af) != len(DefaultAllowFail) {
 		t.Errorf("MergedAllowFail(\"venice\"): got %d entries, want %d", len(af), len(DefaultAllowFail))
 	}
@@ -850,7 +850,7 @@ func TestMergedAllowFailGlobalTOMLOverridesNearcloudDefaults(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, false)
 	if len(af) != 1 || af[0] != "cpu_gpu_chain" {
 		t.Errorf("MergedAllowFail(\"nearcloud\"): got %v, want [cpu_gpu_chain]", af)
 	}
@@ -877,7 +877,7 @@ allow_fail = ["tdx_hardware_config"]
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, false)
 	if len(af) != 1 || af[0] != "tdx_hardware_config" {
 		t.Errorf("MergedAllowFail(\"nearcloud\"): got %v, want [tdx_hardware_config]", af)
 	}
@@ -895,7 +895,7 @@ func TestMergedAllowFailNeardirectGoDefaults(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	af := MergedAllowFail("neardirect", cfg)
+	af := MergedAllowFail("neardirect", cfg, false)
 	want := attestation.NeardirectDefaultAllowFail
 	if len(af) != len(want) {
 		t.Fatalf("MergedAllowFail(\"neardirect\"): got %d entries, want %d", len(af), len(want))
@@ -937,9 +937,7 @@ func TestMergedAllowFailOfflineAddsOnlineFactors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	cfg.Offline = true
-
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, true)
 	afSet := make(map[string]bool, len(af))
 	for _, name := range af {
 		afSet[name] = true
@@ -964,7 +962,7 @@ func TestMergedAllowFailOnlineDoesNotAddOnlineFactors(t *testing.T) {
 	}
 	// Offline is false by default.
 
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, false)
 	afSet := make(map[string]bool, len(af))
 	for _, name := range af {
 		afSet[name] = true
@@ -994,9 +992,7 @@ allow_fail = []
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	cfg.Offline = true
-
-	af := MergedAllowFail("venice", cfg)
+	af := MergedAllowFail("venice", cfg, true)
 	if len(af) != len(attestation.OnlineFactors) {
 		t.Errorf("offline + empty TOML: got %d entries, want %d (OnlineFactors only)",
 			len(af), len(attestation.OnlineFactors))
@@ -1018,7 +1014,7 @@ func TestMergedAllowFailProgrammaticAllowFail(t *testing.T) {
 	cfg := &Config{
 		AllowFail: attestation.KnownFactors,
 	}
-	af := MergedAllowFail("nearcloud", cfg)
+	af := MergedAllowFail("nearcloud", cfg, false)
 	if len(af) != len(attestation.KnownFactors) {
 		t.Errorf("programmatic AllowFail: got %d entries, want %d (KnownFactors)",
 			len(af), len(attestation.KnownFactors))
@@ -1028,7 +1024,7 @@ func TestMergedAllowFailProgrammaticAllowFail(t *testing.T) {
 	cfg2 := &Config{
 		AllowFail: []string{},
 	}
-	af2 := MergedAllowFail("nearcloud", cfg2)
+	af2 := MergedAllowFail("nearcloud", cfg2, false)
 	if len(af2) != 0 {
 		t.Errorf("programmatic empty AllowFail: got %d entries, want 0", len(af2))
 	}
@@ -1052,8 +1048,8 @@ base_url = "https://api.near.ai"
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	a := MergedAllowFail("nearcloud", cfg)
-	b := MergedAllowFail("nearcloud", cfg)
+	a := MergedAllowFail("nearcloud", cfg, false)
+	b := MergedAllowFail("nearcloud", cfg, false)
 	if len(a) == 0 {
 		t.Fatal("expected non-empty allow_fail for nearcloud defaults")
 	}

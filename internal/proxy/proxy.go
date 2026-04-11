@@ -335,7 +335,7 @@ func New(cfg *config.Config) (*Server, error) {
 		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
 		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)
 		mergedGWPolicy := config.MergedGatewayMeasurementPolicy(name, cfg, gwDefaults)
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, config.MergedAllowFail(name, cfg), mergedPolicy, mergedGWPolicy, s.rekorClient)
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, config.MergedAllowFail(name, cfg, cfg.Offline), mergedPolicy, mergedGWPolicy, s.rekorClient)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -622,7 +622,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Model:             upstreamModel,
 		Raw:               raw,
 		Nonce:             nonce,
-		AllowFail:         config.MergedAllowFail(prov.Name, s.cfg),
+		AllowFail:         config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
 		Policy:            prov.MeasurementPolicy,
 		GatewayPolicy:     prov.GatewayMeasurementPolicy,
 		SupplyChainPolicy: prov.SupplyChainPolicy,

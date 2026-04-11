@@ -42,7 +42,6 @@ type CfgLoader func(providerName string) (*config.Config, *config.Provider, erro
 // generated nonce.
 func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, error) {
 	cfg := opts.Config
-	cfg.Offline = opts.Offline
 
 	attester, err := newAttester(opts.ProviderName, opts.Provider, opts.Offline)
 	if err != nil {
@@ -53,8 +52,9 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 	if client == nil {
 		client = config.NewAttestationClient(opts.Offline)
 	}
+	prev := attestation.TDXCollateralGetter
 	attestation.TDXCollateralGetter = attestation.NewCollateralGetter(client)
-	defer func() { attestation.TDXCollateralGetter = nil }()
+	defer func() { attestation.TDXCollateralGetter = prev }()
 
 	// Wrap transport with recording when capturing.
 	var recorder *capture.RecordingTransport
@@ -125,7 +125,7 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 		Model:             opts.ModelName,
 		Raw:               raw,
 		Nonce:             nonce,
-		AllowFail:         config.MergedAllowFail(opts.ProviderName, cfg),
+		AllowFail:         config.MergedAllowFail(opts.ProviderName, cfg, opts.Offline),
 		Policy:            mergedPolicy,
 		GatewayPolicy:     mergedGWPolicy,
 		SupplyChainPolicy: supplyChainPolicy(opts.ProviderName),

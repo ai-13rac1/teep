@@ -56,8 +56,13 @@ func TestFetchAttestationJSON_Non200(t *testing.T) {
 }
 
 func TestFetchAttestationJSON_NetworkError(t *testing.T) {
-	// Port 1 is reserved and will always refuse connections.
-	_, err := provider.FetchAttestationJSON(context.Background(), http.DefaultClient, "http://127.0.0.1:1/attest", "key", 1<<20)
+	// Start then immediately close a server so the port is guaranteed to
+	// refuse connections (no port-in-use race, no system policy variation).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close()
+
+	_, err := provider.FetchAttestationJSON(context.Background(), ts.Client(), url+"/attest", "key", 1<<20)
 	if err == nil {
 		t.Fatal("expected error for network failure")
 	}
