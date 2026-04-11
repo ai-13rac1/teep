@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -157,6 +158,95 @@ func TestCheckSigstore_Online_CanceledContext(t *testing.T) {
 	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, &http.Client{}, false)
 	t.Logf("checkSigstore canceled ctx: sig=%v rekor=%v", sig, rekor)
 	// We don't assert specific values — just ensure no panic and code is exercised.
+}
+
+// rekorProxyTransport redirects all requests to targetHost (scheme+host of a
+// test server), preserving path/query. Used to intercept the hardcoded
+// https://rekor.sigstore.dev base URL inside checkSigstore.
+type rekorProxyTransport struct {
+	targetScheme string
+	targetHost   string
+	inner        http.RoundTripper
+}
+
+func (rt *rekorProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.URL.Scheme = rt.targetScheme
+	clone.URL.Host = rt.targetHost
+	return rt.inner.RoundTrip(clone)
+}
+
+// TestCheckSigstore_Found exercises the r.OK=true slog branch (line 132) and
+// the prov.Err!=nil slog branch (line 148) by mocking the Rekor index/retrieve
+// endpoint to return a UUID while returning 500 for the entry fetch.
+func TestCheckSigstore_Found_EntryFetchError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("mock rekor: %s %s", r.Method, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/index/retrieve") {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`["test-uuid-abc"]`))
+			return
+		}
+		// Entry fetch → error so prov.Err != nil
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	client := &http.Client{
+		Transport: &rekorProxyTransport{
+			targetScheme: "http",
+			targetHost:   strings.TrimPrefix(ts.URL, "http://"),
+			inner:        ts.Client().Transport,
+		},
+	}
+
+	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	t.Logf("sig=%v rekor=%v", sig, rekor)
+	if len(sig) != 1 {
+		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
+	}
+	if !sig[0].OK {
+		t.Errorf("expected OK=true from mock that returns a UUID, got %v", sig[0])
+	}
+	// prov.Err != nil branch → rekorResults still appended (line 161)
+	if len(rekor) != 1 {
+		t.Errorf("expected 1 rekor result (appended even on error), got %d", len(rekor))
+	}
+}
+
+// TestCheckSigstore_NotFound exercises the r.OK=false && r.Err==nil slog
+// branch (line 136) — index/retrieve returns empty UUID list.
+func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`))
+	}))
+	defer ts.Close()
+
+	client := &http.Client{
+		Transport: &rekorProxyTransport{
+			targetScheme: "http",
+			targetHost:   strings.TrimPrefix(ts.URL, "http://"),
+			inner:        ts.Client().Transport,
+		},
+	}
+
+	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	t.Logf("sig=%v rekor=%v", sig, rekor)
+	if len(sig) != 1 {
+		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
+	}
+	if sig[0].OK {
+		t.Errorf("expected OK=false for empty UUID list, got OK=true")
+	}
+	if sig[0].Err != nil {
+		t.Errorf("expected nil Err for not-found (status only), got %v", sig[0].Err)
+	}
+	if rekor != nil {
+		t.Errorf("expected nil rekor results for not-found, got %v", rekor)
+	}
 }
 
 func TestCheckSigstore_Offline(t *testing.T) {
