@@ -37,8 +37,9 @@ type CfgLoader func(providerName string) (*config.Config, *config.Provider, erro
 // Run loads the attester, fetches attestation, verifies TDX/NVIDIA/PoC,
 // runs E2EE test, builds and returns the report.
 //
-// When opts.CaptureDir is non-empty, all HTTP traffic is recorded and saved
-// there. When opts.Client is non-nil, it replaces the default attestation
+// When opts.CaptureDir is non-empty, all attestation HTTP traffic is recorded
+// and saved there (the E2EE self-test uses its own transport and is not
+// captured). When opts.Client is non-nil, it replaces the default attestation
 // client (used for replay). When opts.Nonce is non-zero, it replaces the
 // generated nonce.
 func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, error) {
