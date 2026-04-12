@@ -33,8 +33,8 @@ func verifyTDX(ctx context.Context, raw *attestation.RawAttestation, nonce attes
 	slog.Debug("TDX verification starting", "quote_len", len(raw.IntelQuote))
 	tdxStart := time.Now()
 	tdxResult := verifier(ctx, raw.IntelQuote)
-	if verifier := newReportDataVerifier(providerName); verifier != nil && tdxResult.ParseErr == nil {
-		detail, err := verifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && tdxResult.ParseErr == nil {
+		detail, err := rdVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
 		tdxResult.ReportDataBindingErr = err
 		tdxResult.ReportDataBindingDetail = detail
 	}

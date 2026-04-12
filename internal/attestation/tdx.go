@@ -172,7 +172,7 @@ type TDXVerifyResult struct {
 const tdxDebugBit = 0x01
 
 // VerifyTDXQuoteOffline decodes the hex-encoded intel_quote, parses it as a
-// TDX QuoteV4, checks the certificate chain and signature, and checks the debug
+// TDX quote (QuoteV4 or QuoteV5), checks the certificate chain and signature, and checks the debug
 // flag. Intel PCS collateral is not fetched; TcbStatus and AdvisoryIDs remain
 // empty.
 //

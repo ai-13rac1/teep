@@ -226,6 +226,12 @@ func TestVerifyTDXQuoteOnlineNoRace(t *testing.T) {
 		wg.Go(func() {
 			result := VerifyTDXQuoteOnline(context.Background(), realTDXQuoteHex(), getter)
 			t.Logf("result.CollateralErr: %v", result.CollateralErr)
+			if result.ParseErr != nil {
+				t.Errorf("unexpected ParseErr: %v", result.ParseErr)
+			}
+			if result.CollateralErr == nil {
+				t.Errorf("expected CollateralErr with noop getter, got nil")
+			}
 		})
 	}
 	wg.Wait()
