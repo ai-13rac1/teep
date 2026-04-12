@@ -10,10 +10,10 @@ Teep is designed to BLOCK REQUEST ACTIVITY when enforced validation factors fail
 
 ## Data Flow
 
-Proxy receives OpenAI-compatible chat request → resolves model to provider →
+The teep proxy receives OpenAI-compatible chat request → resolves model to provider →
 fetches and validates TEE attestation per policy → forwards (or blocks) the request.
 
-Key packages: `proxy` (HTTP layer), `provider` (model routing), `attestation` (TEE verification), `config` (policy).
+The proxy receives concurrent API inference requests to multiple providers and models from multiple client API consumers simultaneously. All code paths from the HTTP handler inward must be safe for concurrent use. All attestation caches, key pinning, connection pinning, supply chain validation, and supply chain caches must also be safe for concurrent use via multiple clients performing simultaneous access of multiple providers and models.
 
 ## Core Commands
 
@@ -33,16 +33,9 @@ This repository is managed by git and hosted on github.
   - Stage only specific files you modified. Do not use `git add .` or `git add -A`.
 - Ensure major features have integration test coverage upon plan completion.
   - Run `make integration` and `make reports` when finishing a plan or any major change.
-
-### Fixing Audit and Code Review Issues
-
-- If the audit or code review is of a local branch, use `git absorb` to merge
-  fixes into their relevant commit.
-- If the branch has already been pushed to a remote, use one commit per issue.
-  - Describe both issues and fixes in commit messages.
 - Do not mention audit identifiers in code or commit messages.
 
-## TOP PRIORITY: Data Privacy
+## TOP PRIORITY: Data Privacy and Correctness
 
 Teep is *critical infrastructure security software* for handling *highly confidential data*.
 
@@ -56,7 +49,7 @@ This means failing closed is a FEATURE, not a BUG.
 
 To ensure data privacy and integrity, adhere to the following rules:
 
-### Go Conventions
+### Follow Go Conventions
 
 - Follow Effective Go idioms and best practices.
 - When uncertain, prefer DEFENSE IN DEPTH validation.
@@ -64,7 +57,13 @@ To ensure data privacy and integrity, adhere to the following rules:
 - Use `Connection: close` to prevent TLS connection reuse across attestation boundaries.
 - ALWAYS add regression test coverage for audit findings.
 
-### Code Structure
+### Ensure Concurrency Safety
+
+- **No mutable package-level variables.** State that varies per-request or per-provider must live on a struct or be passed as a parameter. A global that is written during request handling will race under concurrent load.
+- Prefer dependency injection (constructor parameters, struct fields, function arguments) over globals for anything that could differ between callers.
+- Use `go test -race ./...` (run automatically by `make check`) to verify new code is race-free. Add concurrent test cases (`sync.WaitGroup` + parallel goroutines) when introducing shared state.
+
+### Ensure Low Cyclomatic Complexity
 
 Functions must not exceed cyclomatic complexity 32 (enforced by `gocyclo` via golangci-lint). **Plan the decomposition before writing code** — do not write a monolithic function and refactor after.
 
@@ -86,7 +85,7 @@ Reference implementations to mirror when adding providers or verification logic:
 - **Attestation verification:** `internal/provider/nearcloud/pinned.go:attestOnConn` and `internal/provider/neardirect/pinned.go:attestOnConn`
 - **Proxy handler:** `internal/proxy/proxy.go:handleChat`
 
-### Cryptographic Safety
+### Ensure Cryptographic Safety
 
 - All cryptographic comparisons MUST be constant-time (`subtle.ConstantTimeCompare`). Never use `==`, `!=`, `bytes.Equal`, or `strings.EqualFold` on secrets, keys, fingerprints, nonces, or hashes.
 - ALWAYS authenticate encryption keys via attestation binding.
@@ -94,7 +93,7 @@ Reference implementations to mirror when adding providers or verification logic:
 - Nonce generation MUST use `crypto/rand`. Fail on error; never use a weak source.
 - Zero ephemeral key material after use.
 
-### Attestation Integrity
+### Ensure Attestation Integrity
 
 - Attestation MUST be verified before any request is forwarded.
 - Nonces MUST originate from the client, not the server response.
@@ -102,19 +101,25 @@ Reference implementations to mirror when adding providers or verification logic:
 - Cache misses MUST trigger full re-attestation, never pass-through.
 - Cache eviction MUST NOT allow unattested connections.
 
-### Sensitive Data Handling
+### Protect Sensitive Data
 
 - NEVER log or print API keys, inference request data, or inference response data.
 - Redact API keys in logs to first few characters only.
 - Config files containing secrets should have permission checks.
 
-### Fail-Closed Policy
+### Always Fail-Closed
 
 - Validation issues of any kind must FAIL LOUDLY AND FAIL CLOSED.
+- Failed validation MUST block requests unless specifically whitelisted by allow_fail or command line switch.
 - Error paths MUST only return or propagate errors. Any other behavior is a defect.
 - Reject malformed input entirely; never silently drop malformed elements.
 - Unknown or misspelled config values MUST be rejected at startup.
 - JSON unmarshalling MUST use strict mode (warn on unknown fields, and reject failures).
 - If you can't make development progress due to a failing validation, STOP and ask for advice.
-- NEVER weaken or bypass validation behavior.
-- NO WORKAROUNDS. NO ERROR FALLBACKS. NO BACKWARDS COMPATIBILITY.
+
+### No Fallbacks or Backwards Compatibility
+
+- NEVER weaken or bypass validation behavior unless it has been explicitly disabled.
+- NO WORKAROUNDS.
+- NO ERROR FALLBACKS.
+- NO BACKWARDS COMPATIBILITY.
