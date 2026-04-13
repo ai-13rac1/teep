@@ -16,7 +16,7 @@ fetches and validates TEE attestation per policy → forwards (or blocks) the re
 
 The proxy receives concurrent API inference requests to multiple providers and models from multiple client API consumers simultaneously. All code paths from the HTTP handler inward must be safe for concurrent use. All attestation caches, key pinning, connection pinning, supply chain validation, and supply chain caches must also be safe for concurrent use via multiple clients performing simultaneous access of multiple providers and models.
 
-Key directories:
+## Key Code Directories
 
 - `cmd/teep/` — CLI entry point, subcommands (`serve`, `verify`), flag definitions.
 - `internal/proxy/` — HTTP handler that accepts OpenAI-compatible requests and routes to providers.

@@ -15,7 +15,7 @@ fetches and validates TEE attestation per policy → forwards (or blocks) the re
 
 The proxy receives concurrent API inference requests to multiple providers and models from multiple client API consumers simultaneously. All code paths from the HTTP handler inward must be safe for concurrent use. All attestation caches, key pinning, connection pinning, supply chain validation, and supply chain caches must also be safe for concurrent use via multiple clients performing simultaneous access of multiple providers and models.
 
-Key directories:
+## Key Code directories
 
 - `cmd/teep/` — CLI entry point, subcommands (`serve`, `verify`), flag definitions.
 - `internal/proxy/` — HTTP handler that accepts OpenAI-compatible requests and routes to providers.
@@ -32,20 +32,6 @@ Key directories:
 - Run full integration tests: `make integration` (slow; optional API keys or config).
 - Generate provider verification reports: `make reports` (requires API keys or config).
 
-## Git Workflow
-
-This repository is managed by git and hosted on github.
-
-### Development Workflow
-
-- For multi-phase plans, use one commit per phase.
-- Ensure new code has unit test coverage before committing.
-  - Run `make check` before each commit.
-  - Stage only specific files you modified. Do not use `git add .` or `git add -A`.
-- Ensure major features have integration test coverage upon plan completion.
-  - Run `make integration` and `make reports` when finishing a plan or any major change.
-- Do not mention audit identifiers in code or commit messages.
-
 ## TOP PRIORITY: Data Privacy and Correctness
 
 Teep is *critical infrastructure security software* for handling *highly confidential data*.
@@ -55,6 +41,18 @@ Teep is *critical infrastructure security software* for handling *highly confide
 It is more important to protect confidential traffic than it is to provide service. Provider verification failures are not bugs. A provider that fails enforced factors does not meet security requirements. Never modify verification logic to accommodate a non-compliant provider.
 
 This means failing closed is a FEATURE, not a BUG.
+
+## Git Workflow
+
+This repository is managed by git and hosted on github.
+
+- For multi-phase plans, use one commit per phase.
+- Ensure new code has unit test coverage before committing.
+  - Run `make check` before each commit.
+  - Stage only specific files you modified. Do not use `git add .` or `git add -A`.
+- Ensure major features have integration test coverage upon plan completion.
+  - Run `make integration` and `make reports` when finishing a plan or any major change.
+- Do not mention audit identifiers in code or commit messages.
 
 ## Repository Rules
 
