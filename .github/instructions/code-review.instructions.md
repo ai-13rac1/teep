@@ -79,11 +79,12 @@ security validation.
 - JSON unmarshalling MUST use strict mode (warn on unknown fields, and reject failures).
 - Malformed attestation data MUST fail the entire response, not skip elements.
 - **Do not request nil checks for internal objects and arguments** that are
-  expected to be always non-nil by normal program construction. A nil dereference panic is
-  preferable to a nil guard that returns a default value or skips validation,
-  which would introduce fail-open behavior. Nil checks are acceptable when they fail
-  closed by returning/propagating a clear error that blocks the request; they must not
-  introduce fail-open behavior.
+  expected to be always non-nil by normal program construction when the proposed
+  guard would return a default value, skip validation, or otherwise continue
+  processing. That would introduce fail-open behavior. Nil checks are acceptable
+  when they fail closed by returning or propagating a clear error that blocks the
+  request. Nil dereference panics should be treated as programmer bugs, not as a
+  desired request-handling strategy.
 
 ## Concurrency Safety
 
