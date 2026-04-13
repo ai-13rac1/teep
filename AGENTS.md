@@ -58,21 +58,45 @@ This repository is managed by git and hosted on github.
 
 To ensure data privacy and integrity, adhere to the following rules:
 
-### Follow Go Conventions
+### Always Fail-Closed
 
-- Follow Effective Go idioms and best practices.
-- When uncertain, prefer DEFENSE IN DEPTH validation.
-- Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
-- Use `Connection: close` to prevent TLS connection reuse across attestation boundaries.
-- ALWAYS add regression test coverage for audit findings.
+- Validation issues of any kind must FAIL LOUDLY AND FAIL CLOSED.
+- Failed validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
+- Error paths MUST only return or propagate errors. Any other behavior is a defect.
+- Reject malformed input entirely; never silently drop malformed elements.
+- Unknown or misspelled config values MUST be rejected at startup.
+- JSON unmarshalling MUST use strict mode (warn on unknown fields, and reject failures).
+- If you can't make development progress due to a failing validation, STOP and ask for advice.
 
-### Ensure Concurrency Safety
+### Always Ensure Attestation Integrity
+
+- Attestation MUST be verified before any request is forwarded.
+- Nonces MUST originate from the client, not the server response.
+- Never trust provider-asserted "verified" fields without independent cryptographic verification.
+- Cache misses MUST trigger full re-attestation, never pass-through.
+- Cache eviction MUST NOT allow unattested connections.
+
+### Always Ensure Cryptographic Safety
+
+- All cryptographic comparisons MUST be constant-time (`subtle.ConstantTimeCompare`). Never use `==`, `!=`, `bytes.Equal`, or `strings.EqualFold` on secrets, keys, fingerprints, nonces, or hashes.
+- ALWAYS authenticate encryption keys via attestation binding.
+- ALWAYS use authenticated encryption. No plaintext fallback.
+- Nonce generation MUST use `crypto/rand`. Fail on error; never use a weak source.
+- Zero ephemeral key material after use.
+
+### Always Ensure Concurrency Safety
 
 - **No mutable package-level variables.** State that varies per-request or per-provider must live on a struct or be passed as a parameter. A global that is written during request handling will race under concurrent load.
 - Prefer dependency injection (constructor parameters, struct fields, function arguments) over globals for anything that could differ between callers.
 - Add concurrent test cases (`sync.WaitGroup` + parallel goroutines) when introducing shared state. Ensure integration-level coverage of these cases.
 
-### Ensure Low Cyclomatic Complexity
+### Always Protect Sensitive Data
+
+- NEVER log or print API keys, inference request data, or inference response data.
+- Redact API keys in logs to first few characters only.
+- Config files containing secrets should have permission checks.
+
+### Always Ensure Low Cyclomatic Complexity
 
 Functions must not exceed cyclomatic complexity 32 (enforced by `gocyclo` via golangci-lint). **Plan the decomposition before writing code** — do not write a monolithic function and refactor after.
 
@@ -94,37 +118,13 @@ Reference implementations to mirror when adding providers or verification logic:
 - **Attestation verification:** `internal/provider/nearcloud/pinned.go:attestOnConn` and `internal/provider/neardirect/pinned.go:attestOnConn`
 - **Proxy handler:** `internal/proxy/proxy.go:handleChat`
 
-### Ensure Cryptographic Safety
+### Follow Go Conventions
 
-- All cryptographic comparisons MUST be constant-time (`subtle.ConstantTimeCompare`). Never use `==`, `!=`, `bytes.Equal`, or `strings.EqualFold` on secrets, keys, fingerprints, nonces, or hashes.
-- ALWAYS authenticate encryption keys via attestation binding.
-- ALWAYS use authenticated encryption. No plaintext fallback.
-- Nonce generation MUST use `crypto/rand`. Fail on error; never use a weak source.
-- Zero ephemeral key material after use.
-
-### Ensure Attestation Integrity
-
-- Attestation MUST be verified before any request is forwarded.
-- Nonces MUST originate from the client, not the server response.
-- Never trust provider-asserted "verified" fields without independent cryptographic verification.
-- Cache misses MUST trigger full re-attestation, never pass-through.
-- Cache eviction MUST NOT allow unattested connections.
-
-### Protect Sensitive Data
-
-- NEVER log or print API keys, inference request data, or inference response data.
-- Redact API keys in logs to first few characters only.
-- Config files containing secrets should have permission checks.
-
-### Always Fail-Closed
-
-- Validation issues of any kind must FAIL LOUDLY AND FAIL CLOSED.
-- Failed validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
-- Error paths MUST only return or propagate errors. Any other behavior is a defect.
-- Reject malformed input entirely; never silently drop malformed elements.
-- Unknown or misspelled config values MUST be rejected at startup.
-- JSON unmarshalling MUST use strict mode (warn on unknown fields, and reject failures).
-- If you can't make development progress due to a failing validation, STOP and ask for advice.
+- Follow Effective Go idioms and best practices.
+- When uncertain, prefer DEFENSE IN DEPTH validation.
+- Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
+- Use `Connection: close` to prevent TLS connection reuse across attestation boundaries.
+- ALWAYS add regression test coverage for audit findings.
 
 ### No Fallbacks or Backwards Compatibility
 
