@@ -15,6 +15,17 @@ fetches and validates TEE attestation per policy → forwards (or blocks) the re
 
 The proxy receives concurrent API inference requests to multiple providers and models from multiple client API consumers simultaneously. All code paths from the HTTP handler inward must be safe for concurrent use. All attestation caches, key pinning, connection pinning, supply chain validation, and supply chain caches must also be safe for concurrent use via multiple clients performing simultaneous access of multiple providers and models.
 
+Key directories:
+
+- `cmd/teep/` — CLI entry point, subcommands (`serve`, `verify`), flag definitions.
+- `internal/proxy/` — HTTP handler that accepts OpenAI-compatible requests and routes to providers.
+- `internal/provider/` — Per-provider attestation and connection logic (subdirs: `nearcloud/`, `neardirect/`, `chutes/`, `venice/`, `nanogpt/`, `phalacloud/`).
+- `internal/attestation/` — TDX, NVIDIA, sigstore, Rekor, and supply-chain verification.
+- `internal/e2ee/` — End-to-end encryption sessions and relay logic.
+- `internal/config/` — Configuration parsing and strict validation.
+- `internal/verify/` — Orchestrates multi-factor verification and report generation.
+- `internal/multi/` — Concurrent multi-provider verification.
+
 ## Core Commands
 
 - Run local tests: `make check` (quick: fmt + vet + lint + unit tests).
@@ -110,7 +121,7 @@ Reference implementations to mirror when adding providers or verification logic:
 ### Always Fail-Closed
 
 - Validation issues of any kind must FAIL LOUDLY AND FAIL CLOSED.
-- Failed validation MUST block requests unless specifically whitelisted by allow_fail or command line switch.
+- Failed validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
 - Error paths MUST only return or propagate errors. Any other behavior is a defect.
 - Reject malformed input entirely; never silently drop malformed elements.
 - Unknown or misspelled config values MUST be rejected at startup.
