@@ -9,9 +9,29 @@ Teep is a TEE attestation proxy for private LLM inference. It is **critical
 infrastructure security software** — protecting confidential traffic is more
 important than providing service. Failing closed is a feature, not a bug.
 
+## Data Flow
+
+The Teep proxy receives an OpenAI-compatible chat request → resolves model to provider →
+fetches and validates TEE attestation per policy → forwards (or blocks) the request.
+
+The proxy receives concurrent API inference requests to multiple models from multiple client API consumers simultaneously, and should support expansion to handle multiple concurrent providers. All code paths from the HTTP handler inward must be safe for concurrent use. All attestation caches, key pinning, connection pinning, supply chain validation, and supply chain caches must also be safe for concurrent use via multiple clients performing simultaneous access of multiple providers and models.
+
+## Key Code Directories
+
+- `cmd/teep/` — CLI entry point, subcommands (`serve`, `verify`), flag definitions.
+- `internal/proxy/` — HTTP handler that accepts OpenAI-compatible requests and routes to providers.
+- `internal/provider/` — Per-provider attestation and connection logic (subdirs: `nearcloud/`, `neardirect/`, `chutes/`, `venice/`, `nanogpt/`, `phalacloud/`).
+- `internal/attestation/` — TDX, NVIDIA, sigstore, Rekor, and supply-chain verification.
+- `internal/e2ee/` — End-to-end encryption sessions and relay logic.
+- `internal/config/` — Configuration parsing and strict validation.
+- `internal/verify/` — Orchestrates multi-factor verification and report generation.
+- `internal/multi/` — Concurrent multi-provider verification.
+
 ## Fail-Closed Policy (highest priority)
 
-Every validation check MUST block the request on failure. Flag any code that:
+Every validation check MUST block the request on failure, unless the check has been explicitly whitelisted in an `allow_fail` list, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
+
+Flag any code that:
 
 - Returns a nil error, default value, or falls through on a validation failure.
 - Catches an error and continues instead of aborting (error fallback).
@@ -23,8 +43,8 @@ Every validation check MUST block the request on failure. Flag any code that:
 - Serves stale or cached data when re-validation fails, without blocking.
 
 If an error path does anything other than return/propagate an error, it is a
-defect. There are NO acceptable workarounds, fallbacks, or error recoveries
-for security validation.
+defect. There are NO acceptable workarounds, fallbacks, or error recoveries for
+security validation.
 
 ## Cryptographic Safety
 
@@ -58,6 +78,45 @@ for security validation.
 - Unknown or misspelled config values MUST be rejected at startup.
 - JSON unmarshalling MUST use strict mode (warn on unknown fields, and reject failures).
 - Malformed attestation data MUST fail the entire response, not skip elements.
+- **Do not request nil checks for internal objects and arguments** that are
+  expected to be always non-nil by normal program construction when the proposed
+  guard would return a default value, skip validation, or otherwise continue
+  processing. That would introduce fail-open behavior. Nil checks are acceptable
+  when they fail closed by returning or propagating a clear error that blocks the
+  request. Nil dereference panics should be treated as programmer bugs, not as a
+  desired request-handling strategy.
+
+## Concurrency Safety
+
+Teep serves concurrent inference requests to multiple providers and models
+from multiple consumers. Flag any code that:
+
+- Introduces or writes to a **mutable package-level variable**. State that
+  varies per-request or per-provider must live on a struct or be passed as a
+  parameter. A global written during request handling will race under load.
+- Uses a package-level variable with `save/restore` cleanup (e.g.
+  `orig := pkg.Global; defer func() { pkg.Global = orig }()`) in production
+  code or in any test that calls `t.Parallel()` — this pattern is inherently
+  racy when callers run concurrently.
+- Shares mutable state (maps, slices, pointers) between goroutines without
+  synchronization (`sync.Mutex`, `sync.Map`, channels, or `sync/atomic`).
+- Mutates a struct field that is read by concurrent request handlers without
+  holding a lock.
+
+Preferred patterns:
+- **Dependency injection** — pass per-call or per-handler dependencies via
+  constructor parameters, struct fields, or function arguments. Tests that
+  cannot call `t.Parallel()` because they mutate a package-level variable
+  are a signal to inject that dependency instead.
+- **Channels for coordination** — prefer channels for signaling between
+  goroutines; use `sync.Mutex`/`sync.RWMutex` for protecting shared data.
+  Use `sync.Once` for safe lazy initialization.
+- **Immutable-after-init** — unexported state set once during `New()`/`init()`
+  and never written again is safe. Exported `var` declarations are not truly
+  immutable — any consumer package can write them; prefer unexported variables
+  with accessors or dependency injection.
+- Concurrent test coverage (`sync.WaitGroup` + parallel goroutines + `-race`)
+  should accompany any new shared state.
 
 ## Go Conventions
 
