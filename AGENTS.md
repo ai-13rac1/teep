@@ -87,7 +87,7 @@ Failing closed is a FEATURE, not a BUG. It is more important to protect confiden
 - Prefer dependency injection (constructor parameters, struct fields, function arguments) over globals for anything that could differ between callers.
 - Use `sync.Mutex`/`sync.RWMutex` for protecting shared data structures (caches, maps). Prefer channels for coordination between goroutines. Use `sync.Once` for safe lazy initialization.
 - Add concurrent test cases (`sync.WaitGroup` + parallel goroutines) when manipulating shared state. Ensure integration-level coverage of these cases.
-- Always run `make check` (uses `go test -race`) and `make integration` to ensure new and existing concurrency tests pass.
+- Always run `make check` and `make integration` to ensure new and existing concurrency tests pass (all tests use `go test -race`).
 
 ### Always Protect Sensitive Data
 
