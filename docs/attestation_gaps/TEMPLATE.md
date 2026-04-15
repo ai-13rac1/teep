@@ -58,24 +58,6 @@ Examples of good impact framing from existing reports:
 - "Embedding vectors leak semantic content"
 - "Voice data contains biometric identifiers" -->
 
-## Current Status
-
-<!-- Summary table of the provider's current implementation status for the
-security properties in question. What does the provider verify? What is
-missing? Frame for the provider's engineers and product managers.
-
-Teep-specific factor status and workarounds belong in the optional
-"Teep Status" section at the end of the document.
-
-Example format:
-
-| Property | Provider status | Detail |
-|---|---|---|
-| TDX quote authenticity | Implemented | Standard DCAP verification |
-| Container image identity | Not implemented | Provider does not expose image digests |
-| Model weight hashes | Not implemented | No mechanism exists |
--->
-
 ---
 
 ## Technical Background
