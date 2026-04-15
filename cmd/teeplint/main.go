@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/13rac1/teep/internal/verify"
@@ -714,6 +715,8 @@ func isAllowedPath(path string, allowlist []string) bool {
 // containsCompositeLit reports whether an AST node contains a composite literal
 // of type pkg.TypeName (e.g. http.Client{}). It resolves import aliases so that
 // e.g. `import nethttp "net/http"` + `nethttp.Client{}` is also detected.
+// Dot imports (import . "net/http") are treated as an automatic match since
+// they bypass selector-based detection entirely.
 func containsCompositeLit(f *ast.File, importPath, typeName string) bool { //nolint:unparam // general-purpose AST helper
 	if f == nil {
 		return false
@@ -721,6 +724,12 @@ func containsCompositeLit(f *ast.File, importPath, typeName string) bool { //nol
 	localNames := importLocalNames(f, importPath)
 	if len(localNames) == 0 {
 		return false
+	}
+	// Dot import of the target package is an automatic violation — bare
+	// composite literals (Client{}) cannot be reliably distinguished from
+	// project-local types without full type resolution.
+	if slices.Contains(localNames, ".") {
+		return true
 	}
 	found := false
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -752,9 +761,9 @@ func containsCompositeLit(f *ast.File, importPath, typeName string) bool { //nol
 
 // importLocalNames returns the local identifier(s) under which importPath is
 // accessible in f. For a normal import of "net/http" this is ["http"]; for
-// `import nethttp "net/http"` it is ["nethttp"]. Dot imports are not supported
-// (they import all exported names into the file scope, which is a different
-// detection problem).
+// `import nethttp "net/http"` it is ["nethttp"]. Dot imports (import . "...")
+// return the sentinel ["."]; callers should treat this as a policy violation
+// since dot-imported names bypass selector-based detection.
 func importLocalNames(f *ast.File, importPath string) []string {
 	var names []string
 	for _, imp := range f.Imports {
@@ -763,9 +772,6 @@ func importLocalNames(f *ast.File, importPath string) []string {
 			continue
 		}
 		if imp.Name != nil {
-			if imp.Name.Name == "." {
-				continue // dot imports not handled
-			}
 			names = append(names, imp.Name.Name)
 		} else {
 			// Default: last path element.

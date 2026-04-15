@@ -1018,6 +1018,16 @@ func fn() {}
 	}
 }
 
+func TestContainsCompositeLit_DotImport(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import . "net/http"
+func fn() { _ = Client{} }
+`)
+	if !containsCompositeLit(f, "net/http", "Client") {
+		t.Error("expected dot-import of net/http to be flagged")
+	}
+}
+
 // =============================================================================
 // checkNoJSONUnmarshalCLI
 // =============================================================================

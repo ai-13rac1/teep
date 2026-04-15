@@ -143,13 +143,13 @@ func TestCheckCT_DisabledChecker(t *testing.T) {
 }
 
 func TestDial_InvalidHost(t *testing.T) {
+	// Use a local refused connection for deterministic failure without DNS.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Dial to a non-existent host should fail.
-	_, err := tlsct.Dial(ctx, "invalid.test.example.invalid")
+	_, err := tlsct.Dial(ctx, "127.0.0.1:1")
 	if err == nil {
-		t.Fatal("expected error for invalid host")
+		t.Fatal("expected error for refused connection")
 	}
 }
 
@@ -197,6 +197,28 @@ func TestDial_MalformedHost(t *testing.T) {
 	_, err := tlsct.Dial(context.Background(), "host:port:extra")
 	if err == nil {
 		t.Fatal("expected error for malformed host")
+	}
+}
+
+func TestDial_BracketedIPv6(t *testing.T) {
+	// "[::1]" should be normalized to "::1" for SNI, not double-bracketed.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := tlsct.Dial(ctx, "[::1]")
+	if err == nil {
+		t.Fatal("expected error for refused connection")
+	}
+	// Must not contain "[[" which indicates double-bracketing.
+	if strings.Contains(err.Error(), "[[") {
+		t.Errorf("Dial double-bracketed IPv6: %v", err)
+	}
+}
+
+func TestDial_TrailingColon(t *testing.T) {
+	_, err := tlsct.Dial(context.Background(), "example.com:")
+	if err == nil {
+		t.Fatal("expected error for trailing colon (empty port)")
 	}
 }
 

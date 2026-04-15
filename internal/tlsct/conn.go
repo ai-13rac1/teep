@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -36,14 +37,19 @@ type Conn struct {
 func Dial(ctx context.Context, host string) (*Conn, error) {
 	h, p, err := net.SplitHostPort(host)
 	if err == nil {
+		if p == "" {
+			return nil, fmt.Errorf("invalid host %q: empty port", host)
+		}
 		return DialAddr(ctx, h, net.JoinHostPort(h, p))
 	}
 
 	// Distinguish "missing port" (bare hostname) from genuinely malformed
 	// input. Also accept bare IP addresses (including IPv6 literals).
+	// Strip surrounding brackets so "[::1]" is handled like "::1".
+	bare := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	var addrErr *net.AddrError
-	if errors.As(err, &addrErr) && addrErr.Err == "missing port in address" || net.ParseIP(host) != nil {
-		return DialAddr(ctx, host, net.JoinHostPort(host, "443"))
+	if errors.As(err, &addrErr) && addrErr.Err == "missing port in address" || net.ParseIP(bare) != nil {
+		return DialAddr(ctx, bare, net.JoinHostPort(bare, "443"))
 	}
 
 	return nil, fmt.Errorf("invalid host %q: %w", host, err)
