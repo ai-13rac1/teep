@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,8 +143,11 @@ func TestCheckCT_DisabledChecker(t *testing.T) {
 }
 
 func TestDial_InvalidHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	// Dial to a non-existent host should fail.
-	_, err := tlsct.Dial(context.Background(), "invalid.test.example.invalid")
+	_, err := tlsct.Dial(ctx, "invalid.test.example.invalid")
 	if err == nil {
 		t.Fatal("expected error for invalid host")
 	}
@@ -156,6 +160,21 @@ func TestDialAddr_InvalidAddr(t *testing.T) {
 	_, err := tlsct.DialAddr(ctx, "example.com", "127.0.0.1:1")
 	if err == nil {
 		t.Fatal("expected error for refused connection")
+	}
+}
+
+func TestDial_HostPort(t *testing.T) {
+	// Dial with host:port should not double-append :443.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := tlsct.Dial(ctx, "127.0.0.1:1")
+	if err == nil {
+		t.Fatal("expected error for refused connection")
+	}
+	// Should NOT contain ":1:443" — that would indicate double-port.
+	if strings.Contains(err.Error(), ":1:443") {
+		t.Errorf("Dial appended :443 to host:port: %v", err)
 	}
 }
 

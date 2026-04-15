@@ -682,7 +682,7 @@ func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
 		if isAllowedPath(names[i], allowlist) {
 			continue
 		}
-		if containsCompositeLit(f, "http", "Client") {
+		if containsCompositeLit(f, "net/http", "Client") {
 			violations = append(violations, names[i])
 		}
 	}
@@ -712,13 +712,18 @@ func isAllowedPath(path string, allowlist []string) bool {
 }
 
 // containsCompositeLit reports whether an AST node contains a composite literal
-// of type pkg.TypeName (e.g. http.Client{}).
-func containsCompositeLit(node ast.Node, pkg, typeName string) bool { //nolint:unparam // general-purpose AST helper
-	if node == nil {
+// of type pkg.TypeName (e.g. http.Client{}). It resolves import aliases so that
+// e.g. `import nethttp "net/http"` + `nethttp.Client{}` is also detected.
+func containsCompositeLit(f *ast.File, importPath, typeName string) bool { //nolint:unparam // general-purpose AST helper
+	if f == nil {
+		return false
+	}
+	localNames := importLocalNames(f, importPath)
+	if len(localNames) == 0 {
 		return false
 	}
 	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
+	ast.Inspect(f, func(n ast.Node) bool {
 		if found {
 			return false
 		}
@@ -734,13 +739,41 @@ func containsCompositeLit(node ast.Node, pkg, typeName string) bool { //nolint:u
 		if !ok {
 			return true
 		}
-		if x.Name == pkg && sel.Sel.Name == typeName {
-			found = true
-			return false
+		for _, ln := range localNames {
+			if x.Name == ln && sel.Sel.Name == typeName {
+				found = true
+				return false
+			}
 		}
 		return true
 	})
 	return found
+}
+
+// importLocalNames returns the local identifier(s) under which importPath is
+// accessible in f. For a normal import of "net/http" this is ["http"]; for
+// `import nethttp "net/http"` it is ["nethttp"]. Dot imports are not supported
+// (they import all exported names into the file scope, which is a different
+// detection problem).
+func importLocalNames(f *ast.File, importPath string) []string {
+	var names []string
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if path != importPath {
+			continue
+		}
+		if imp.Name != nil {
+			if imp.Name.Name == "." {
+				continue // dot imports not handled
+			}
+			names = append(names, imp.Name.Name)
+		} else {
+			// Default: last path element.
+			parts := strings.Split(path, "/")
+			names = append(names, parts[len(parts)-1])
+		}
+	}
+	return names
 }
 
 // No json.Unmarshal in cmd/teep/main.go (use jsonstrict.UnmarshalWarn).

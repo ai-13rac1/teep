@@ -958,7 +958,7 @@ func TestContainsCompositeLit_Found(t *testing.T) {
 import "net/http"
 func fn() { _ = http.Client{} }
 `)
-	if !containsCompositeLit(f, "http", "Client") {
+	if !containsCompositeLit(f, "net/http", "Client") {
 		t.Error("expected to find http.Client{} literal")
 	}
 }
@@ -968,7 +968,7 @@ func TestContainsCompositeLit_FoundPointer(t *testing.T) {
 import "net/http"
 func fn() { _ = &http.Client{Timeout: 0} }
 `)
-	if !containsCompositeLit(f, "http", "Client") {
+	if !containsCompositeLit(f, "net/http", "Client") {
 		t.Error("expected to find &http.Client{} literal")
 	}
 }
@@ -978,13 +978,13 @@ func TestContainsCompositeLit_NotFound(t *testing.T) {
 import "net/http"
 func fn() *http.Client { return nil }
 `)
-	if containsCompositeLit(f, "http", "Client") {
+	if containsCompositeLit(f, "net/http", "Client") {
 		t.Error("expected false: no composite literal")
 	}
 }
 
 func TestContainsCompositeLit_Nil(t *testing.T) {
-	if containsCompositeLit(nil, "http", "Client") {
+	if containsCompositeLit(nil, "net/http", "Client") {
 		t.Error("expected false for nil node")
 	}
 }
@@ -994,8 +994,27 @@ func TestContainsCompositeLit_DifferentType(t *testing.T) {
 import "net/http"
 func fn() { _ = http.Transport{} }
 `)
-	if containsCompositeLit(f, "http", "Client") {
+	if containsCompositeLit(f, "net/http", "Client") {
 		t.Error("expected false: different type name")
+	}
+}
+
+func TestContainsCompositeLit_ImportAlias(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import nethttp "net/http"
+func fn() { _ = nethttp.Client{} }
+`)
+	if !containsCompositeLit(f, "net/http", "Client") {
+		t.Error("expected to detect http.Client{} via import alias")
+	}
+}
+
+func TestContainsCompositeLit_NoImport(t *testing.T) {
+	f, _ := parseGo(t, `package p
+func fn() {}
+`)
+	if containsCompositeLit(f, "net/http", "Client") {
+		t.Error("expected false: net/http not imported")
 	}
 }
 

@@ -29,11 +29,17 @@ type Conn struct {
 	tlsState tls.ConnectionState
 }
 
-// Dial opens a TLS 1.3 connection to host:443 with standard CA chain
-// validation. It extracts the peer certificate SPKI hash and stores
-// the TLS connection state for subsequent CT checking.
+// Dial opens a TLS 1.3 connection to the given host with standard CA chain
+// validation. If host contains a port (host:port), it is used as-is;
+// otherwise :443 is appended. The host (without port) is used as the TLS
+// ServerName for SNI and certificate verification.
 func Dial(ctx context.Context, host string) (*Conn, error) {
-	return DialAddr(ctx, host, host+":443")
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port — use host as-is with default port 443.
+		return DialAddr(ctx, host, host+":443")
+	}
+	return DialAddr(ctx, h, net.JoinHostPort(h, p))
 }
 
 // DialAddr opens a TLS 1.3 connection to addr with the given serverName
