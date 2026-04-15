@@ -821,6 +821,185 @@ func TestCheckNoMathRand_Fail(t *testing.T) {
 }
 
 // =============================================================================
+// checkNoCryptoTLSImport
+// =============================================================================
+
+func TestCheckNoCryptoTLSImport_Pass(t *testing.T) {
+	f, _ := parseGo(t, `package p; import "net/http"`)
+	r := newResult()
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/proxy/proxy.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoCryptoTLSImport_Fail(t *testing.T) {
+	f, _ := parseGo(t, `package p; import "crypto/tls"`)
+	r := newResult()
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/other/file.go"})
+	if r.failed == 0 {
+		t.Error("expected failure")
+	}
+}
+
+func TestCheckNoCryptoTLSImport_AllowTLSCT(t *testing.T) {
+	f, _ := parseGo(t, `package p; import "crypto/tls"`)
+	r := newResult()
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/tlsct/checker.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for tlsct package, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoCryptoTLSImport_AllowPinned(t *testing.T) {
+	f, _ := parseGo(t, `package p; import "crypto/tls"`)
+	r := newResult()
+	// Both pinned.go files should be allowed.
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/provider/neardirect/pinned.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for neardirect/pinned.go, got %d failures", r.failed)
+	}
+	r = newResult()
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/provider/nearcloud/pinned.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for nearcloud/pinned.go, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoCryptoTLSImport_AllowCapture(t *testing.T) {
+	f, _ := parseGo(t, `package p; import "crypto/tls"`)
+	r := newResult()
+	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/capture/capture.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for capture.go, got %d failures", r.failed)
+	}
+}
+
+// =============================================================================
+// checkNoHTTPClientLiteral
+// =============================================================================
+
+func TestCheckNoHTTPClientLiteral_Pass(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() *http.Client { return tlsct.NewHTTPClient(0) }
+`)
+	r := newResult()
+	checkNoHTTPClientLiteral(r, []*ast.File{f}, []string{"internal/proxy/proxy.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoHTTPClientLiteral_Fail(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() *http.Client { return &http.Client{} }
+`)
+	r := newResult()
+	checkNoHTTPClientLiteral(r, []*ast.File{f}, []string{"internal/other/file.go"})
+	if r.failed == 0 {
+		t.Error("expected failure")
+	}
+}
+
+func TestCheckNoHTTPClientLiteral_AllowTLSCT(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() *http.Client { return &http.Client{} }
+`)
+	r := newResult()
+	checkNoHTTPClientLiteral(r, []*ast.File{f}, []string{"internal/tlsct/checker.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for tlsct package, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoHTTPClientLiteral_AllowVerify(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() *http.Client { return &http.Client{} }
+`)
+	r := newResult()
+	checkNoHTTPClientLiteral(r, []*ast.File{f}, []string{"internal/verify/verify.go"})
+	if r.failed != 0 {
+		t.Errorf("expected pass for verify.go, got %d failures", r.failed)
+	}
+}
+
+// =============================================================================
+// isAllowedPath
+// =============================================================================
+
+func TestIsAllowedPath_PrefixMatch(t *testing.T) {
+	if !isAllowedPath("internal/tlsct/checker.go", []string{"internal/tlsct/"}) {
+		t.Error("expected prefix match")
+	}
+}
+
+func TestIsAllowedPath_ExactMatch(t *testing.T) {
+	if !isAllowedPath("internal/capture/capture.go", []string{"internal/capture/capture.go"}) {
+		t.Error("expected exact match")
+	}
+}
+
+func TestIsAllowedPath_NoMatch(t *testing.T) {
+	if isAllowedPath("internal/other/file.go", []string{"internal/tlsct/", "internal/capture/capture.go"}) {
+		t.Error("expected no match")
+	}
+}
+
+// =============================================================================
+// containsCompositeLit
+// =============================================================================
+
+func TestContainsCompositeLit_Found(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() { _ = http.Client{} }
+`)
+	if !containsCompositeLit(f, "http", "Client") {
+		t.Error("expected to find http.Client{} literal")
+	}
+}
+
+func TestContainsCompositeLit_FoundPointer(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() { _ = &http.Client{Timeout: 0} }
+`)
+	if !containsCompositeLit(f, "http", "Client") {
+		t.Error("expected to find &http.Client{} literal")
+	}
+}
+
+func TestContainsCompositeLit_NotFound(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() *http.Client { return nil }
+`)
+	if containsCompositeLit(f, "http", "Client") {
+		t.Error("expected false: no composite literal")
+	}
+}
+
+func TestContainsCompositeLit_Nil(t *testing.T) {
+	if containsCompositeLit(nil, "http", "Client") {
+		t.Error("expected false for nil node")
+	}
+}
+
+func TestContainsCompositeLit_DifferentType(t *testing.T) {
+	f, _ := parseGo(t, `package p
+import "net/http"
+func fn() { _ = http.Transport{} }
+`)
+	if containsCompositeLit(f, "http", "Client") {
+		t.Error("expected false: different type name")
+	}
+}
+
+// =============================================================================
 // checkNoJSONUnmarshalCLI
 // =============================================================================
 

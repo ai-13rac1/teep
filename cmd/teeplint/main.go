@@ -563,6 +563,8 @@ func checkProjectWideBans(r *result) {
 	checkNoLogImportProject(r, files, names)
 	checkNoMathRand(r, files, names)
 	checkNoJSONUnmarshalCLI(r, files, names, fset)
+	checkNoCryptoTLSImport(r, files, names)
+	checkNoHTTPClientLiteral(r, files, names)
 	fmt.Println()
 }
 
@@ -638,6 +640,109 @@ func checkNoMathRand(r *result, files []*ast.File, names []string) {
 	for _, v := range violations {
 		r.failf("math/rand imported in %s (use crypto/rand)", v)
 	}
+}
+
+// No crypto/tls import outside of tlsct and SPKI pinning files.
+// Production code must use tlsct wrappers for TLS 1.3 and CT enforcement.
+func checkNoCryptoTLSImport(r *result, files []*ast.File, names []string) {
+	allowlist := []string{
+		"internal/tlsct/",
+		"internal/provider/neardirect/pinned.go",
+		"internal/provider/nearcloud/pinned.go",
+		"internal/capture/capture.go",
+	}
+	var violations []string
+	for i, f := range files {
+		if isAllowedPath(names[i], allowlist) {
+			continue
+		}
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, `"`) == "crypto/tls" {
+				violations = append(violations, names[i])
+				break
+			}
+		}
+	}
+	if len(violations) == 0 {
+		r.passf("no crypto/tls import outside tlsct (use tlsct wrappers)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("crypto/tls imported in %s (use tlsct wrappers)", v)
+	}
+}
+
+// No http.Client{} composite literal outside of tlsct.
+// Production code must use tlsct.NewHTTPClient or tlsct.NewHTTPClientWithTransport.
+func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
+	allowlist := []string{
+		"internal/tlsct/",
+		"internal/verify/verify.go",
+	}
+	var violations []string
+	for i, f := range files {
+		if isAllowedPath(names[i], allowlist) {
+			continue
+		}
+		if containsCompositeLit(f, "http", "Client") {
+			violations = append(violations, names[i])
+		}
+	}
+	if len(violations) == 0 {
+		r.passf("no http.Client{} literal outside tlsct (use tlsct.NewHTTPClient)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("http.Client{} literal in %s (use tlsct.NewHTTPClient)", v)
+	}
+}
+
+// isAllowedPath checks whether a file path matches any entry in the allowlist.
+// Entries ending in "/" match as prefixes; others require an exact match.
+func isAllowedPath(path string, allowlist []string) bool {
+	normalized := filepath.ToSlash(filepath.Clean(path))
+	for _, entry := range allowlist {
+		if strings.HasSuffix(entry, "/") {
+			if strings.HasPrefix(normalized, entry) {
+				return true
+			}
+		} else if normalized == entry {
+			return true
+		}
+	}
+	return false
+}
+
+// containsCompositeLit reports whether an AST node contains a composite literal
+// of type pkg.TypeName (e.g. http.Client{}).
+func containsCompositeLit(node ast.Node, pkg, typeName string) bool { //nolint:unparam // general-purpose AST helper
+	if node == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := cl.Type.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		x, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if x.Name == pkg && sel.Sel.Name == typeName {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // No json.Unmarshal in cmd/teep/main.go (use jsonstrict.UnmarshalWarn).
