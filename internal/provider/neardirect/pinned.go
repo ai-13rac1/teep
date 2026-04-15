@@ -121,7 +121,7 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 
 	// 3. Extract SPKI hash and verify certificate transparency.
 	liveSPKI := conn.SPKI()
-	if err := conn.CheckCT(ctx, domain, h.ctChecker); err != nil {
+	if err := h.ctChecker.CheckTLSState(ctx, domain, conn.TLSState()); err != nil {
 		return nil, fmt.Errorf("certificate transparency check failed: %w", err)
 	}
 

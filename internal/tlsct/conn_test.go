@@ -101,7 +101,7 @@ func TestConn_ImplementsNetConn(t *testing.T) {
 	}
 }
 
-func TestCheckCT_NilChecker(t *testing.T) {
+func TestTLSState_ReturnsState(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -114,13 +114,16 @@ func TestCheckCT_NilChecker(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// nil checker should return nil (no error).
-	if err := conn.CheckCT(context.Background(), "localhost", nil); err != nil {
-		t.Errorf("CheckCT with nil checker: %v", err)
+	state := conn.TLSState()
+	if state == nil {
+		t.Fatal("TLSState returned nil")
+	}
+	if len(state.PeerCertificates) == 0 {
+		t.Fatal("TLSState has no peer certificates")
 	}
 }
 
-func TestCheckCT_DisabledChecker(t *testing.T) {
+func TestTLSState_CheckerIntegration(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -134,20 +137,21 @@ func TestCheckCT_DisabledChecker(t *testing.T) {
 	defer conn.Close()
 
 	checker := tlsct.NewChecker()
+	state := conn.TLSState()
 
 	// Use a non-private host so the result depends on checker enablement,
 	// not the localhost/private-host bypass.
 	const host = "example.com"
 
-	if err := conn.CheckCT(context.Background(), host, checker); err == nil {
-		t.Fatal("CheckCT with enabled checker = nil, want error")
+	if err := checker.CheckTLSState(context.Background(), host, state); err == nil {
+		t.Fatal("CheckTLSState with enabled checker should fail for test cert")
 	}
 
 	checker.SetEnabled(false)
 
 	// Disabled checker should return nil.
-	if err := conn.CheckCT(context.Background(), host, checker); err != nil {
-		t.Errorf("CheckCT with disabled checker: %v", err)
+	if err := checker.CheckTLSState(context.Background(), host, state); err != nil {
+		t.Errorf("CheckTLSState with disabled checker: %v", err)
 	}
 }
 

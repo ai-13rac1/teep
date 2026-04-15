@@ -56,11 +56,9 @@ func Dial(ctx context.Context, host string) (*Conn, error) {
 		return nil, fmt.Errorf("invalid host %q: trailing colon", host)
 	}
 
-	var addrErr *net.AddrError
-	isMissingPort := errors.As(err, &addrErr) && addrErr.Err == "missing port in address"
 	isBareHostname := !strings.Contains(host, ":")
 	isBareIP := net.ParseIP(bare) != nil
-	if isMissingPort && (isBareHostname || isBareIP) {
+	if isBareHostname || isBareIP {
 		return DialAddr(ctx, bare, net.JoinHostPort(bare, "443"))
 	}
 
@@ -95,8 +93,10 @@ func DialAddr(ctx context.Context, serverName, addr string) (*Conn, error) {
 
 // NewConn wraps an existing *tls.Conn into a tlsct.Conn, extracting the
 // SPKI hash from the peer certificate. The handshake must already be complete.
-// This is intended for tests that create connections to httptest.TLSServer
-// with custom root CAs.
+//
+// Exported for use by provider test packages (nearcloud, neardirect) that
+// create connections to httptest.TLSServer with custom root CAs. Cannot
+// reside in export_test.go because callers span multiple packages.
 func NewConn(tc *tls.Conn) (*Conn, error) {
 	return newConn(tc)
 }
@@ -117,15 +117,9 @@ func newConn(tc *tls.Conn) (*Conn, error) {
 // SubjectPublicKeyInfo, computed at connection creation time.
 func (c *Conn) SPKI() string { return c.spki }
 
-// CheckCT verifies that the peer certificate chain provides valid SCT
-// evidence anchored to a known CT log. Returns nil if the checker is nil
-// or disabled.
-func (c *Conn) CheckCT(ctx context.Context, host string, checker *Checker) error {
-	if checker == nil {
-		return nil
-	}
-	return checker.CheckTLSState(ctx, host, &c.tlsState)
-}
+// TLSState returns the TLS connection state captured at creation time.
+// Callers use this with Checker.CheckTLSState for CT verification.
+func (c *Conn) TLSState() *tls.ConnectionState { return &c.tlsState }
 
 // net.Conn implementation — delegates to the underlying *tls.Conn.
 
