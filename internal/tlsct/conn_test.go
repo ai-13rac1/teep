@@ -134,15 +134,24 @@ func TestCheckCT_DisabledChecker(t *testing.T) {
 	defer conn.Close()
 
 	checker := tlsct.NewChecker()
+
+	// Use a non-private host so the result depends on checker enablement,
+	// not the localhost/private-host bypass.
+	const host = "example.com"
+
+	if err := conn.CheckCT(context.Background(), host, checker); err == nil {
+		t.Fatal("CheckCT with enabled checker = nil, want error")
+	}
+
 	checker.SetEnabled(false)
 
 	// Disabled checker should return nil.
-	if err := conn.CheckCT(context.Background(), "localhost", checker); err != nil {
+	if err := conn.CheckCT(context.Background(), host, checker); err != nil {
 		t.Errorf("CheckCT with disabled checker: %v", err)
 	}
 }
 
-func TestDial_InvalidHost(t *testing.T) {
+func TestDial_RefusedConnection(t *testing.T) {
 	// Use a local refused connection for deterministic failure without DNS.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -219,6 +228,23 @@ func TestDial_TrailingColon(t *testing.T) {
 	_, err := tlsct.Dial(context.Background(), "example.com:")
 	if err == nil {
 		t.Fatal("expected error for trailing colon (empty port)")
+	}
+}
+
+func TestDial_EmptyHostWithPort(t *testing.T) {
+	_, err := tlsct.Dial(context.Background(), ":443")
+	if err == nil {
+		t.Fatal("expected error for empty host with port")
+	}
+	if !strings.Contains(err.Error(), "empty host") {
+		t.Errorf("expected 'empty host' error, got: %v", err)
+	}
+}
+
+func TestDialAddr_EmptyServerName(t *testing.T) {
+	_, err := tlsct.DialAddr(context.Background(), "", "127.0.0.1:443")
+	if err == nil {
+		t.Fatal("expected error for empty serverName")
 	}
 }
 

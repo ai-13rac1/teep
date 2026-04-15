@@ -36,6 +36,9 @@ type Conn struct {
 func Dial(ctx context.Context, host string) (*Conn, error) {
 	h, p, err := net.SplitHostPort(host)
 	if err == nil {
+		if h == "" {
+			return nil, fmt.Errorf("invalid host %q: empty host", host)
+		}
 		if p == "" {
 			return nil, fmt.Errorf("invalid host %q: empty port", host)
 		}
@@ -68,6 +71,9 @@ func Dial(ctx context.Context, host string) (*Conn, error) {
 // for SNI and certificate verification. The SPKI hash is extracted from
 // the peer certificate after the handshake completes.
 func DialAddr(ctx context.Context, serverName, addr string) (*Conn, error) {
+	if serverName == "" {
+		return nil, errors.New("invalid serverName: empty")
+	}
 	d := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: DefaultDialTimeout},
 		Config: &tls.Config{

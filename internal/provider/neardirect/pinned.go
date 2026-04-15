@@ -285,9 +285,10 @@ func (h *PinnedHandler) setDialer(fn func(ctx context.Context, domain string) (*
 	h.dialFn = fn
 }
 
-// tlsDial opens a TLS connection to domain:443 via tlsct.Dial.
-// The certificate is verified via CA chain validation, TLS 1.3 enforcement,
-// and attestation-based SPKI pinning.
+// tlsDial opens a TLS connection to the provided domain via tlsct.Dial.
+// The domain may be a bare hostname or an explicit host:port. The certificate
+// is verified via CA chain validation, TLS 1.3 enforcement, and
+// attestation-based SPKI pinning.
 func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tlsct.Conn, error) {
 	return tlsct.Dial(ctx, domain)
 }
