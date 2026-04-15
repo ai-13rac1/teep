@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,9 +28,6 @@ import (
 var errAlreadyCached = errors.New("already cached")
 
 const (
-	// dialTimeout is the TCP+TLS handshake timeout for backend connections.
-	dialTimeout = 30 * time.Second
-
 	// readTimeout is the overall read timeout for attestation responses.
 	readTimeout = 30 * time.Second
 )
@@ -41,8 +37,8 @@ type DomainResolver interface {
 	Resolve(ctx context.Context, model string) (string, error)
 }
 
-// PinnedHandler implements provider.PinnedHandler for NEAR AI. It opens a raw
-// tls.Conn to the resolved backend domain, checks the SPKI cache, fetches
+// PinnedHandler implements provider.PinnedHandler for NEAR AI. It opens a
+// tlsct.Conn to the resolved backend domain, checks the SPKI cache, fetches
 // attestation on the same connection if needed, then sends the chat request
 // and returns the raw response.
 type PinnedHandler struct {
@@ -56,7 +52,7 @@ type PinnedHandler struct {
 	rekorClient *attestation.RekorClient
 	verifyQuote attestation.TDXVerifier
 	ctChecker   *CTChecker
-	dialFn      func(ctx context.Context, domain string) (*tls.Conn, error) // nil → use default tlsDial
+	dialFn      func(ctx context.Context, domain string) (*tlsct.Conn, error) // nil → use default tlsDial
 
 	verifySF singleflight.Group
 }
@@ -123,16 +119,10 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 		}
 	}()
 
-	// 3. Extract SPKI hash from the peer certificate.
-	liveSPKI, err := h.extractSPKI(conn)
-	if err != nil {
-		return nil, fmt.Errorf("extract SPKI: %w", err)
-	}
-	if h.ctChecker != nil {
-		state := conn.ConnectionState()
-		if err := h.ctChecker.CheckTLSState(ctx, domain, &state); err != nil {
-			return nil, fmt.Errorf("certificate transparency check failed: %w", err)
-		}
+	// 3. Extract SPKI hash and verify certificate transparency.
+	liveSPKI := conn.SPKI()
+	if err := conn.CheckCT(ctx, domain, h.ctChecker); err != nil {
+		return nil, fmt.Errorf("certificate transparency check failed: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
@@ -291,40 +281,15 @@ func (h *PinnedHandler) encryptBody(
 // setDialer overrides the TLS dial function used by HandlePinned. Only
 // accessible from tests within this package — unexported to prevent
 // supply-chain redirection of backend connections in production.
-func (h *PinnedHandler) setDialer(fn func(ctx context.Context, domain string) (*tls.Conn, error)) {
+func (h *PinnedHandler) setDialer(fn func(ctx context.Context, domain string) (*tlsct.Conn, error)) {
 	h.dialFn = fn
 }
 
-// tlsDial opens a TLS connection to domain:443.
-// The certificate is verified via both standard CA validation and TDX
-// attestation-based SPKI pinning.
-func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tls.Conn, error) {
-	d := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout},
-		Config: &tls.Config{
-			ServerName: domain,
-			MinVersion: tls.VersionTLS13,
-		},
-	}
-	conn, err := d.DialContext(ctx, "tcp", domain+":443")
-	if err != nil {
-		return nil, err
-	}
-	tc, ok := conn.(*tls.Conn)
-	if !ok {
-		conn.Close()
-		return nil, fmt.Errorf("tls.Dialer returned %T, expected *tls.Conn", conn)
-	}
-	return tc, nil
-}
-
-// extractSPKI computes the SPKI hash of the peer certificate from a TLS connection.
-func (h *PinnedHandler) extractSPKI(conn *tls.Conn) (string, error) {
-	state := conn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		return "", errors.New("no peer certificate from server")
-	}
-	return attestation.ComputeSPKIHash(state.PeerCertificates[0].Raw)
+// tlsDial opens a TLS connection to domain:443 via tlsct.Dial.
+// The certificate is verified via CA chain validation, TLS 1.3 enforcement,
+// and attestation-based SPKI pinning.
+func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tlsct.Conn, error) {
+	return tlsct.Dial(ctx, domain)
 }
 
 // attestResult bundles a verification report with its signing key for singleflight.
@@ -337,7 +302,7 @@ type attestResult struct {
 // Returns a VerificationReport and the model's Ed25519 signing key (for E2EE).
 func (h *PinnedHandler) attestOnConn(
 	ctx context.Context,
-	conn *tls.Conn,
+	conn *tlsct.Conn,
 	br *bufio.Reader,
 	bw *bufio.Writer,
 	domain, liveSPKI, model string,
@@ -404,7 +369,7 @@ func (h *PinnedHandler) attestOnConn(
 // sendAttestationRequest writes the attestation HTTP request and reads the
 // response. On error, the caller must close the connection.
 func (h *PinnedHandler) sendAttestationRequest(
-	ctx context.Context, conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
+	ctx context.Context, conn *tlsct.Conn, br *bufio.Reader, bw *bufio.Writer,
 	domain, model string, nonce attestation.Nonce,
 ) (*attestation.RawAttestation, error) {
 	path := attestationPath +

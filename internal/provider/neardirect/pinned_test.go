@@ -24,6 +24,7 @@ import (
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider"
+	"github.com/13rac1/teep/internal/tlsct"
 )
 
 func TestWriteHTTPRequest_GET(t *testing.T) {
@@ -161,33 +162,20 @@ func TestExtractSPKI(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	conn := dialTestTLSCT(t, srv)
 	defer conn.Close()
 
-	handler := &PinnedHandler{}
-	spki, err := handler.extractSPKI(conn)
-	if err != nil {
-		t.Fatalf("extractSPKI: %v", err)
-	}
+	spki := conn.SPKI()
 	if spki == "" {
 		t.Fatal("SPKI hash is empty")
 	}
 	t.Logf("SPKI hash: %s", spki)
 
 	// Verify it's deterministic — same cert should produce same hash.
-	conn2, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
-	if err != nil {
-		t.Fatalf("dial 2: %v", err)
-	}
+	conn2 := dialTestTLSCT(t, srv)
 	defer conn2.Close()
 
-	spki2, err := handler.extractSPKI(conn2)
-	if err != nil {
-		t.Fatalf("extractSPKI 2: %v", err)
-	}
+	spki2 := conn2.SPKI()
 	if spki != spki2 {
 		t.Errorf("SPKI mismatch: %q vs %q", spki, spki2)
 	}
@@ -286,9 +274,14 @@ func handlePinnedWithTestDial(t *testing.T, h *PinnedHandler, srv *httptest.Serv
 	}
 
 	// Connect to test server using the server's own CA cert pool.
-	conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
+	}
+	conn, err := tlsct.NewConn(tc)
+	if err != nil {
+		tc.Close()
+		return nil, fmt.Errorf("tlsct.NewConn: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -296,10 +289,7 @@ func handlePinnedWithTestDial(t *testing.T, h *PinnedHandler, srv *httptest.Serv
 		}
 	}()
 
-	liveSPKI, err := h.extractSPKI(conn)
-	if err != nil {
-		return nil, fmt.Errorf("extractSPKI: %w", err)
-	}
+	liveSPKI := conn.SPKI()
 
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
@@ -338,23 +328,26 @@ func testTLSConfig(srv *httptest.Server) *tls.Config {
 	return &tls.Config{RootCAs: certPool, MinVersion: tls.VersionTLS13}
 }
 
+// dialTestTLSCT dials a test TLS server and wraps the connection as a tlsct.Conn.
+func dialTestTLSCT(t *testing.T, srv *httptest.Server) *tlsct.Conn {
+	t.Helper()
+	tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	if err != nil {
+		t.Fatalf("tls.Dial: %v", err)
+	}
+	conn, err := tlsct.NewConn(tc)
+	if err != nil {
+		tc.Close()
+		t.Fatalf("tlsct.NewConn: %v", err)
+	}
+	return conn
+}
+
 func computeTestServerSPKI(t *testing.T, srv *httptest.Server) string {
 	t.Helper()
-	conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
-	if err != nil {
-		t.Fatalf("dial for SPKI: %v", err)
-	}
+	conn := dialTestTLSCT(t, srv)
 	defer conn.Close()
-
-	state := conn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		t.Fatal("no peer certificates")
-	}
-	hash, err := attestation.ComputeSPKIHash(state.PeerCertificates[0].Raw)
-	if err != nil {
-		t.Fatalf("ComputeSPKIHash: %v", err)
-	}
-	return hash
+	return conn.SPKI()
 }
 
 func hostFromURL(t *testing.T, rawURL string) string {
@@ -422,7 +415,7 @@ func TestSetDialer(t *testing.T) {
 	}
 
 	called := false
-	h.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+	h.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
 		called = true
 		return nil, errors.New("test dialer")
 	})
@@ -501,9 +494,12 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 	)
 
 	// Inject dialer that connects to our test TLS server.
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
-		return conn, err
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
@@ -572,8 +568,12 @@ func TestHandlePinned_CacheHitViaSetDialer(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
@@ -639,8 +639,12 @@ func TestHandlePinned_MismatchedFingerprint(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
@@ -693,8 +697,12 @@ func TestHandlePinned_BlockedReportDoesNotPopulateSPKICache(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	for i := range 2 {
@@ -876,8 +884,12 @@ func TestHandlePinned_ConcurrentRequests_SingleflightDedup(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	const n = 5
@@ -951,8 +963,12 @@ func TestHandlePinned_AttestationTimeout(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1008,8 +1024,12 @@ func TestHandlePinned_MalformedAttestationResponse(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
@@ -1089,8 +1109,12 @@ func TestHandlePinned_BlockedThenRecovery(t *testing.T) {
 		ReportDataVerifier{}, nil,
 		nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 
 	// Request 1: blocked (nonce mismatch — nonce_match is the only enforced factor).

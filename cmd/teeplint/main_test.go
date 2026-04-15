@@ -851,18 +851,18 @@ func TestCheckNoCryptoTLSImport_AllowTLSCT(t *testing.T) {
 	}
 }
 
-func TestCheckNoCryptoTLSImport_AllowPinned(t *testing.T) {
+func TestCheckNoCryptoTLSImport_RejectPinned(t *testing.T) {
 	f, _ := parseGo(t, `package p; import "crypto/tls"`)
+	// Pinned files must now use tlsct, not crypto/tls directly.
 	r := newResult()
-	// Both pinned.go files should be allowed.
 	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/provider/neardirect/pinned.go"})
-	if r.failed != 0 {
-		t.Errorf("expected pass for neardirect/pinned.go, got %d failures", r.failed)
+	if r.failed == 0 {
+		t.Error("expected failure for neardirect/pinned.go using crypto/tls")
 	}
 	r = newResult()
 	checkNoCryptoTLSImport(r, []*ast.File{f}, []string{"internal/provider/nearcloud/pinned.go"})
-	if r.failed != 0 {
-		t.Errorf("expected pass for nearcloud/pinned.go, got %d failures", r.failed)
+	if r.failed == 0 {
+		t.Error("expected failure for nearcloud/pinned.go using crypto/tls")
 	}
 }
 

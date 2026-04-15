@@ -21,6 +21,7 @@ import (
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/neardirect"
+	"github.com/13rac1/teep/internal/tlsct"
 )
 
 func testTLSConfig(srv *httptest.Server) *tls.Config {
@@ -42,23 +43,26 @@ func hostFromURL(t *testing.T, rawURL string) string {
 	return addr
 }
 
+// dialTestTLSCT dials a test TLS server and wraps the connection as a tlsct.Conn.
+func dialTestTLSCT(t *testing.T, srv *httptest.Server) *tlsct.Conn {
+	t.Helper()
+	tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	if err != nil {
+		t.Fatalf("tls.Dial: %v", err)
+	}
+	conn, err := tlsct.NewConn(tc)
+	if err != nil {
+		tc.Close()
+		t.Fatalf("tlsct.NewConn: %v", err)
+	}
+	return conn
+}
+
 func computeTestServerSPKI(t *testing.T, srv *httptest.Server) string {
 	t.Helper()
-	conn, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
-	if err != nil {
-		t.Fatalf("dial for SPKI: %v", err)
-	}
+	conn := dialTestTLSCT(t, srv)
 	defer conn.Close()
-
-	state := conn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		t.Fatal("no peer certificates")
-	}
-	hash, err := attestation.ComputeSPKIHash(state.PeerCertificates[0].Raw)
-	if err != nil {
-		t.Fatalf("ComputeSPKIHash: %v", err)
-	}
-	return hash
+	return conn.SPKI()
 }
 
 // nearcloudAttestationJSON builds a combined gateway+model attestation JSON
@@ -122,8 +126,12 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil /* no model RD verifier */, nil /* no RekorClient */, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	// Disable CT checker for test server (self-signed cert).
 	handler.SetCTChecker(nil)
@@ -189,8 +197,12 @@ func TestHandlePinned_CacheHit(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -258,8 +270,12 @@ func TestHandlePinned_MissingGatewayTLSFingerprint(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -303,8 +319,12 @@ func TestHandlePinned_MismatchedGatewayFingerprint(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -352,8 +372,12 @@ func TestHandlePinned_BlockedReport(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -425,8 +449,12 @@ func TestHandlePinned_AttestationQueryParams(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -490,7 +518,7 @@ func TestSetDialer(t *testing.T) {
 	}
 
 	called := false
-	h.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+	h.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
 		called = true
 		return nil, errors.New("test dialer")
 	})
@@ -526,8 +554,12 @@ func TestHandlePinned_AttestationHTTPError(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -569,8 +601,12 @@ func TestHandlePinned_InvalidAttestationJSON(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -598,7 +634,7 @@ func TestHandlePinned_DialError(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
 		return nil, errors.New("connection refused")
 	})
 	handler.SetCTChecker(nil)
@@ -679,8 +715,12 @@ func TestHandlePinned_ModelHasDifferentFingerprint(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -884,8 +924,12 @@ func TestHandlePinned_WithGatewayComposeAndModelFingerprint(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -965,8 +1009,12 @@ func TestHandlePinned_WithNonEmptyQuotesAndPayload(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -1283,8 +1331,12 @@ func TestHandlePinned_GatewayBlockedModelPasses(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -1358,8 +1410,12 @@ func TestHandlePinned_GatewayPassesModelBlocked(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -1421,8 +1477,12 @@ func TestHandlePinned_SigningKeyCachedOnSuccess(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 
@@ -1512,8 +1572,12 @@ func TestHandlePinned_ConcurrentRequests_SingleflightDedup(t *testing.T) {
 		attestation.MeasurementPolicy{},
 		nil, nil, nil,
 	)
-	handler.setDialer(func(_ context.Context, _ string) (*tls.Conn, error) {
-		return tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
 	})
 	handler.SetCTChecker(nil)
 

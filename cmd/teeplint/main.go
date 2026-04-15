@@ -642,13 +642,11 @@ func checkNoMathRand(r *result, files []*ast.File, names []string) {
 	}
 }
 
-// No crypto/tls import outside of tlsct and SPKI pinning files.
+// No crypto/tls import outside of tlsct.
 // Production code must use tlsct wrappers for TLS 1.3 and CT enforcement.
 func checkNoCryptoTLSImport(r *result, files []*ast.File, names []string) {
 	allowlist := []string{
 		"internal/tlsct/",
-		"internal/provider/neardirect/pinned.go",
-		"internal/provider/nearcloud/pinned.go",
 		"internal/capture/capture.go",
 	}
 	var violations []string
