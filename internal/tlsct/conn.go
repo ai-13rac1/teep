@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -43,12 +42,22 @@ func Dial(ctx context.Context, host string) (*Conn, error) {
 		return DialAddr(ctx, h, net.JoinHostPort(h, p))
 	}
 
-	// Distinguish "missing port" (bare hostname) from genuinely malformed
-	// input. Also accept bare IP addresses (including IPv6 literals).
-	// Strip surrounding brackets so "[::1]" is handled like "::1".
+	// Distinguish true bare hostnames from malformed host:port input.
+	// Also accept bare IP addresses (including IPv6 literals). Strip
+	// surrounding brackets so "[::1]" is handled like "::1".
 	bare := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if bare == "" {
+		return nil, fmt.Errorf("invalid host %q: empty host", host)
+	}
+	if strings.HasSuffix(host, ":") {
+		return nil, fmt.Errorf("invalid host %q: trailing colon", host)
+	}
+
 	var addrErr *net.AddrError
-	if errors.As(err, &addrErr) && addrErr.Err == "missing port in address" || net.ParseIP(bare) != nil {
+	isMissingPort := errors.As(err, &addrErr) && addrErr.Err == "missing port in address"
+	isBareHostname := !strings.Contains(host, ":")
+	isBareIP := net.ParseIP(bare) != nil
+	if isMissingPort && (isBareHostname || isBareIP) {
 		return DialAddr(ctx, bare, net.JoinHostPort(bare, "443"))
 	}
 
@@ -92,23 +101,10 @@ func newConn(tc *tls.Conn) (*Conn, error) {
 		tc.Close()
 		return nil, errors.New("no peer certificate from server")
 	}
-	spki, err := computeSPKIHash(state.PeerCertificates[0].Raw)
-	if err != nil {
-		tc.Close()
-		return nil, fmt.Errorf("compute SPKI hash: %w", err)
-	}
+	leaf := state.PeerCertificates[0]
+	h := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	spki := hex.EncodeToString(h[:])
 	return &Conn{inner: tc, spki: spki, tlsState: state}, nil
-}
-
-// computeSPKIHash returns the lowercase hex SHA-256 of a DER certificate's
-// SubjectPublicKeyInfo.
-func computeSPKIHash(certDER []byte) (string, error) {
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return "", fmt.Errorf("parse certificate: %w", err)
-	}
-	h := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-	return hex.EncodeToString(h[:]), nil
 }
 
 // SPKI returns the SHA-256 hex fingerprint of the peer certificate's
