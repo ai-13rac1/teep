@@ -143,8 +143,12 @@ func TestTLSState_CheckerIntegration(t *testing.T) {
 	// not the localhost/private-host bypass.
 	const host = "example.com"
 
-	if err := checker.CheckTLSState(context.Background(), host, state); err == nil {
-		t.Fatal("CheckTLSState with enabled checker should fail for test cert")
+	// The enabled-checker path fetches Google's CT log list over the
+	// network, so skip when running with -short.
+	if !testing.Short() {
+		if err := checker.CheckTLSState(context.Background(), host, state); err == nil {
+			t.Fatal("CheckTLSState with enabled checker should fail for test cert")
+		}
 	}
 
 	checker.SetEnabled(false)
@@ -166,7 +170,7 @@ func TestDial_RefusedConnection(t *testing.T) {
 	}
 }
 
-func TestDialAddr_InvalidAddr(t *testing.T) {
+func TestDialAddr_RefusedConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
