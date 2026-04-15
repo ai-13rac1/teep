@@ -79,7 +79,8 @@ The file MUST contain:
 
 ## Constraints
 
-- DO NOT modify any source files or plan files.
+- DO NOT modify any source code files (`.go`, `.toml`, `Makefile`, etc.).
+- DO NOT modify individual plan files in `docs/plans/` — the only permitted write is `docs/plans/plan_backlog_analysis.md`.
 - DO NOT recommend skipping or merging plans.
 - DO NOT speculate about code that you have not read. If you cannot find a relevant file, say so explicitly in the analysis.
 - If a plan file is missing (previously listed but now absent), treat it as already implemented and document that in the Status section.
