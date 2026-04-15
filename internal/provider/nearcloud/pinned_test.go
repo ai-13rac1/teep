@@ -20,7 +20,6 @@ import (
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider"
-	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/tlsct"
 )
 
@@ -1624,6 +1623,3 @@ func TestHandlePinned_ConcurrentRequests_SingleflightDedup(t *testing.T) {
 		t.Error("SPKI should be cached after concurrent requests")
 	}
 }
-
-// Suppress unused import warning for neardirect package.
-var _ = neardirect.NewCTChecker

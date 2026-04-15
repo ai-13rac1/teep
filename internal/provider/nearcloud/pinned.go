@@ -43,7 +43,7 @@ type PinnedHandler struct {
 	rdVerifier    provider.ReportDataVerifier
 	rekorClient   *attestation.RekorClient
 	verifyQuote   attestation.TDXVerifier
-	ctChecker     *neardirect.CTChecker
+	ctChecker     *tlsct.Checker
 	dialFn        func(ctx context.Context, domain string) (*tlsct.Conn, error)
 
 	verifySF singleflight.Group
@@ -61,7 +61,7 @@ func NewPinnedHandler(
 	rekorClient *attestation.RekorClient,
 	getter trust.HTTPSGetter,
 ) *PinnedHandler {
-	checker := neardirect.NewCTChecker()
+	checker := tlsct.NewChecker()
 	checker.SetEnabled(!offline)
 
 	return &PinnedHandler{
@@ -79,7 +79,7 @@ func NewPinnedHandler(
 }
 
 // SetCTChecker overrides the certificate transparency checker. Intended for tests.
-func (h *PinnedHandler) SetCTChecker(checker *neardirect.CTChecker) {
+func (h *PinnedHandler) SetCTChecker(checker *tlsct.Checker) {
 	h.ctChecker = checker
 }
 
