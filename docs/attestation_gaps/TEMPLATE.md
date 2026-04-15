@@ -62,17 +62,27 @@ Examples of good impact framing from existing reports:
 
 ## Technical Background
 
-<!-- For the motivated reader who wants to understand the gap in depth.
-Architecture diagrams, protocol details, register meanings, relevant standards.
+<!-- Provide the foundational knowledge a reader needs to understand both the
+gap analysis and the proposed remediations. Write for an engineer who is
+familiar with TEE attestation in general but does not know the specifics of
+the subsystem where this gap lives.
 
-This section should provide enough context that an engineer unfamiliar with the
-specific subsystem can understand the Detailed Analysis that follows.
+Cover the relevant architecture, protocols, register meanings, standards, or
+deployment patterns — whatever prerequisite knowledge is needed so that
+the Detailed Gap Analysis section can reference specifics without stopping
+to explain them, and the Remediation section's proposed solutions make sense.
 
-Mermaid diagrams and ASCII architecture diagrams are welcome. Examples from
-existing reports:
-- TDX register table (dstack_integrity.md)
-- Client → Gateway → Model TEE flow (e2ee_plaintext_gaps.md)
-- Trust chain diagram with color-coded verification status (dstack_integrity.md)
+Examples of what belongs here:
+- A primer on TDX measurement registers and what each one covers
+  (dstack_integrity.md: "TDX in One Page", "Full Dstack TDX Authentication")
+- The provider's TEE architecture and request flow
+  (e2ee_plaintext_gaps.md: "Architecture" with Gateway → Model TEE diagram)
+- Protocol mechanics relevant to the gap (key exchange, attestation evidence
+  format, event log structure)
+
+Mermaid diagrams, ASCII architecture diagrams, and register tables are
+welcome. The goal is a self-contained reference that makes the rest of the
+document accessible to someone encountering this subsystem for the first time.
 
 -->
 
