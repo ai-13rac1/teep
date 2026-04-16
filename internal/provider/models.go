@@ -116,18 +116,18 @@ func NewFilteredModelLister(baseURL, apiKey string, client *http.Client, filter 
 	}
 }
 
-// ListModels fetches the full catalog, fetches the filter set, and returns
-// only the intersection. If the filter fetch fails, the error is propagated
-// to ensure /v1/models only advertises models that can actually be served.
+// ListModels fetches the filter set, then the full catalog, and returns
+// only the intersection. The filter is fetched first to avoid a wasted
+// upstream call if the filter fails.
 func (f *filteredModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error) {
-	all, err := f.inner.ListModels(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	allowed, filterErr := f.filter.Models(ctx)
 	if filterErr != nil {
 		return nil, fmt.Errorf("models: endpoint filter: %w", filterErr)
+	}
+
+	all, err := f.inner.ListModels(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]json.RawMessage, 0, len(all))

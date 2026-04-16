@@ -26,9 +26,13 @@ const (
 	// endpointsTTL is how long endpoint mappings are cached before refresh.
 	endpointsTTL = 5 * time.Minute
 
-	// refreshTimeout bounds how long a singleflight refresh can take,
-	// independent of the caller's context. This prevents a detached
-	// refresh from blocking longer than the HTTP handler's deadline.
+	// refreshTimeout bounds how long a singleflight refresh can take.
+	// The refresh context is detached from caller cancellation (via
+	// WithoutCancel) so one caller's cancel doesn't abort the shared
+	// refresh, but any deadline on the parent context may still shorten
+	// the effective timeoutd
+	// refresh, but any deadline on the parent context may still shorten
+	// the effective timeout.
 	refreshTimeout = 30 * time.Second
 )
 
