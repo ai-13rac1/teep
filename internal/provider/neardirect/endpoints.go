@@ -30,8 +30,6 @@ const (
 	// The refresh context is detached from caller cancellation (via
 	// WithoutCancel) so one caller's cancel doesn't abort the shared
 	// refresh, but any deadline on the parent context may still shorten
-	// the effective timeoutd
-	// refresh, but any deadline on the parent context may still shorten
 	// the effective timeout.
 	refreshTimeout = 30 * time.Second
 )

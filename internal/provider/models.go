@@ -71,12 +71,13 @@ func (l *genericModelLister) ListModels(ctx context.Context) ([]json.RawMessage,
 	return mr.Data, nil
 }
 
-// modelEntry covers the standard OpenAI model object fields plus known
-// provider extensions (NEAR AI). This prevents jsonstrict.UnmarshalWarn from
-// emitting false-positive warnings for legitimate fields.
+// modelEntry covers commonly used OpenAI-compatible model object fields plus
+// known provider extensions (NEAR AI). This avoids jsonstrict.Unmarshal
+// false positives for fields this code intentionally accepts; it is not an
+// exhaustive schema for all standard OpenAI model fields.
 //
-// Standard OpenAI fields: id, object, created, owned_by
-// NEAR AI extensions:     pricing, context_length, architecture.
+// Common OpenAI-compatible fields here: id, object, created, owned_by
+// NEAR AI extensions:                 pricing, context_length, architecture.
 type modelEntry struct {
 	ID            string          `json:"id"`
 	Object        string          `json:"object"`
