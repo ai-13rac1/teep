@@ -522,7 +522,7 @@ func fromConfig(
 			return nearcloud.GatewayHost(), true
 		}
 		p.ModelLister = provider.NewFilteredModelLister(
-			cp.BaseURL, cp.APIKey,
+			"https://"+nearcloud.GatewayHost(), cp.APIKey,
 			config.NewAttestationClient(offline), neardirect.NewEndpointResolver(offline),
 		)
 	case "nanogpt":

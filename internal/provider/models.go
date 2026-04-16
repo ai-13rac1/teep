@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -70,9 +71,20 @@ func (l *genericModelLister) ListModels(ctx context.Context) ([]json.RawMessage,
 	return mr.Data, nil
 }
 
-// modelID extracts the "id" field from a raw model JSON entry.
-type modelID struct {
-	ID string `json:"id"`
+// modelEntry covers the standard OpenAI model object fields plus known
+// provider extensions (NEAR AI). This prevents jsonstrict.UnmarshalWarn from
+// emitting false-positive warnings for legitimate fields.
+//
+// Standard OpenAI fields: id, object, created, owned_by
+// NEAR AI extensions:     pricing, context_length, architecture.
+type modelEntry struct {
+	ID            string          `json:"id"`
+	Object        string          `json:"object"`
+	Created       int64           `json:"created"`
+	OwnedBy       string          `json:"owned_by"`
+	Pricing       json.RawMessage `json:"pricing"`
+	ContextLength json.RawMessage `json:"context_length"`
+	Architecture  json.RawMessage `json:"architecture"`
 }
 
 // ModelFilter returns the set of model names that should be included in a
@@ -120,11 +132,14 @@ func (f *filteredModelLister) ListModels(ctx context.Context) ([]json.RawMessage
 
 	out := make([]json.RawMessage, 0, len(all))
 	for _, raw := range all {
-		var m modelID
-		if err := jsonstrict.UnmarshalWarn(raw, &m, "model entry"); err != nil {
+		var m modelEntry
+		if unknown, err := jsonstrict.Unmarshal(raw, &m); err != nil {
 			return nil, fmt.Errorf("models: unmarshal entry to extract id: %w", err)
 		} else if len(unknown) > 0 {
 			slog.Warn("unexpected JSON fields", "fields", unknown, "context", "model entry")
+		}
+		if m.ID == "" {
+			return nil, errors.New("models: model entry missing required id")
 		}
 		if _, ok := allowed[m.ID]; ok {
 			out = append(out, raw)

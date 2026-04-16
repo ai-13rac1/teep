@@ -293,3 +293,34 @@ func TestFilteredModelLister_InnerError(t *testing.T) {
 		t.Fatal("expected error when inner lister fails")
 	}
 }
+
+func TestFilteredModelLister_EmptyID(t *testing.T) {
+	const modelsWithEmptyID = `{
+		"object": "list",
+		"data": [
+			{"id": "", "object": "model", "created": 0, "owned_by": "test"}
+		]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(modelsWithEmptyID))
+	}))
+	defer srv.Close()
+
+	filter := &staticFilter{
+		models: map[string]struct{}{"": {}},
+	}
+
+	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
+	_, err := lister.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for model entry with empty id")
+	}
+	if !strings.Contains(err.Error(), "missing required id") {
+		t.Errorf("error %q does not mention missing required id", err)
+	}
+}
