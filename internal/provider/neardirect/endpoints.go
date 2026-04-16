@@ -98,12 +98,11 @@ func (r *EndpointResolver) Resolve(ctx context.Context, model string) (string, e
 	})
 	if err != nil {
 		if ok {
-			slog.WarnContext(ctx, "nearai endpoint discovery refresh failed, using stale mapping",
+			slog.WarnContext(ctx, "nearai endpoint discovery refresh failed",
 				"model", model,
-				"domain", domain,
+				"stale_domain", domain,
 				"err", err,
 			)
-			return domain, nil
 		}
 		return "", fmt.Errorf("endpoint discovery: %w", err)
 	}
