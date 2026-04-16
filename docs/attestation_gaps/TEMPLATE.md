@@ -3,20 +3,29 @@
 **Date:** YYYY-MM-DD
 **Status:** Open | Remediation in progress | Resolved
 
-<!-- TITLE: Name the specific gap. Examples from existing reports:
+<!-- TITLE: Name the specific gap or provider assessment. Examples from
+existing reports:
   - "Dstack Integrity Chain: In-Band Discovery Gap"
   - "NearCloud E2EE: Gateway Header-Forwarding Gaps"
   - "Hardware Attestation Binding Issues and Mitigations"
+  - "Sek8s Integrity Chain — Chutes Provider"
 
 A document may cover multiple gaps if they are deeply interrelated — shared
 mitigations, compound attack scenarios, or gaps that only make sense when
 analyzed together. If splitting the gaps into separate documents would cause
 massive duplication in the Remediation section, keep them together and track
-them as named sub-problems (e.g., "Gap 1", "Gap 2") throughout. -->
+them as named sub-problems (e.g., "Gap 1", "Gap 2") throughout.
 
-<!-- OPENING PARAGRAPH: 2-3 sentences. What is the gap, what's at risk, what's
-the current status. A product manager should be able to read this paragraph and
-decide whether to keep reading. No protocol names or register identifiers. -->
+A document may also be a **provider assessment** — a comprehensive analysis
+of a provider's entire attestation posture, covering both what can be
+independently verified and where gaps remain. Provider assessments use this
+template with the optional Verification Surface section included. -->
+
+<!-- OPENING PARAGRAPH: 2-3 sentences. What is the gap (or, for provider
+assessments, the verification posture and its limitations), what's at risk,
+what's the current status. A product manager should be able to read this
+paragraph and decide whether to keep reading. No protocol names or register
+identifiers. -->
 
 ## The Problem
 
@@ -108,6 +117,45 @@ option's subsection in Remediation. This keeps Technical Background lean
 and avoids a wall of unrelated protocols upfront.
 
 -->
+
+---
+
+## Verification Surface
+
+<!-- OPTIONAL — include this section only for provider assessment documents
+that analyze an entire provider's attestation posture. For focused gap reports
+(single gap or tightly related set), skip this section entirely; Technical
+Background provides sufficient context.
+
+This section documents what a remote verifier can independently enforce
+today and how:
+
+- Hardware-attested measurements that can be pinned and verified
+  (e.g., firmware identity, boot chain registers, key bindings).
+- Cryptographic bindings the provider exposes in attestation evidence.
+- Collateral checks (certificate chains, TCB freshness, debug flags).
+- The enforcement status of each property (enforced, enforceable with
+  configuration, not yet enforceable).
+
+This section describes WORKING VERIFICATION ONLY — what is currently
+enforced or enforceable and how. Gaps, missing verification, and
+properties that depend on trusting the provider's implementation belong
+in Detailed Gap Analysis below.
+
+Write for any security-conscious consumer of the provider's service.
+Describe what external clients can verify about the provider's TEE
+deployment in terms of the attestation evidence and cryptographic
+properties available to any remote verifier.
+
+Cross-provider comparison tables may be included here when they help
+contextualize the verification surface against a known baseline (e.g.,
+comparing a novel provider architecture against a well-understood one).
+
+For provider assessments where server-side-only security mechanisms
+(admission controllers, boot gating, runtime re-attestation) form part
+of the provider's security story but are not client-verifiable, summarize
+them here to establish context, then analyze the trust implications in
+Detailed Gap Analysis. -->
 
 ---
 
