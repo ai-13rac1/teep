@@ -3,7 +3,7 @@
 **Date:** 2026-04-16
 **Status:** Open
 
-TEE attestation proves the correctness of an inference provider's software stack — firmware, kernel, and application code — but does not prove which model weights the inference engine loaded. A provider could pass all hardware attestation checks while serving inference from a cheaper, quantized, or backdoored model. No compensating controls currently exist across the industry, except for Tinfoil's dm-verity attested model volumes.
+TEE attestation proves the correctness of an inference provider's software stack — firmware, kernel, and application code — but does not prove which model weights the inference engine loaded. A provider could pass all hardware attestation checks while serving inference from a cheaper, quantized, or backdoored model. No compensating controls that are independently verifiable by external clients currently exist across the industry, except for Tinfoil's dm-verity attested model volumes.
 
 ## The Problem
 
