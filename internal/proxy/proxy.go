@@ -569,10 +569,18 @@ func fromConfig(
 // through to the upstream unchanged. Returns (nil, "", false) when no providers
 // are configured.
 func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, bool) {
+	if len(s.providers) == 0 {
+		return nil, "", false
+	}
+	if len(s.providers) != 1 {
+		// Programming error — proxy.New enforces single provider.
+		slog.Error("resolveModel: expected exactly one provider", "count", len(s.providers))
+		return nil, "", false
+	}
 	for _, p := range s.providers {
 		return p, clientModel, true
 	}
-	return nil, "", false
+	return nil, "", false // unreachable
 }
 
 // fetchAndVerify fetches attestation from the provider and runs all
