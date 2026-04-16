@@ -568,7 +568,8 @@ func TestVerifyInclusionProof_TooManyHashes(t *testing.T) {
 }
 
 func TestParseRekorPublicKey(t *testing.T) {
-	key, err := parseRekorPublicKey()
+	rc := NewRekorClient(http.DefaultClient)
+	key, err := rc.parseRekorPublicKey()
 	if err != nil {
 		t.Fatalf("parseRekorPublicKey: %v", err)
 	}
@@ -603,13 +604,12 @@ func TestVerifyRekorEntry_InclusionIndependentOfSET(t *testing.T) {
 		},
 	}
 
-	// Temporarily override with an invalid key to force SET failure.
-	orig := rekorPublicKeyOverride
-	rekorPublicKeyOverride = "not-a-pem-key"
-	defer func() { rekorPublicKeyOverride = orig }()
+	// Use a client with an invalid key to force SET failure.
+	rc := NewRekorClient(http.DefaultClient)
+	rc.publicKeyPEM = "not-a-pem-key"
 
 	prov := &RekorProvenance{}
-	verifyRekorEntry(entry, prov)
+	rc.verifyRekorEntry(entry, prov)
 
 	// SET should fail due to bad key.
 	if prov.SETErr == nil {
@@ -930,19 +930,17 @@ MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7
 	}
 }
 
-// TestSetRekorPublicKeyOverride verifies the override setter and restore.
-func TestSetRekorPublicKeyOverride(t *testing.T) {
-	orig := rekorPublicKeyOverride
-	t.Cleanup(func() { rekorPublicKeyOverride = orig })
-
-	SetRekorPublicKeyOverride("fake-pem-key")
-	if rekorPublicKeyOverride != "fake-pem-key" {
-		t.Errorf("rekorPublicKeyOverride = %q, want %q", rekorPublicKeyOverride, "fake-pem-key")
+// TestRekorClientPublicKeyOverride verifies the publicKeyPEM field override.
+func TestRekorClientPublicKeyOverride(t *testing.T) {
+	rc := NewRekorClient(http.DefaultClient)
+	rc.publicKeyPEM = "fake-pem-key"
+	if rc.publicKeyPEM != "fake-pem-key" {
+		t.Errorf("publicKeyPEM = %q, want %q", rc.publicKeyPEM, "fake-pem-key")
 	}
 
-	SetRekorPublicKeyOverride("")
-	if rekorPublicKeyOverride != "" {
-		t.Errorf("rekorPublicKeyOverride after reset = %q, want empty", rekorPublicKeyOverride)
+	rc.publicKeyPEM = ""
+	if rc.publicKeyPEM != "" {
+		t.Errorf("publicKeyPEM after reset = %q, want empty", rc.publicKeyPEM)
 	}
 }
 
