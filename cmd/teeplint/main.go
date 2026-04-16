@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/13rac1/teep/internal/verify"
@@ -563,6 +564,8 @@ func checkProjectWideBans(r *result) {
 	checkNoLogImportProject(r, files, names)
 	checkNoMathRand(r, files, names)
 	checkNoJSONUnmarshalCLI(r, files, names, fset)
+	checkNoCryptoTLSImport(r, files, names)
+	checkNoHTTPClientLiteral(r, files, names)
 	fmt.Println()
 }
 
@@ -638,6 +641,145 @@ func checkNoMathRand(r *result, files []*ast.File, names []string) {
 	for _, v := range violations {
 		r.failf("math/rand imported in %s (use crypto/rand)", v)
 	}
+}
+
+// No crypto/tls import outside of tlsct.
+// Production code must use tlsct wrappers for TLS 1.3 and CT enforcement.
+func checkNoCryptoTLSImport(r *result, files []*ast.File, names []string) {
+	allowlist := []string{
+		"internal/tlsct/",
+		"internal/capture/capture.go",
+	}
+	var violations []string
+	for i, f := range files {
+		if isAllowedPath(names[i], allowlist) {
+			continue
+		}
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, `"`) == "crypto/tls" {
+				violations = append(violations, names[i])
+				break
+			}
+		}
+	}
+	if len(violations) == 0 {
+		r.passf("no crypto/tls import outside tlsct (use tlsct wrappers)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("crypto/tls imported in %s (use tlsct wrappers)", v)
+	}
+}
+
+// No http.Client{} composite literal outside of tlsct.
+// Production code must use tlsct.NewHTTPClient or tlsct.NewHTTPClientWithTransport.
+func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
+	allowlist := []string{
+		"internal/tlsct/",
+		"internal/verify/verify.go",
+	}
+	var violations []string
+	for i, f := range files {
+		if isAllowedPath(names[i], allowlist) {
+			continue
+		}
+		if containsCompositeLit(f, "net/http", "Client") {
+			violations = append(violations, names[i])
+		}
+	}
+	if len(violations) == 0 {
+		r.passf("no http.Client{} literal outside tlsct (use tlsct.NewHTTPClient)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("http.Client{} literal in %s (use tlsct.NewHTTPClient)", v)
+	}
+}
+
+// isAllowedPath checks whether a file path matches any entry in the allowlist.
+// Entries ending in "/" match as prefixes; others require an exact match.
+func isAllowedPath(path string, allowlist []string) bool {
+	normalized := filepath.ToSlash(filepath.Clean(path))
+	for _, entry := range allowlist {
+		if strings.HasSuffix(entry, "/") {
+			if strings.HasPrefix(normalized, entry) {
+				return true
+			}
+		} else if normalized == entry {
+			return true
+		}
+	}
+	return false
+}
+
+// containsCompositeLit reports whether an AST node contains a composite literal
+// of type pkg.TypeName (e.g. http.Client{}). It resolves import aliases so that
+// e.g. `import nethttp "net/http"` + `nethttp.Client{}` is also detected.
+// Dot imports (import . "net/http") are treated as an automatic match since
+// they bypass selector-based detection entirely.
+func containsCompositeLit(f *ast.File, importPath, typeName string) bool { //nolint:unparam // general-purpose AST helper
+	if f == nil {
+		return false
+	}
+	localNames := importLocalNames(f, importPath)
+	if len(localNames) == 0 {
+		return false
+	}
+	// Dot import of the target package is an automatic violation — bare
+	// composite literals (Client{}) cannot be reliably distinguished from
+	// project-local types without full type resolution.
+	if slices.Contains(localNames, ".") {
+		return true
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := cl.Type.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		x, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		for _, ln := range localNames {
+			if x.Name == ln && sel.Sel.Name == typeName {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// importLocalNames returns the local identifier(s) under which importPath is
+// accessible in f. For a normal import of "net/http" this is ["http"]; for
+// `import nethttp "net/http"` it is ["nethttp"]. Dot imports (import . "...")
+// return the sentinel ["."]; callers should treat this as a policy violation
+// since dot-imported names bypass selector-based detection.
+func importLocalNames(f *ast.File, importPath string) []string {
+	var names []string
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if path != importPath {
+			continue
+		}
+		if imp.Name != nil {
+			names = append(names, imp.Name.Name)
+		} else {
+			// Default: last path element.
+			parts := strings.Split(path, "/")
+			names = append(names, parts[len(parts)-1])
+		}
+	}
+	return names
 }
 
 // No json.Unmarshal in cmd/teep/main.go (use jsonstrict.UnmarshalWarn).

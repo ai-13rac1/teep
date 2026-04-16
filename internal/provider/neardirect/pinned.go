@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,9 +28,6 @@ import (
 var errAlreadyCached = errors.New("already cached")
 
 const (
-	// dialTimeout is the TCP+TLS handshake timeout for backend connections.
-	dialTimeout = 30 * time.Second
-
 	// readTimeout is the overall read timeout for attestation responses.
 	readTimeout = 30 * time.Second
 )
@@ -41,8 +37,8 @@ type DomainResolver interface {
 	Resolve(ctx context.Context, model string) (string, error)
 }
 
-// PinnedHandler implements provider.PinnedHandler for NEAR AI. It opens a raw
-// tls.Conn to the resolved backend domain, checks the SPKI cache, fetches
+// PinnedHandler implements provider.PinnedHandler for NEAR AI. It opens a
+// tlsct.Conn to the resolved backend domain, checks the SPKI cache, fetches
 // attestation on the same connection if needed, then sends the chat request
 // and returns the raw response.
 type PinnedHandler struct {
@@ -55,8 +51,8 @@ type PinnedHandler struct {
 	rdVerifier  provider.ReportDataVerifier
 	rekorClient *attestation.RekorClient
 	verifyQuote attestation.TDXVerifier
-	ctChecker   *CTChecker
-	dialFn      func(ctx context.Context, domain string) (*tls.Conn, error) // nil → use default tlsDial
+	ctChecker   *tlsct.Checker
+	dialFn      func(ctx context.Context, domain string) (*tlsct.Conn, error) // nil → use default tlsDial
 
 	verifySF singleflight.Group
 }
@@ -73,7 +69,7 @@ func NewPinnedHandler(
 	rekorClient *attestation.RekorClient,
 	getter trust.HTTPSGetter,
 ) *PinnedHandler {
-	checker := NewCTChecker()
+	checker := tlsct.NewChecker()
 	checker.SetEnabled(!offline)
 
 	return &PinnedHandler{
@@ -92,7 +88,7 @@ func NewPinnedHandler(
 
 // SetCTChecker overrides the certificate transparency checker.
 // Intended for tests.
-func (h *PinnedHandler) SetCTChecker(checker *CTChecker) {
+func (h *PinnedHandler) SetCTChecker(checker *tlsct.Checker) {
 	h.ctChecker = checker
 }
 
@@ -123,16 +119,10 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 		}
 	}()
 
-	// 3. Extract SPKI hash from the peer certificate.
-	liveSPKI, err := h.extractSPKI(conn)
-	if err != nil {
-		return nil, fmt.Errorf("extract SPKI: %w", err)
-	}
-	if h.ctChecker != nil {
-		state := conn.ConnectionState()
-		if err := h.ctChecker.CheckTLSState(ctx, domain, &state); err != nil {
-			return nil, fmt.Errorf("certificate transparency check failed: %w", err)
-		}
+	// 3. Extract SPKI hash and verify certificate transparency.
+	liveSPKI := conn.SPKI()
+	if err := h.ctChecker.CheckTLSState(ctx, domain, conn.TLSState()); err != nil {
+		return nil, fmt.Errorf("certificate transparency check failed: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
@@ -225,7 +215,7 @@ func (h *PinnedHandler) HandlePinned(ctx context.Context, req *provider.PinnedRe
 	}
 
 	// 7. Read the response.
-	resp, err := readChatResponse(br) //nolint:bodyclose // body ownership transfers to NewConnClosingReader
+	resp, err := http.ReadResponse(br, nil) //nolint:bodyclose // body ownership transfers to NewConnClosingReader
 	if err != nil {
 		if session != nil {
 			session.Zero()
@@ -291,40 +281,16 @@ func (h *PinnedHandler) encryptBody(
 // setDialer overrides the TLS dial function used by HandlePinned. Only
 // accessible from tests within this package — unexported to prevent
 // supply-chain redirection of backend connections in production.
-func (h *PinnedHandler) setDialer(fn func(ctx context.Context, domain string) (*tls.Conn, error)) {
+func (h *PinnedHandler) setDialer(fn func(ctx context.Context, domain string) (*tlsct.Conn, error)) {
 	h.dialFn = fn
 }
 
-// tlsDial opens a TLS connection to domain:443.
-// The certificate is verified via both standard CA validation and TDX
+// tlsDial opens a TLS connection to the provided domain via tlsct.Dial.
+// The domain may be a bare hostname or an explicit host:port. The certificate
+// is verified via CA chain validation, TLS 1.3 enforcement, and
 // attestation-based SPKI pinning.
-func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tls.Conn, error) {
-	d := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout},
-		Config: &tls.Config{
-			ServerName: domain,
-			MinVersion: tls.VersionTLS13,
-		},
-	}
-	conn, err := d.DialContext(ctx, "tcp", domain+":443")
-	if err != nil {
-		return nil, err
-	}
-	tc, ok := conn.(*tls.Conn)
-	if !ok {
-		conn.Close()
-		return nil, fmt.Errorf("tls.Dialer returned %T, expected *tls.Conn", conn)
-	}
-	return tc, nil
-}
-
-// extractSPKI computes the SPKI hash of the peer certificate from a TLS connection.
-func (h *PinnedHandler) extractSPKI(conn *tls.Conn) (string, error) {
-	state := conn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		return "", errors.New("no peer certificate from server")
-	}
-	return attestation.ComputeSPKIHash(state.PeerCertificates[0].Raw)
+func (h *PinnedHandler) tlsDial(ctx context.Context, domain string) (*tlsct.Conn, error) {
+	return tlsct.Dial(ctx, domain)
 }
 
 // attestResult bundles a verification report with its signing key for singleflight.
@@ -337,7 +303,7 @@ type attestResult struct {
 // Returns a VerificationReport and the model's Ed25519 signing key (for E2EE).
 func (h *PinnedHandler) attestOnConn(
 	ctx context.Context,
-	conn *tls.Conn,
+	conn *tlsct.Conn,
 	br *bufio.Reader,
 	bw *bufio.Writer,
 	domain, liveSPKI, model string,
@@ -404,7 +370,7 @@ func (h *PinnedHandler) attestOnConn(
 // sendAttestationRequest writes the attestation HTTP request and reads the
 // response. On error, the caller must close the connection.
 func (h *PinnedHandler) sendAttestationRequest(
-	ctx context.Context, conn *tls.Conn, br *bufio.Reader, bw *bufio.Writer,
+	ctx context.Context, conn *tlsct.Conn, br *bufio.Reader, bw *bufio.Writer,
 	domain, model string, nonce attestation.Nonce,
 ) (*attestation.RawAttestation, error) {
 	path := attestationPath +
@@ -420,7 +386,11 @@ func (h *PinnedHandler) sendAttestationRequest(
 		return nil, fmt.Errorf("write attestation request: %w", err)
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+	deadline := time.Now().Add(readTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetReadDeadline(deadline); err != nil {
 		return nil, fmt.Errorf("set read deadline: %w", err)
 	}
 
@@ -527,18 +497,20 @@ func (h *PinnedHandler) verifySupplyChain(
 	return compose, imageRepos, digestToRepo, sigstore, rekor
 }
 
-// readChatResponse reads an HTTP response from a buffered reader. The caller
-// is responsible for closing resp.Body (typically via NewConnClosingReader).
-func readChatResponse(br *bufio.Reader) (*http.Response, error) {
-	return http.ReadResponse(br, nil)
-}
-
 // WriteHTTPRequest writes an HTTP/1.1 request (request line + headers + body)
 // to w. Used instead of http.Request.Write to maintain control over the exact
 // connection (no connection pooling, no automatic redirects).
 //
 // Host is derived from headers; Content-Length is derived from body.
 func WriteHTTPRequest(w *bufio.Writer, method, path string, headers http.Header, body []byte) error {
+	// Validate method and path for CRLF injection.
+	if strings.ContainsAny(method, "\r\n") {
+		return errors.New("method contains invalid CR/LF characters")
+	}
+	if strings.ContainsAny(path, "\r\n") {
+		return errors.New("path contains invalid CR/LF characters")
+	}
+
 	// Request line.
 	if _, err := fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", method, path); err != nil {
 		return err
