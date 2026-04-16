@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -55,11 +56,11 @@ func TestEndpointResolver_UnknownModel(t *testing.T) {
 }
 
 func TestEndpointResolver_RefreshOnStale(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		n := calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if calls == 1 {
+		if n == 1 {
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "old.near.ai", "models": ["m"]}]}`))
 		} else {
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "new.near.ai", "models": ["m"]}]}`))
@@ -92,8 +93,8 @@ func TestEndpointResolver_RefreshOnStale(t *testing.T) {
 		t.Errorf("domain = %q, want %q", domain, "new.near.ai")
 	}
 
-	if calls != 2 {
-		t.Errorf("expected 2 fetches, got %d", calls)
+	if c := calls.Load(); c != 2 {
+		t.Errorf("expected 2 fetches, got %d", c)
 	}
 }
 
@@ -156,10 +157,10 @@ func TestEndpointResolver_InvalidDomain(t *testing.T) {
 }
 
 func TestEndpointResolver_FailClosedOnRefreshError(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
+		n := calls.Add(1)
+		if n == 1 {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "old.near.ai", "models": ["m"]}]}`))
 			return
@@ -242,9 +243,9 @@ func TestEndpointResolver_Models(t *testing.T) {
 }
 
 func TestEndpointResolver_Models_ReusesCache(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"endpoints": [{"domain": "x.near.ai", "models": ["m"]}]}`))
 	}))
@@ -260,16 +261,16 @@ func TestEndpointResolver_Models_ReusesCache(t *testing.T) {
 	if _, err := r.Models(context.Background()); err != nil {
 		t.Fatalf("second Models: %v", err)
 	}
-	if calls != 1 {
-		t.Errorf("expected 1 fetch, got %d", calls)
+	if c := calls.Load(); c != 1 {
+		t.Errorf("expected 1 fetch, got %d", c)
 	}
 }
 
 func TestEndpointResolver_Models_StaleOnRefreshError(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
+		n := calls.Add(1)
+		if n == 1 {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "x.near.ai", "models": ["m"]}]}`))
 			return
