@@ -34,7 +34,7 @@ If the user does not specify, ask which plan to update.
 
 Determine the base commit and gather the relevant git diff for the specified plan. The plan file is assumed to be current as of its last commit, so diff code changes **since that commit**.
 
-**Always exclude `docs/`, `.github/`, `*_test.go` files, and `testdata/` directories** from diffs to preserve context capacity. The repository houses large mock blobs and fixtures entirely within its tests.
+**Always exclude `docs/`, `.github/`, and `testdata/` directories** from diffs to preserve context capacity. The repository houses large mock blobs and fixtures entirely within its `testdata/` directories. Keep `*_test.go` files included so the agent can update plan sections that reference test names, test files, or moved test coverage.
 
 1. Find the base commit — the last commit that touched the plan file:
 
@@ -45,7 +45,7 @@ git log -1 --format='%H' -- docs/plans/<plan_file>
 2. Get the code diff since that commit:
 
 ```
-git diff <base_commit>..HEAD -- . ':!docs/' ':!.github/' ':!*_test.go' ':!**/testdata/**'
+git diff <base_commit>..HEAD -- . ':!docs/' ':!.github/' ':!**/testdata/**'
 ```
 
 If the diff is very large, narrow it to the packages the plan touches:
@@ -57,7 +57,7 @@ git diff <base_commit>..HEAD -- <package1>/ <package2>/ ...
 3. Get the commit history since that commit:
 
 ```
-git log <base_commit>..HEAD --oneline -- . ':!docs/' ':!.github/' ':!*_test.go' ':!**/testdata/**'
+git log <base_commit>..HEAD --oneline -- . ':!docs/' ':!.github/' ':!**/testdata/**'
 ```
 
 If the plan file has never been committed (no base commit found), ask the user for a base reference before proceeding.
@@ -124,7 +124,7 @@ Edit the plan file in-place. For each inconsistency found:
 - All plans in `docs/plans/` are unimplemented. Fully implemented plans are deleted as part of the merge that implements them — do not handle that case.
 - DO NOT speculate about code you haven't read. If you can't find evidence, leave the plan text unchanged and note the uncertainty in your response to the user.
 - Process only the specified plan file.
-- ALWAYS exclude `docs/`, `.github/`, `*_test.go`, and `testdata/` from git diffs to conserve context (tests contain large validation blobs).
+- ALWAYS exclude `docs/`, `.github/`, and `testdata/` from git diffs to conserve context (testdata contains large validation blobs). Keep `*_test.go` included.
 - When the diff is too large, narrow to packages relevant to the current plan.
 - Treat git history as an analysis input only. Do not write commit-relative or historical narrative into the plan itself.
 - Treat plans as design documents with a current baseline and a target design. Keep the baseline accurate to `HEAD` and the target design explicit, rather than rewriting the whole document as a pure snapshot of `HEAD`.

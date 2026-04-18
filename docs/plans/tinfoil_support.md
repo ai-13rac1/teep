@@ -822,7 +822,7 @@ explicit.
 ### TDX Verification (Reuse Existing)
 
 For TDX-format attestation, hex-encode the decompressed binary and call the
-existing `attestation.VerifyTDXQuoteOffline()` / `VerifyTDXQuoteOnline()` (via
+existing `attestation.VerifyTDXQuoteOffline()` / `attestation.VerifyTDXQuoteOnline()` (via
 the `attestation.TDXVerifier` function type). Extract measurements:
 
 - Register 0: MRTD (48 bytes hex)
@@ -865,7 +865,7 @@ For SEV-SNP-format attestation:
 6. Extract measurement: `report.Measurement` (single 48-byte hex register).
 
 The SEV-SNP verification is new code — teep only verifies TDX quotes via
-`attestation.VerifyTDXQuoteOffline()` / `VerifyTDXQuoteOnline()`. However,
+`attestation.VerifyTDXQuoteOffline()` / `attestation.VerifyTDXQuoteOnline()`. However,
 go-sev-guest (google/go-sev-guest) provides the verification primitives,
 similar to how go-tdx-guest is used for TDX.
 
