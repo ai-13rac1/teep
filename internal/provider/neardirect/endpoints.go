@@ -25,6 +25,13 @@ const (
 
 	// endpointsTTL is how long endpoint mappings are cached before refresh.
 	endpointsTTL = 5 * time.Minute
+
+	// refreshTimeout bounds how long a singleflight refresh can take.
+	// The refresh context is detached from caller cancellation (via
+	// WithoutCancel) so one caller's cancel doesn't abort the shared
+	// refresh, but any deadline on the parent context may still shorten
+	// the effective timeout.
+	refreshTimeout = 30 * time.Second
 )
 
 // endpointsResponse is the JSON shape returned by the endpoints URL.
@@ -91,11 +98,24 @@ func (r *EndpointResolver) Resolve(ctx context.Context, model string) (string, e
 	}
 
 	// Collapse concurrent refreshes into a single HTTP call.
-	// Use a detached context so one caller's cancellation doesn't
-	// fail the refresh for all collapsed callers.
-	_, err, _ := r.sf.Do("refresh", func() (any, error) {
-		return nil, r.refresh(context.WithoutCancel(ctx))
+	// Use a detached context with a fixed timeout so one caller's
+	// cancellation doesn't fail the refresh for all collapsed callers,
+	// while still bounding how long the refresh can block.
+	// DoChan lets cancelled callers return immediately while the
+	// shared refresh continues in the background.
+	ch := r.sf.DoChan("refresh", func() (any, error) {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+		defer cancel()
+		return nil, r.refresh(rctx)
 	})
+
+	var err error
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("endpoint discovery: %w", ctx.Err())
+	case res := <-ch:
+		err = res.Err
+	}
 	if err != nil {
 		if ok {
 			slog.WarnContext(ctx, "nearai endpoint discovery refresh failed",
@@ -115,6 +135,49 @@ func (r *EndpointResolver) Resolve(ctx context.Context, model string) (string, e
 		return "", fmt.Errorf("unknown model %q (not in endpoint discovery)", model)
 	}
 	return domain, nil
+}
+
+// Models returns the set of model names known to the endpoint discovery cache.
+// If the cache is stale or empty, a refresh is triggered first. Returns nil on
+// error if the cache is also empty.
+func (r *EndpointResolver) Models(ctx context.Context) (map[string]struct{}, error) {
+	r.mu.RLock()
+	stale := time.Since(r.fetchedAt) > endpointsTTL
+	size := len(r.mapping)
+	r.mu.RUnlock()
+
+	if stale || size == 0 {
+		ch := r.sf.DoChan("refresh", func() (any, error) {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+			defer cancel()
+			return nil, r.refresh(rctx)
+		})
+
+		var err error
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("endpoint discovery: %w", ctx.Err())
+		case res := <-ch:
+			err = res.Err
+			if err != nil {
+				r.mu.RLock()
+				size = len(r.mapping)
+				r.mu.RUnlock()
+				if size == 0 {
+					return nil, fmt.Errorf("endpoint discovery: %w", err)
+				}
+				slog.WarnContext(ctx, "nearai: endpoint discovery refresh failed for Models, using stale mapping", "err", err)
+			}
+		}
+	}
+
+	r.mu.RLock()
+	out := make(map[string]struct{}, len(r.mapping))
+	for m := range r.mapping {
+		out[m] = struct{}{}
+	}
+	r.mu.RUnlock()
+	return out, nil
 }
 
 // refresh fetches the endpoint mapping from the discovery URL and replaces

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -55,11 +56,11 @@ func TestEndpointResolver_UnknownModel(t *testing.T) {
 }
 
 func TestEndpointResolver_RefreshOnStale(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		n := calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		if calls == 1 {
+		if n == 1 {
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "old.near.ai", "models": ["m"]}]}`))
 		} else {
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "new.near.ai", "models": ["m"]}]}`))
@@ -92,8 +93,8 @@ func TestEndpointResolver_RefreshOnStale(t *testing.T) {
 		t.Errorf("domain = %q, want %q", domain, "new.near.ai")
 	}
 
-	if calls != 2 {
-		t.Errorf("expected 2 fetches, got %d", calls)
+	if c := calls.Load(); c != 2 {
+		t.Errorf("expected 2 fetches, got %d", c)
 	}
 }
 
@@ -156,10 +157,10 @@ func TestEndpointResolver_InvalidDomain(t *testing.T) {
 }
 
 func TestEndpointResolver_FailClosedOnRefreshError(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
+		n := calls.Add(1)
+		if n == 1 {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "old.near.ai", "models": ["m"]}]}`))
 			return
@@ -204,5 +205,112 @@ func TestEndpointResolver_ContextCancelled(t *testing.T) {
 	_, err := r.Resolve(ctx, "model")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestEndpointResolver_Models(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"endpoints": [
+				{"domain": "a.completions.near.ai", "models": ["model-a", "model-b"]},
+				{"domain": "b.completions.near.ai", "models": ["model-c"]}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	r := newEndpointResolverForTest(srv.URL)
+
+	models, err := r.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("len(models) = %d, want 3", len(models))
+	}
+	want := []string{"model-a", "model-b", "model-c"}
+	for _, name := range want {
+		if _, ok := models[name]; !ok {
+			t.Errorf("models missing %q", name)
+		}
+	}
+}
+
+func TestEndpointResolver_Models_ReusesCache(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"endpoints": [{"domain": "x.near.ai", "models": ["m"]}]}`))
+	}))
+	defer srv.Close()
+
+	r := newEndpointResolverForTest(srv.URL)
+
+	// First call fetches.
+	if _, err := r.Models(context.Background()); err != nil {
+		t.Fatalf("first Models: %v", err)
+	}
+	// Second call should reuse the cache (no second fetch).
+	if _, err := r.Models(context.Background()); err != nil {
+		t.Fatalf("second Models: %v", err)
+	}
+	if c := calls.Load(); c != 1 {
+		t.Errorf("expected 1 fetch, got %d", c)
+	}
+}
+
+func TestEndpointResolver_Models_StaleOnRefreshError(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"endpoints": [{"domain": "x.near.ai", "models": ["m"]}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"oops"}`))
+	}))
+	defer srv.Close()
+
+	r := newEndpointResolverForTest(srv.URL)
+
+	if _, err := r.Models(context.Background()); err != nil {
+		t.Fatalf("initial Models: %v", err)
+	}
+
+	r.mu.Lock()
+	r.fetchedAt = time.Now().Add(-10 * time.Minute)
+	r.mu.Unlock()
+
+	// Should return stale data, not an error.
+	models, err := r.Models(context.Background())
+	if err != nil {
+		t.Fatalf("stale Models: %v", err)
+	}
+	if len(models) != 1 {
+		t.Errorf("len(models) = %d, want 1", len(models))
+	}
+}
+
+func TestEndpointResolver_Models_ErrorWhenEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"oops"}`))
+	}))
+	defer srv.Close()
+
+	r := newEndpointResolverForTest(srv.URL)
+
+	_, err := r.Models(context.Background())
+	if err == nil {
+		t.Fatal("expected error when discovery fails and cache is empty")
 	}
 }
