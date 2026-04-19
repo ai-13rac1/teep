@@ -97,7 +97,7 @@ type Attester struct {
 // and API key. modelsBase is the URL for /v1/models model-name resolution
 // (defaults to https://llm.chutes.ai if empty).
 func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
-	client := config.NewAttestationClient(offline...)
+	client := config.NewAttestationClient(len(offline) > 0 && offline[0])
 	return &Attester{
 		baseURL:  baseURL,
 		apiKey:   apiKey,
