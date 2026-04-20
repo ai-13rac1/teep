@@ -575,7 +575,8 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				// Body was consumed on the first attempt and cannot be reset.
 				return nil, lastErr
 			}
-			timer := time.NewTimer(min(time.Duration(1<<(attempt-1))*time.Second, maxDelay))
+			exp := min(attempt-1, 30) // cap to avoid int64 overflow; 2^30s >> any realistic maxDelay
+			timer := time.NewTimer(min(time.Duration(1<<exp)*time.Second, maxDelay))
 			select {
 			case <-req.Context().Done():
 				timer.Stop()

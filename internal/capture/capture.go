@@ -76,6 +76,7 @@ type RecordingTransport struct {
 // WrapRecording wraps base with a RecordingTransport. It must be the outermost
 // transport in the chain (above RetryTransport) so only the final successful
 // response is recorded; intermediate retry attempts are invisible to the recorder.
+// base must be non-nil.
 func WrapRecording(base http.RoundTripper) *RecordingTransport {
 	return &RecordingTransport{Base: base}
 }
