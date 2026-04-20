@@ -414,7 +414,8 @@ func hostSlug(rawURL string) string {
 	if path != "" {
 		slug += "_" + path
 	}
-	// Apply the same allowlist as slugify so filenames are always safe.
+	// Apply a filesystem-safe allowlist (extends slugify with '_' to preserve
+	// the path separators already replaced above).
 	slug = strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.' || r == '_' {
 			return r

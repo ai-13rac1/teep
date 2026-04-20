@@ -538,11 +538,15 @@ func RedactKey(key string) string {
 	return key[:4] + "****"
 }
 
-// RetryTransport retries requests on 5xx responses and transient network
-// errors. For requests with a body it requires req.GetBody to be set so the
-// body can be reset between attempts (http.NewRequestWithContext sets GetBody
-// automatically when passed a *bytes.Reader). GET requests have no body and
-// are always retried unconditionally.
+// RetryTransport retries requests on 5xx responses and network errors. For
+// requests with a body it requires req.GetBody to be set so the body can be
+// reset between attempts (http.NewRequestWithContext sets GetBody automatically
+// when passed a *bytes.Reader). If a retry is needed and GetBody is nil for a
+// request with a body, the last error is returned immediately rather than
+// sending an empty body. GET requests have no body and are always retried
+// unconditionally.
+//
+// Base must be non-nil.
 //
 // All attestation endpoints retried by this transport are effectively
 // idempotent reads. Do not use for POST endpoints with side effects (nonce
@@ -553,7 +557,7 @@ type RetryTransport struct {
 	MaxDelay    time.Duration // 0 → default 4s
 }
 
-// RoundTrip executes the request, retrying on 5xx and transient network errors.
+// RoundTrip executes the request, retrying on 5xx and network errors.
 func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	maxAttempts := t.MaxAttempts
 	if maxAttempts <= 0 {
@@ -563,9 +567,14 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if maxDelay <= 0 {
 		maxDelay = 4 * time.Second
 	}
+	hasBody := req.Body != nil && req.Body != http.NoBody
 	var lastErr error
 	for attempt := range maxAttempts {
 		if attempt > 0 {
+			if hasBody && req.GetBody == nil {
+				// Body was consumed on the first attempt and cannot be reset.
+				return nil, lastErr
+			}
 			timer := time.NewTimer(min(time.Duration(1<<(attempt-1))*time.Second, maxDelay))
 			select {
 			case <-req.Context().Done():
@@ -573,7 +582,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return nil, req.Context().Err()
 			case <-timer.C:
 			}
-			slog.WarnContext(req.Context(), "retrying after transient error",
+			slog.WarnContext(req.Context(), "retrying after error",
 				"url", req.URL.String(), "attempt", attempt+1, "err", lastErr)
 			if req.GetBody != nil {
 				body, err := req.GetBody()
