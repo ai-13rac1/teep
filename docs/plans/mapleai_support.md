@@ -764,9 +764,9 @@ This is a known limitation shared by all teep E2EE providers that use `crypto/ec
 | **MapleAI** | `*ecdh.PrivateKey` (X25519) | Nil reference (same as NearCloud) | (this plan) |
 
 **What CAN be zeroed (caller-owned `[]byte` slices):**
-- ECDH shared secret returned by `PrivateKey.ECDH()` — `clear(sharedSecret)`
-- Derived session key bytes — `clear(sessionKey)` after constructing the AEAD cipher
-- Any intermediate HKDF output bytes
+- ECDH shared secret returned by `PrivateKey.ECDH()` — `clear(sharedSecret)` once key derivation completes
+- Any intermediate HKDF output bytes — `clear(...)` once they are no longer needed
+- Derived session key bytes — only `clear(sessionKey)` immediately after constructing the AEAD cipher if the implementation stores the initialized AEAD and does **not** retain `sessionKey []byte`; if `MapleAISession` keeps `sessionKey []byte` for ongoing request encryption/decryption, defer zeroization until session teardown
 
 **What CANNOT be zeroed through public API:**
 - `crypto/ecdh.PrivateKey` internal scalar (unexported field, `Bytes()` returns copy)
@@ -1473,7 +1473,7 @@ case "mapleai":
     p.Attester = mapleai.NewAttester(cp.BaseURL, cp.APIKey, s.attestClient)
     p.Preparer = mapleai.NewPreparer(cp.APIKey)
     p.Encryptor = mapleai.NewE2EE(cp.BaseURL, s.attestClient)
-    p.ReportDataVerifier = mapleai.ReportDataVerifier{}
+    p.ReportDataVerifier = nil  // Nitro key binding is verified in the attestation document, not via the TDX REPORTDATA hook
     p.SupplyChainPolicy = nil  // No supply chain attestation
     p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, s.upstreamClient)
 ```
