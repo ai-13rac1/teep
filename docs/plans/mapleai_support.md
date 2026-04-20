@@ -1,0 +1,1660 @@
+# Plan: MapleAI Provider Support
+
+## TL;DR
+
+Add MapleAI as a new teep provider. MapleAI runs LLM inference through an AWS Nitro
+Enclave proxy at `https://enclave.trymaple.ai`, using COSE_Sign1 attestation documents
+with ECDSA P-384 signatures chaining to the AWS Nitro root certificate, X25519 key
+exchange, and ChaCha20-Poly1305 end-to-end encryption. This requires: a new Nitro
+attestation parsing/verification library, generalized `tee_*` attestation factors, an
+E2EE session implementation, provider wiring, and comprehensive test coverage.
+
+## Architecture Decision: Non-Pinned with Session Caching
+
+MapleAI's security model binds the E2EE key exchange to the attestation document: the
+server's X25519 public key is embedded in the COSE_Sign1-signed attestation payload.
+TLS pinning is unnecessary because:
+
+- Nitro attestation documents do not include TLS certificate fingerprints
+- E2EE provides equivalent channel security — only the attested enclave holds the
+  X25519 private key corresponding to the `public_key` in the signed attestation doc
+- The key exchange is cryptographically bound to the attestation via the signed
+  `public_key` field
+
+This matches the Chutes provider pattern (non-pinned, E2EE-secured) rather than
+nearcloud/neardirect (TLS-pinned).
+
+**Session lifecycle:**
+- Attestation report cached per `(provider, model)` key with 1h TTL (existing
+  `attestation.Cache`, already model-scoped via `cacheKey{provider, model}`)
+- E2EE session `(session_id, session_key)` cached alongside attestation on the
+  provider's E2EE struct, keyed by the attested `public_key`
+- On session failure (HTTP 400, decryption error): re-attest + new key exchange
+- On attestation cache miss/expiry: full attestation + key exchange
+
+**Architecture:**
+- MapleAI's backend at `enclave.trymaple.ai` serves all models from a single Nitro
+  Enclave, so the X25519 public key is stable across models and requests within an
+  enclave lifecycle
+- The Nitro enclave acts as a router/proxy; actual inference runs on AMD SEV-SNP
+  backends (Edgeless Privatemode AI, Tinfoil). Sidecar proxies inside the enclave
+  verify backend attestation (Contrast SDK, tinfoil-go SDK) and re-encrypt or
+  establish attested TLS before forwarding. This backend attestation is not exposed
+  through the MapleAI Nitro attestation endpoint — it is a known gap
+- A session key is generated per key exchange, tied to a server-issued `session_id`;
+  the server may timeout sessions independently
+
+## Authentication Chain Analysis
+
+This section documents exactly what is and is not cryptographically authenticated in
+the MapleAI attestation and encryption architecture. It maps trust boundaries, identifies
+gaps relative to other teep providers, and specifies which checks the implementation
+must enforce to maintain each authentication chain. An independent code agent must
+understand these chains to know which verification steps are security-critical (must
+never be weakened) versus defense-in-depth (valuable but not on the critical path).
+
+### Chain 1: Enclave Identity (COSE_Sign1 → AWS Nitro Root)
+
+**What it proves:** The code running inside the Nitro Enclave matches specific
+measurements (PCR0/1/2), and the attestation document was produced by genuine AWS
+Nitro hardware.
+
+**Trust anchor:** AWS Nitro Attestation PKI root certificate (ECDSA P-384, 30-year
+lifetime, published by AWS with a known SHA-256 fingerprint).
+
+**Chain of authentication:**
+
+```
+AWS Nitro Root Certificate (embedded, byte-compared)
+  └─ signs → Intermediate certificate(s) in cabundle
+       └─ signs → Leaf certificate (from attestation payload)
+            └─ signs → COSE_Sign1 Sig_structure (protected headers + payload)
+                 └─ contains → Attestation payload:
+                      ├─ pcrs: {0: <enclave image hash>, 1: <kernel hash>, 2: <app hash>}
+                      ├─ public_key: <X25519 server public key, 32 bytes>
+                      ├─ nonce: <client-generated UUID, anti-replay>
+                      ├─ module_id: <enclave identifier>
+                      └─ timestamp: <UTC milliseconds>
+```
+
+**Critical enforcement points (must never be weakened):**
+
+1. **Root cert byte-identity**: `cabundle[0]` must be byte-identical to the embedded
+   AWS Nitro root certificate DER. Do NOT use flexible X.509 subject matching — only
+   exact byte comparison. This is the sole trust anchor.
+2. **Full chain signature verification**: Every link in the chain (root → intermediates
+   → leaf) must have its signature cryptographically verified. A missing or invalid
+   intermediate breaks the entire chain.
+3. **COSE_Sign1 signature verification**: The Sig_structure construction must follow
+   RFC 9052 §4.4 exactly: `["Signature1", protected, b"", payload]`. An incorrect
+   Sig_structure would verify against a tampered payload.
+4. **Client-originated nonce**: The nonce in the attestation document must match the
+   client-generated UUID. The client MUST generate the nonce locally via `crypto/rand`
+   (not accept one from the server). Nonce mismatch → FAIL CLOSED. This prevents
+   replay of old attestation documents.
+5. **Certificate time validity**: All certificates in the chain must be checked for
+   `NotBefore ≤ now ≤ NotAfter`. An expired certificate means the PKI no longer
+   vouches for this key.
+6. **Debug mode detection**: PCR0 all-zeros means the enclave is running in debug mode
+   (AWS allows operator memory inspection). This MUST fail `tee_debug_disabled`.
+7. **PCR0 measurement policy**: PCR0 must match the allowlist of known-good enclave
+   image hashes. A PCR0 mismatch means the enclave is running different code than
+   expected.
+
+**Comparison to dstack (NearCloud/NearDirect):**
+
+| Aspect | Dstack (TDX) | MapleAI (Nitro) |
+|--------|-------------|-----------------|
+| Hardware root of trust | Intel TDX via DCAP PKI | AWS Nitro via AWS PKI |
+| Measurement granularity | 7 registers (MRSEAM, MRTD, RTMR0-3, MRCONFIGID) | 6+ PCRs (PCR0-4, PCR8) |
+| Primary code measurement | MRTD (firmware) + RTMR1/2 (kernel/rootfs) + MRCONFIGID (compose) | PCR0 (entire EIF image hash) |
+| Online collateral check | Intel PCS (TCB status, revocation) | None — no equivalent of Intel PCS for Nitro |
+| Reproducible measurement derivation | `dstack-mr measure` from reproducible builds | Reproducible EIF build → PCR0 hash |
+
+**Gap vs. dstack:** Dstack providers have an online TCB freshness check via Intel PCS
+(`intel_pcs_collateral`, `tdx_tcb_current`, `tdx_tcb_not_revoked`). Nitro has no
+equivalent online service for TCB validation. The AWS Nitro PKI certificate chain
+provides the trust anchor, but there is no mechanism to check whether a specific
+enclave image has been revoked or superseded. This means a compromised enclave image
+that was once valid could continue to pass PCR0 checks until the operator manually
+removes it from the allowlist.
+
+**Gap: dstack integrity (operational, shared with dstack providers):** Like dstack
+providers (see `docs/attestation_gaps/dstack_integrity.md`), MapleAI's PCR allowlist
+values must be sourced out-of-band. OpenSecret publishes signed PCR0 history via
+GitHub (`pcrProdHistory.json`), which is better than dstack providers (who publish
+nothing), but:
+- The PCR history is signed with an OpenSecret-controlled P-384 key, not by AWS
+- PCR1/PCR2 values are not published
+- No advance notice of PCR changes
+
+For teep, this means PCR0 values must be maintained in the measurement policy and
+updated when OpenSecret deploys new enclave images. The `tee_hardware_config` (PCR1)
+and `tee_boot_config` (PCR2) factors start in `allow_fail` until values are collected.
+
+### Chain 2: Encryption Key Binding (Attestation → E2EE Session)
+
+**What it proves:** The session key used for E2EE was negotiated with the specific
+enclave instance that produced the verified attestation document. No MITM can
+substitute a different key.
+
+**Chain of authentication:**
+
+```
+Verified COSE_Sign1 attestation document
+  └─ contains (hardware-signed) → public_key: <X25519 server key, 32 bytes>
+       └─ used in ECDH → shared_secret = X25519(client_private, server_public)
+            └─ decrypts → encrypted_session_key (ChaCha20-Poly1305)
+                 └─ yields → session_key (32 bytes)
+                      └─ encrypts/decrypts → all API request/response payloads
+```
+
+**Why this chain is secure:** The server's X25519 public key is embedded in the
+COSE_Sign1 payload, which is signed by the Nitro hardware PKI. A MITM attacker
+cannot substitute their own public key without breaking the COSE_Sign1 signature
+(which would require the AWS Nitro root private key) or the certificate chain
+(which would require forging an AWS-signed certificate). Only the enclave instance
+that requested the attestation document from the NSM holds the corresponding
+X25519 private key (Nitro Enclaves have no persistent storage — the private key
+exists only in enclave memory).
+
+**Critical enforcement points (must never be weakened):**
+
+1. **Attestation MUST complete before key exchange**: The public_key from the
+   attestation document must be verified (full COSE_Sign1 + cert chain validation)
+   BEFORE it is used for ECDH. Using an unverified public key for key exchange
+   allows trivial MITM.
+2. **Single key provenance path**: The server public key used for ECDH MUST be
+   sourced exclusively from the verified attestation document's `public_key` field.
+   Unlike TDX providers (where REPORTDATA binds a separately-obtained signing key),
+   Nitro's `public_key` is inside the COSE_Sign1-signed payload — verification of
+   the COSE_Sign1 signature IS the binding. The implementation must ensure a single
+   code path from `NitroVerifyResult.PublicKey` → `RawAttestation.SigningKey` →
+   ECDH, with no alternative key source that could be substituted. Copy the key
+   bytes at extraction to prevent aliasing with mutable buffers.
+3. **ECDH shared secret zeroing**: The shared secret `[]byte` MUST be zeroed
+   immediately after deriving the session key via `clear(sharedSecret)`. The shared
+   secret is equivalent to the session key in privilege — if leaked, all session
+   traffic can be decrypted. This is achievable because the shared secret is a
+   caller-owned `[]byte` returned by `ecdh.PrivateKey.ECDH()`.
+4. **Client ephemeral key generation**: The X25519 client keypair MUST be generated
+   fresh for each key exchange using `crypto/rand`. Reusing client keys across
+   sessions would allow session key recovery if any single session is compromised.
+   Note: Go's `crypto/ecdh.PrivateKey` does not expose the private scalar bytes
+   for overwriting — `Bytes()` returns a copy and the internal field is unexported.
+   The implementation should nil the `*ecdh.PrivateKey` reference promptly after
+   use so the GC can collect it. This matches the existing `NearCloudSession.Zero()`
+   pattern. See "Key Material Zeroization Constraints" below for full analysis.
+5. **Session key decryption authentication**: The encrypted_session_key uses
+   ChaCha20-Poly1305 (AEAD). The Poly1305 tag MUST be verified — if it fails,
+   the key exchange is under attack and MUST fail closed. Do not fall back to
+   unauthenticated decryption.
+6. **No TLS-only fallback**: If attestation or key exchange fails, the implementation
+   MUST NOT fall back to sending plaintext requests over TLS. The entire security
+   model depends on E2EE authenticated by attestation. TLS alone does not provide
+   the enclave identity guarantee.
+
+**Comparison to other providers:**
+
+| Aspect | NearCloud/NearDirect (TDX) | Chutes (TDX) | MapleAI (Nitro) |
+|--------|---------------------------|--------------|-----------------|
+| Key binding mechanism | Ed25519 signing key in TDX REPORTDATA[0:32] | SHA256(nonce+pubkey) in TDX REPORTDATA[0:32] | X25519 public_key in COSE_Sign1-signed payload |
+| Key type | Ed25519 (signing) → X25519 (ECDH) | ML-KEM-768 (post-quantum KEM) | X25519 (ECDH) |
+| Binding verification | Verifier checks REPORTDATA matches signing key hash | Verifier checks REPORTDATA matches SHA256(nonce+pubkey) | Verifier checks public_key field in verified attestation |
+| Session key derivation | ECDH → HKDF → XChaCha20-Poly1305 | ML-KEM encapsulate → HKDF → ChaCha20-Poly1305 | ECDH → ChaCha20-Poly1305 (shared secret as direct key) |
+| Channel binding | TLS SPKI pinned + E2EE | E2EE only (no TLS pinning) | E2EE only (no TLS pinning) |
+
+**Notable difference from NearCloud/NearDirect:** Those providers use TLS SPKI pinning
+as a primary channel binding mechanism — the TLS certificate fingerprint is in the
+TDX REPORTDATA, and the verifier checks the live TLS connection's SPKI matches. This
+provides defense-in-depth: even if E2EE were broken, the TLS channel is authenticated.
+MapleAI has **no TLS channel binding** — security relies entirely on the E2EE layer
+being correctly implemented and the attestation-to-key binding being maintained.
+This makes the E2EE implementation a single point of failure for channel security.
+
+**Notable difference from Chutes:** Chutes uses ML-KEM-768 (post-quantum KEM), which
+is resistant to quantum computing attacks on key exchange. MapleAI uses classical
+X25519, which is vulnerable to future quantum attacks on stored ciphertext
+("harvest now, decrypt later"). This is a known limitation, not a blocking issue
+for implementation.
+
+### Chain 3: Enclave-to-Inference Backend (Partially Verified — Source-Auditable)
+
+**What it proves (enclave-internal):** The sidecar proxies running inside the Nitro
+Enclave verify backend attestation (Contrast/SEV-SNP for Continuum, SEV-SNP for
+Tinfoil) and re-encrypt or establish attested TLS before forwarding requests. However,
+this verification is not exposed to the teep client — it relies on auditing the
+enclave source code and trusting the PCR0 measurement to cover it.
+
+#### Source Code Availability
+
+All components of the Nitro Enclave are publicly available:
+
+| Component | Repository | Language | Role |
+|-----------|-----------|----------|------|
+| Enclave server | [`OpenSecretCloud/opensecret`](https://github.com/OpenSecretCloud/opensecret) | Rust | E2EE key exchange, attestation, session management, request routing |
+| Continuum proxy | [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public) (git submodule) | Go | Backend attestation (Contrast SDK) + field-level encryption for Privatemode AI |
+| Tinfoil proxy | [`OpenSecretCloud/opensecret/tinfoil-proxy/`](https://github.com/OpenSecretCloud/opensecret/tree/master/tinfoil-proxy) (in-tree) | Go | Backend attestation (tinfoil-go SDK) + attestation-verified TLS |
+| Nitro toolkit | [`OpenSecretCloud/nitro-toolkit`](https://github.com/OpenSecretCloud/nitro-toolkit) (git submodule) | Python | VSOCK traffic forwarding, credential requests |
+
+The Rust server source at `src/main.rs` (~99KB) contains the `/attestation/{nonce}`
+handler (NSM-signed COSE_Sign1 document with X25519 public key), the `/key_exchange`
+handler (ECDH + ChaCha20-Poly1305 session establishment), and the chat completion
+handler that decrypts client E2EE and forwards plaintext JSON to sidecar proxies on
+localhost.
+
+#### Enclave-Internal Data Flow
+
+```
+Client
+  │ (ChaCha20-Poly1305 E2EE over HTTPS — verified by teep)
+  ▼
+OpenSecret Rust Server (inside Nitro Enclave)
+  │ decrypt client E2EE → plaintext JSON
+  │
+  ├─→ http://127.0.0.1:8092 (continuum-proxy, inside enclave)
+  │     │ Contrast SDK → verifies SEV-SNP attestation of Privatemode backend
+  │     │ encrypts specific JSON fields (prompts/responses)
+  │     │ TLS with attested mesh CA certificate
+  │     ▼
+  │   api.privatemode.ai (Edgeless Systems, AMD SEV-SNP GPU TEE on Scaleway)
+  │     └─→ VSOCK → traffic_forwarder.py → parent EC2 instance → internet
+  │
+  └─→ http://127.0.0.1:8093 (tinfoil-proxy, inside enclave)
+        │ tinfoil-go SDK → verifies SEV-SNP attestation via Tinfoil ATC
+        │ attestation-verified TLS connection
+        ▼
+      inference.tinfoil.sh / router-N.tinfoil.dev (Tinfoil, AMD SEV-SNP TEE)
+        └─→ VSOCK → traffic_forwarder.py → parent EC2 instance → internet
+```
+
+Plaintext inference data is exposed on localhost inside the enclave
+(between the Rust server and the sidecar proxies), but **never crosses the enclave
+boundary in plaintext**. The VSOCK traffic forwarders (`traffic_forwarder.py`) carry
+only TLS-encrypted traffic to the parent instance.
+
+#### How the Backend Attestation Works
+
+**Continuum (Edgeless Privatemode AI):**
+The `continuum-proxy` binary uses the Contrast SDK (`contrastsdk.NewGetter()`) to fetch
+and verify a Contrast Coordinator manifest from `coordinator.privatemode.ai`. This
+manifest contains reference values for the SEV-SNP attestation of the Privatemode
+deployment on Scaleway. The proxy uses `GetAttestedMeshCA()` to obtain an
+attestation-verified CA certificate, which is used for TLS connections to
+`api.privatemode.ai`. It also performs field-level encryption of request/response
+JSON using a `RenewableRequestCipher` derived from attestation secrets. It connects
+to `kdsintf.amd.com` for AMD KDS (Key Distribution Service) for SEV-SNP validation,
+and to `cdn.confidential.cloud` for the expected manifest hash.
+
+**Tinfoil:**
+The `tinfoil-proxy` (252 lines of Go in-tree) uses the `tinfoil-go` SDK to create an
+attestation-verified HTTP client via `tinfoil.NewClient()`. This verifies SEV-SNP
+attestation through Tinfoil's ATC service (`atc.tinfoil.sh`), KDS proxy
+(`kds-proxy.tinfoil.sh`), and sigstore transparency logs (`tuf-repo-cdn.sigstore.dev`,
+`github-proxy.tinfoil.sh`). The connection to inference endpoints uses
+attestation-verified TLS.
+
+#### Privatemode Model Weight Verification
+
+According to the [Privatemode security documentation](https://docs.privatemode.ai/security)
+and [verification from source code guide](https://docs.privatemode.ai/guides/verify-source):
+- AI models are stored on **dm-verity protected disks** and mounted by disk-mounter
+  containers into the Kubernetes Pods
+- Container image hashes are pinned in `deployment.yaml` and enforced by the Contrast
+  Coordinator
+- Model root hashes can be independently reproduced via the
+  [model verification guide](https://docs.privatemode.ai/guides/verify-source)
+
+This means the **Continuum backend does provide model weight authentication** via
+dm-verity, similar to Tinfoil's approach. However, this verification is performed
+by the Contrast framework inside the backend infrastructure — the teep client
+cannot independently verify model weights through the Nitro attestation.
+
+#### PCR0 Coverage and Reproducible Builds
+
+**Does PCR0 cover the re-encryption code?** Yes, indirectly:
+
+PCR0 is the SHA-384 hash of the entire EIF (Enclave Image Format), which includes:
+- The OpenSecret Rust server binary (compiled from source via `rustPlatform.buildRustPackage`)
+- The `continuum-proxy` binary (Contrast attestation + re-encryption)
+- The `tinfoil-proxy` binary (attestation-verified TLS proxy)
+- `entrypoint.sh` (network setup, VSOCK forwarding, secret retrieval)
+- Custom Linux kernel 6.12 with NSM driver
+- All system libraries (glibc, openssl, python3, socat, etc.)
+- NSM library (`libnsm.so`) and KMS tool (`kmstool_enclave_cli`)
+
+The Nix build system (`flake.nix`) builds the Rust server FROM SOURCE with pinned
+`Cargo.lock`. CI (`.github/workflows/build.yml`) runs `nix build .#eif-dev` and
+`nix build .#eif-prod`, then verifies the resulting PCR values match reference files
+(`pcrDev.json`, `pcrProd.json`) committed to version control. **If the source changes
+and the PCR reference isn't updated, CI fails.**
+
+**Critical provenance gap:** The `continuum-proxy` and `tinfoil-proxy` binaries are
+**pre-compiled and checked into the git repo** — they are NOT built from source in
+the Nix build:
+
+```nix
+# From flake.nix — copies pre-compiled binary, does NOT build from source
+continuum-proxy = pkgs.runCommand "continuum-proxy" {} ''
+  mkdir -p $out/bin
+  cp ${./continuum-proxy} $out/bin/continuum-proxy
+  chmod +x $out/bin/continuum-proxy
+'';
+```
+
+The `edgelesssys/privatemode-public` README states its builds are reproducible, and
+the repo is linked as a git submodule in `.gitmodules`. However:
+- There is no automated CI step in the opensecret repo that builds the submodule
+  from source and compares the result to the checked-in binary
+- The link between a specific `privatemode-public` commit and the checked-in binary
+  is trust-on-first-use
+- An auditor can reproduce the binary from the submodule's pinned commit, but this
+  requires manual effort
+
+Similarly, `tinfoil-proxy/dist/tinfoil-proxy` is a pre-compiled binary, though its
+Go source is in-tree at `tinfoil-proxy/main.go` (with `go.mod` and `go.sum`).
+
+#### No Sigstore/Rekor Transparency Log Entries
+
+No sigstore, cosign, or Rekor transparency log entries exist for:
+- The `OpenSecretCloud` GitHub organization (all 6 repos)
+- The `edgelesssys/privatemode-public` repository
+- The EIF build artifacts or PCR history entries
+
+The `pcrProdHistory.json` entries are signed with an OpenSecret P-384 key, but these
+signatures are not published to any public transparency log. There is no independent
+third-party attestation of build provenance.
+
+Tinfoil's backend infrastructure DOES use sigstore (the tinfoil-proxy connects to
+`tuf-repo-cdn.sigstore.dev` and `github-proxy.tinfoil.sh` for supply chain
+verification of the Tinfoil inference nodes), but this is internal to the enclave's
+verification of the Tinfoil backend — it is not exposed through the MapleAI Nitro
+attestation.
+
+#### Gap Assessment
+
+**What IS verified (enclave-internal, auditable from source):**
+1. The `continuum-proxy` verifies Contrast/SEV-SNP attestation of the Privatemode
+   backend before forwarding any request
+2. The `continuum-proxy` re-encrypts request fields using attestation-derived keys
+3. The `tinfoil-proxy` verifies SEV-SNP attestation via Tinfoil ATC before
+   establishing TLS
+4. Model weights on the Privatemode backend are dm-verity protected
+5. All of this code is publicly auditable
+
+**What is NOT verifiable by the teep client:**
+1. The Nitro attestation document does not include any evidence of backend attestation
+2. The teep client cannot independently verify that the enclave actually performed
+   backend attestation correctly — it can only verify PCR0 and trust that the
+   measured code does what the source says
+3. There is no GPU attestation evidence (NVIDIA EAT tokens, SPDM certs) in the
+   Nitro attestation response
+4. The provenance of the pre-compiled sidecar proxy binaries is not independently
+   verifiable without manual reproduction
+
+**Trust model:** The security of the enclave-to-backend link depends on:
+- PCR0 measuring the correct EIF (verified by teep via Nitro attestation)
+- The EIF containing the correct sidecar proxy binaries (verifiable by reproducing
+  the Nix build, but not automated)
+- The sidecar proxy source code implementing correct attestation verification
+  (auditable, open source)
+- The Contrast/Tinfoil SDKs implementing correct attestation verification
+  (open source: edgelesssys/contrast, tinfoilsh/tinfoil-go)
+
+This is a **transitive trust model**: teep verifies Nitro attestation → Nitro PCR0
+measures the EIF → EIF contains sidecar proxies → sidecar proxies verify backend
+attestation. The chain is auditable but not independently verifiable by the teep
+client in real-time.
+
+**Impact on teep factors:**
+
+| Factor | Status | Reason |
+|--------|--------|--------|
+| `cpu_gpu_chain` | Fail (allow_fail) | Backend attestation not in Nitro attestation document |
+| `measured_model_weights` | Fail (allow_fail) | dm-verity used by backend but not exposed to client |
+| `nvidia_payload_present` | Skip (allow_fail) | Not applicable — backend uses AMD SEV-SNP, not NVIDIA |
+| `nvidia_*` (all 5 factors) | Skip (allow_fail) | Backend is AMD SEV-SNP, not NVIDIA GPU TEE |
+
+Note: The backend (Edgeless Privatemode AI) runs on **AMD SEV-SNP** (on Scaleway).
+The entrypoint.sh connects to `kdsintf.amd.com` (AMD Key Distribution Service).
+NVIDIA OCSP headers are configured in the continuum-proxy, suggesting some NVIDIA GPU
+involvement, but the primary TEE platform is AMD SEV-SNP via the Contrast framework.
+
+**Comparison to other providers:**
+
+| Aspect | NearDirect (TDX + NVIDIA) | Chutes (TDX + NVIDIA) | MapleAI (Nitro + SEV-SNP backend) |
+|--------|--------------------------|----------------------|----------------------------------|
+| GPU/Backend attestation | NVIDIA EAT exposed to client | NVIDIA EAT exposed to client | SEV-SNP verified by enclave, NOT exposed to client |
+| Client-verifiable backend TEE | Yes | Yes | **No** (transitive trust via PCR0) |
+| Backend attestation source | teep verifies directly | teep verifies directly | Sidecar proxy verifies; auditable source code |
+| Re-encryption for backend | N/A (same CVM) | E2EE via ML-KEM | Field-level encryption via Contrast + attestation-verified TLS |
+| Model weight authentication | None | None | dm-verity (backend-internal, not client-exposed) |
+| All code open source | Partial (NearAI proxy) | No (Chutes infrastructure) | **Yes** (opensecret, privatemode-public, tinfoil-proxy) |
+
+**What would make the gap fully closeable from teep's perspective:**
+1. Include the Contrast manifest hash or the backend's SEV-SNP attestation report
+   hash in the Nitro attestation document's `user_data` field — this would let
+   clients verify the backend's identity through the Nitro attestation chain
+2. Expose the backend attestation evidence as a separate endpoint that teep can
+   fetch and verify independently
+3. Build the sidecar proxies from source in the Nix build, eliminating the
+   pre-compiled binary provenance gap
+
+Until one of these is implemented, teep must treat backend attestation as a known
+gap in the allow_fail list. The enclave does verify the backend, and the verification
+code is fully auditable — but this verification is not independently confirmable by
+the teep client through the Nitro attestation alone.
+
+### Chain 4: Request Integrity (Session → Per-Request Encryption)
+
+**What it proves:** Each request and response is encrypted with the session key that
+was derived from the attestation-authenticated key exchange. Tampering with any
+request or response is detected by the Poly1305 authentication tag.
+
+**Chain of authentication:**
+
+```
+session_key (from Chain 2)
+  └─ ChaCha20-Poly1305 Seal(random_nonce, plaintext_request) → encrypted_request
+       └─ sent as {"encrypted": "<base64>"} with x-session-id header
+            └─ server decrypts with same session_key
+                 └─ processes request (inside enclave boundary only)
+                      └─ ChaCha20-Poly1305 Seal(random_nonce, plaintext_response)
+                           └─ client decrypts with session_key
+```
+
+**Critical enforcement points:**
+
+1. **Random nonce per encryption**: Each ChaCha20-Poly1305 operation MUST use a fresh
+   12-byte random nonce from `crypto/rand`. Nonce reuse with the same key is
+   catastrophic — it allows plaintext recovery. The implementation MUST NOT use
+   a counter-based nonce (risk of collision across concurrent requests sharing a
+   session).
+2. **Authentication tag verification**: ChaCha20-Poly1305 `Open()` verifies the
+   Poly1305 tag. On tag mismatch, the implementation MUST return
+   `ErrDecryptionFailed` and MUST NOT return partial plaintext. Tag failure indicates
+   either corruption or active MITM.
+3. **No plaintext fallback**: If decryption fails, the implementation MUST NOT attempt
+   to parse the response as unencrypted JSON. This would silently bypass E2EE if the
+   server returned plaintext (e.g., due to a server bug or downgrade attack).
+4. **Bounded reads**: Encrypted response bodies must be bounded (e.g., 10 MiB, in
+   line with existing relay limits in `internal/e2ee/relay.go`) to prevent memory
+   exhaustion from a malicious server sending unbounded ciphertext.
+5. **SSE `[DONE]` handling**: The `data: [DONE]` sentinel is NOT encrypted. The
+   implementation must handle this correctly: do NOT attempt to base64-decode or
+   decrypt `[DONE]`. But also do NOT accept any other unencrypted data lines as
+   valid response content — non-decodeable lines should be skipped silently (they
+   may be heartbeats), but they must never be forwarded as API response data.
+
+### Summary: What MapleAI Attestation Does and Does Not Prove
+
+| Claim | Proven? | Mechanism | Comparable to |
+|-------|---------|-----------|---------------|
+| Client is talking to a genuine AWS Nitro Enclave | **Yes** | COSE_Sign1 chain to AWS root cert | TDX quote chain to Intel DCAP PKI |
+| Enclave is running expected proxy code | **Yes** | PCR0 matches measurement allowlist | MRTD + compose binding in dstack |
+| Enclave is not in debug mode | **Yes** | PCR0 ≠ all-zeros | TDX debug flag check |
+| E2EE key is bound to the attested enclave | **Yes** | X25519 public_key in signed attestation payload | Signing key in TDX REPORTDATA |
+| Session key was negotiated with the attested enclave | **Yes** | ECDH with attested public_key → ChaCha20-Poly1305 | ECDH/KEM with attested key |
+| Request/response confidentiality (client ↔ enclave) | **Yes** | ChaCha20-Poly1305 AEAD per request | XChaCha20-Poly1305 / ChaCha20-Poly1305 |
+| GPU backend is running in a TEE | **Partially** | Enclave verifies SEV-SNP attestation internally; not client-verifiable | NearDirect/Chutes: partial (NVIDIA EAT) |
+| GPU backend is running the claimed model | **Partially** | dm-verity on Privatemode backend; not client-verifiable | All providers: No (see model_weights.md) |
+| Enclave-to-GPU connection is encrypted | **Yes (auditable)** | Contrast attestation-verified TLS + field encryption; source auditable | NearDirect: same CVM; Chutes: same CVM |
+| Model weights are authentic | **Partially** | dm-verity on Privatemode; not client-verifiable through Nitro attestation | Tinfoil only (dm-verity, client-verifiable) |
+| Enclave code is reproducible/auditable | **Yes** | Nix reproducible build; all source public; CI verifies PCR values | Dstack: open source + reproducible |
+| TCB is current (not revoked) | **No** | No Nitro equivalent of Intel PCS | Intel PCS for TDX providers |
+
+### Implementation Implications
+
+The authentication chain analysis has these specific implications for the implementation:
+
+1. **The `tee_reportdata_binding` factor for Nitro** should verify that
+   `NitroVerifyResult.PublicKey` is non-nil, exactly 32 bytes, and matches the server
+   X25519 public key actually used for the ECDH key exchange in `MapleAISession`.
+   The attestation-side authentication is via the COSE_Sign1 signature (the
+   `public_key` is in the signed payload), NOT via a separate REPORTDATA field like
+   TDX; the factor is only complete once the verified attested `public_key` is
+   compared to the runtime ECDH peer key. The factor should Pass with detail like
+   "Attested X25519 public key authenticated by COSE_Sign1 and matched to ECDH peer
+   key" to distinguish it from both TDX REPORTDATA binding and the weaker structural
+   `signing_key_present` check.
+
+2. **The `signing_key_present` factor** should check
+   `NitroVerifyResult.PublicKey != nil && len(NitroVerifyResult.PublicKey) == 32`.
+   For Nitro, the "signing key" is the X25519 public key (used for ECDH, not signing),
+   so the factor detail should say "X25519 public key (32 bytes) present in attestation"
+   to avoid confusion with dstack providers where it's an Ed25519 or secp256k1 signing
+   key. This factor is intentionally structural only; it does not by itself prove that
+   the attested key was the one used during session establishment.
+
+3. **The E2EE session (`MapleAISession`) MUST store the attested server public key**
+   and the exact server public key observed during ECDH session establishment, then
+   compare them via `subtle.ConstantTimeCompare` before marking the session usable.
+   A mismatch MUST fail closed and abort the request. This comparison is
+   defense-in-depth: even though both values originate from the same
+   `RawAttestation.SigningKey`, recording and comparing them independently guards
+   against code-path bugs that could cause a different key to be used for ECDH than
+   the one authenticated by attestation. The session cache MUST be keyed by the
+   hex-encoded verified attested server public key. If a new attestation returns a
+   different server public key (enclave restarted), existing cached sessions for the
+   old key MUST be invalidated.
+
+4. **Session invalidation on attestation cache miss**: When the attestation cache
+   expires (1h TTL) or is manually invalidated, all E2EE sessions derived from that
+   attestation's public key MUST also be invalidated. Stale sessions with a
+   potentially-rotated enclave key are a security risk.
+
+5. **The report MUST clearly communicate the backend attestation model.** The
+   `cpu_gpu_chain` and `measured_model_weights` factors will Fail (allowed), but the
+   report detail strings should communicate that backend attestation IS performed by
+   the enclave's sidecar proxies but is not client-verifiable through the Nitro
+   attestation. Suggested details:
+   - `cpu_gpu_chain`: "backend SEV-SNP attestation verified by enclave sidecar proxy (Contrast SDK); not independently verifiable by client through Nitro attestation"
+   - `measured_model_weights`: "backend uses dm-verity protected model weights (Privatemode); not client-verifiable through Nitro attestation"
+
+6. **Factor enforcement parity with dstack providers**: Despite the GPU gap, the
+   Nitro-verifiable factors (enclave identity, key binding, E2EE) provide equivalent
+   or stronger assurance than the corresponding dstack factors. The implementation
+   should enforce these strictly — they are the only authentication chain available.
+
+## Protocol Specifications
+
+All protocols below are described from publicly documented standards and the public
+OpenSecret SDK documentation (https://docs.opensecret.cloud/). No proprietary source
+code is referenced.
+
+### 1. AWS Nitro Attestation Document Format
+
+**Reference:** [AWS Nitro Enclaves — Verifying the Root of Trust](https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html)
+
+The attestation document is a **COSE_Sign1** structure (RFC 9052 §4.2), encoded in
+**CBOR** (RFC 8949), structured as a 4-element CBOR array:
+
+| Index | Name        | Type  | Content                                          |
+|-------|-------------|-------|--------------------------------------------------|
+| 0     | protected   | bstr  | CBOR-encoded protected headers map `{1: -35}` (algorithm: ECDSA-384) |
+| 1     | unprotected | map   | Empty map `{}`                                   |
+| 2     | payload     | bstr  | CBOR-encoded attestation document (see below)    |
+| 3     | signature   | bstr  | ECDSA P-384 raw signature (r‖s, 96 bytes)        |
+
+The tagged COSE_Sign1 structure uses CBOR tag 18.
+
+**Attestation payload** (CBOR map, per AWS documentation):
+
+| Field        | CBOR Type          | Description                                    |
+|--------------|--------------------|------------------------------------------------|
+| `module_id`  | text string        | Enclave module identifier                      |
+| `timestamp`  | uint (.size 8)     | UTC milliseconds since UNIX epoch              |
+| `digest`     | text string        | Always `"SHA384"`                              |
+| `pcrs`       | map<uint → bstr>   | Platform Configuration Registers (48 bytes each, SHA-384) |
+| `certificate`| bstr               | DER-encoded leaf X.509 certificate             |
+| `cabundle`   | array<bstr>        | DER-encoded certificate chain (root first)     |
+| `public_key` | bstr or nil        | Server's **X25519 public key** (32 bytes) for E2EE |
+| `user_data`  | bstr or nil        | Application-specific data                      |
+| `nonce`      | bstr or nil        | Client nonce (UTF-8 encoded string as bytes)   |
+
+### 2. COSE_Sign1 Signature Verification
+
+**Reference:** RFC 9052 §4.4 — Signing and Verification Process
+
+1. CBOR-decode the outer 4-element array
+2. Extract `protected` (index 0), `payload` (index 2), `signature` (index 3)
+3. Construct `Sig_structure`: CBOR array `["Signature1", protected, b"", payload]`
+4. CBOR-encode the `Sig_structure` → this is the signed message
+5. Parse the leaf certificate (from payload's `certificate` field) as X.509 DER
+6. Extract the P-384 public key from the leaf certificate
+7. Verify the ECDSA-P384-SHA384 signature over the `Sig_structure` bytes
+8. **Signature format**: Raw r‖s (96 bytes total: 48 bytes r + 48 bytes s), NOT ASN.1
+   DER. Must convert to ASN.1 for Go's `ecdsa.VerifyASN1`, or use
+   `crypto/ecdsa.Verify` with `r, s *big.Int` parsed from the raw bytes.
+
+### 3. Certificate Chain Validation
+
+**Reference:** [AWS Nitro Enclaves Root of Trust](https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html)
+
+The AWS Nitro root certificate is available from:
+`https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip`
+
+Root certificate fingerprint (SHA-256):
+```
+64:1A:03:21:A3:E2:44:EF:E4:56:46:31:95:D6:06:31:7E:D7:CD:CC:3C:17:56:E0:98:93:F3:C6:8F:79:BB:5B
+```
+
+Root certificate subject: `CN=aws.nitro-enclaves, C=US, O=Amazon, OU=AWS`
+Root certificate lifetime: 30 years. Algorithm: ECDSA P-384.
+
+**Validation steps:**
+
+1. `cabundle` is ordered `[ROOT_CERT, INTERM_1, INTERM_2, ..., INTERM_N]` (root first)
+2. `cabundle[0]` must be **byte-identical** to the embedded AWS Nitro root cert DER
+3. Each certificate in `cabundle` parsed as X.509 DER; check time validity
+   (`NotBefore ≤ now ≤ NotAfter`)
+4. Chain validation: root → intermediate(s). Each cert's signature verified against
+   parent cert's public key
+5. The leaf `certificate` from the payload: its issuer must match the last cabundle
+   cert's subject, and its signature must verify against that cert's public key
+6. Leaf cert time validity check
+7. **Algorithms**: ECDSA P-384/SHA-384 (OID `1.2.840.10045.4.3.3`) primary, with
+   fallback to P-256/SHA-256 (OID `1.2.840.10045.4.3.2`)
+
+### 4. PCR Validation
+
+**Reference:** [AWS Nitro Enclaves Attestation Process](https://github.com/aws/aws-nitro-enclaves-nsm-api/blob/main/docs/attestation_process.md), [OpenSecret Remote Attestation Guide](https://docs.opensecret.cloud/docs/guides/remote-attestation/)
+
+AWS Nitro PCR semantics:
+
+| PCR | Size     | Description                                          |
+|-----|----------|------------------------------------------------------|
+| 0   | 48 bytes | Enclave image file hash (primary measurement)        |
+| 1   | 48 bytes | Linux kernel and bootstrap hash                      |
+| 2   | 48 bytes | Application code hash                                |
+| 3   | 48 bytes | IAM role assigned to parent instance (not for attestation) |
+| 4   | 48 bytes | Instance ID of parent instance (changes per instance) |
+| 8   | 48 bytes | Enclave image signing certificate hash               |
+
+**Debug mode detection**: When an enclave runs in debug mode, **PCR0 is all zeros**
+(48 zero bytes). This must be detected and cause `tee_debug_disabled` to FAIL.
+
+**PCR0 is the primary measurement** for MapleAI. The default measurement policy should
+contain known-good PCR0 values. These can be obtained by:
+1. Fetching a live attestation document from the production endpoint
+2. Consulting OpenSecret's published PCR history at:
+   - Production: `https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrProdHistory.json`
+   - Development: `https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrDevHistory.json`
+
+PCR1/PCR2 should be validated when known-good values are available, but may be in
+`allow_fail` initially.
+
+### 5. Attestation Fetch Endpoint
+
+```
+GET /attestation/{nonce}
+Host: enclave.trymaple.ai
+```
+
+- `{nonce}`: Client-generated UUID v4 string (e.g., `"550e8400-e29b-41d4-a716-446655440000"`)
+- Response: `{"attestation_document": "<base64-encoded COSE_Sign1 binary>"}`
+- Content-Type: `application/json`
+
+**Nonce verification**: After parsing the attestation payload, the `nonce` field
+(UTF-8 decoded) must match the client-generated UUID v4 nonce. Mismatch → FAIL CLOSED.
+
+**NOTE on nonce format and `nonce_match` factor**: teep's existing providers use a
+32-byte hex nonce (`attestation.Nonce`). MapleAI uses a UUID v4 string nonce instead.
+These are incompatible formats — the existing `evalNonceMatch` compares
+`in.Raw.Nonce` against `in.Nonce.Hex()` (64 hex chars), which would always fail for
+a UUID string.
+
+The MapleAI attester must:
+1. Accept the standard `nonce attestation.Nonce` argument from the proxy (preserving
+   the existing `Attester.FetchAttestation` interface unchanged)
+2. Generate a separate UUID v4 as the Nitro-specific challenge nonce
+3. Store the UUID v4 in a new `NitroNonce string` field on `RawAttestation`
+4. Store the original `attestation.Nonce` in `RawAttestation.Nonce` as hex (unchanged)
+
+The `nonce_match` evaluator must be extended with a Nitro path:
+- For Nitro attestations (`in.Raw.BackendFormat == FormatNitro`): compare
+  `in.Raw.NitroNonce` against the nonce extracted from the verified Nitro attestation
+  document's payload using `subtle.ConstantTimeCompare`. This verifies the UUID v4
+  round-trip (client generated it, enclave echoed it in the hardware-signed document).
+- The canonical `in.Nonce` (`attestation.Nonce`) remains available for cache keying
+  and report inputs but is NOT sent to the MapleAI endpoint.
+
+This avoids overloading the `Nonce` field with a different format and keeps the
+existing nonce pipeline intact for all other providers.
+
+### 6. Key Exchange Protocol
+
+After successful attestation verification:
+
+```
+POST /key_exchange
+Host: enclave.trymaple.ai
+Content-Type: application/json
+
+{
+  "client_public_key": "<base64 of 32-byte X25519 public key>",
+  "nonce": "<same UUID nonce used for attestation>"
+}
+```
+
+Response:
+```json
+{
+  "encrypted_session_key": "<base64 of nonce(12) || ciphertext>",
+  "session_id": "<uuid>"
+}
+```
+
+**Key exchange steps** (all using Go stdlib + `golang.org/x/crypto`):
+
+1. Generate ephemeral X25519 keypair (RFC 7748): `curve25519.ScalarBaseMult` or
+   `ecdh.X25519().GenerateKey(crypto/rand)`
+2. Extract server's X25519 public key from `raw.SigningKey` (populated from the
+   verified attestation document's `public_key` field during `FetchAttestation`)
+3. Use this key directly for ECDH — it is the sole source, already authenticated
+   by COSE_Sign1 verification. No separate comparison is needed (see Chain 2,
+   point 2: "Single key provenance path").
+4. Compute shared secret: `X25519(client_private_key, server_public_key)` → 32 bytes
+5. Base64-decode `encrypted_session_key`
+6. Split: first 12 bytes = nonce, remainder = ciphertext
+7. Decrypt with **ChaCha20-Poly1305** (RFC 8439) using the shared secret as the
+   symmetric key
+8. Decrypted result: 32-byte session key
+9. Store `(session_id, session_key)` for subsequent API calls
+10. **Clear the shared secret `[]byte` via `clear(sharedSecret)`, then nil the
+    ephemeral `*ecdh.PrivateKey` reference.** Go's `crypto/ecdh.PrivateKey` does
+    not expose the private scalar for in-place overwriting (see "Key Material
+    Zeroization Constraints" below). Nil-ing the reference allows GC collection.
+    This matches the existing `NearCloudSession.Zero()` and `ChutesSession.Zero()`
+    patterns.
+
+#### Key Material Zeroization Constraints
+
+Go's `crypto/ecdh.PrivateKey` stores the private scalar in an unexported `privateKey
+[]byte` field. The `Bytes()` method returns a copy — overwriting it has no effect on
+the internal state. There is no `Clear()` or `Zero()` method on the type.
+
+This is a known limitation shared by all teep E2EE providers that use `crypto/ecdh`:
+
+| Provider | Key type | Zero() behavior | Source |
+|----------|----------|----------------|--------|
+| NearCloud | `*ecdh.PrivateKey` (X25519) | Nils reference; internal scalar persists until GC | `e2ee/nearcloud.go:94` |
+| Chutes | `*mlkem.DecapsulationKey` | Nils reference; internal key persists until GC | `e2ee/chutes.go:70` |
+| Venice | `*secp256k1.PrivateKey` (dcrd) | Calls `privateKey.Zero()` (dcrd exposes this) | `e2ee/venice.go:88` |
+| **MapleAI** | `*ecdh.PrivateKey` (X25519) | Nil reference (same as NearCloud) | (this plan) |
+
+**What CAN be zeroed (caller-owned `[]byte` slices):**
+- ECDH shared secret returned by `PrivateKey.ECDH()` — `clear(sharedSecret)` once key derivation completes
+- Any intermediate HKDF output bytes — `clear(...)` once they are no longer needed
+- Derived session key bytes — only `clear(sessionKey)` immediately after constructing the AEAD cipher if the implementation stores the initialized AEAD and does **not** retain `sessionKey []byte`; if `MapleAISession` keeps `sessionKey []byte` for ongoing request encryption/decryption, defer zeroization until session teardown
+
+**What CANNOT be zeroed through public API:**
+- `crypto/ecdh.PrivateKey` internal scalar (unexported field, `Bytes()` returns copy)
+- `crypto/mlkem.DecapsulationKey` internal state (same limitation)
+- `cipher.AEAD` internal key copy (chacha20poly1305 stores a copy internally)
+
+**Why we do not use alternative approaches:**
+
+1. **`unsafe.Pointer` to reach unexported fields:** Fragile, breaks across Go
+   versions and with BoringCrypto/FIPS mode. This is rolling our own crypto cleanup
+   code and would be a maintenance burden with no guarantee of correctness.
+2. **`golang.org/x/crypto/curve25519` with raw `[32]byte` scalar:** This package
+   now wraps `crypto/ecdh` internally — `NewPrivateKey` clones the input. Using
+   the raw API would bypass the standard library's validation and is not recommended.
+3. **`runtime/secret` (experimental, Go 1.24+):** The Go team's official solution,
+   but requires `GOEXPERIMENT=runtimesecret`, is linux-only (amd64/arm64), and is
+   not subject to the Go 1 compatibility promise. It is not appropriate for
+   production use at this time.
+
+**Accepted tradeoff:** The ephemeral `crypto/ecdh.PrivateKey` scalar persists in
+memory from key generation until GC collection. This is mitigated by:
+- The key is ephemeral (fresh per key exchange, not long-lived)
+- The reference is nil-ed promptly, making it eligible for GC
+- teep runs inside a process that handles only proxy traffic (limited attack surface
+  for memory disclosure)
+- The same limitation exists in WireGuard-go, age (filippo.io/age), and all other Go
+  programs using `crypto/ecdh`
+- All caller-owned intermediate secrets (shared secret, derived keys) ARE zeroed
+
+This is consistent with the WireGuard-go project's documented position: "Due to
+limitations in Go and /x/crypto there is currently no way to ensure that key
+material is securely erased in memory."
+
+### 7. Encrypted API Request Format
+
+All API requests after key exchange use the session:
+
+```
+POST /v1/chat/completions
+Host: enclave.trymaple.ai
+Content-Type: application/json
+x-session-id: <session_id UUID>
+Authorization: Bearer <api_key>
+
+{"encrypted": "<base64 of nonce(12) || ciphertext>"}
+```
+
+**Encryption steps:**
+1. JSON-serialize the OpenAI-compatible request body
+2. Generate random 12-byte nonce via `crypto/rand`
+3. Encrypt with ChaCha20-Poly1305 using `session_key` → ciphertext (includes 16-byte
+   Poly1305 tag)
+4. Concatenate: `nonce(12) || ciphertext`
+5. Base64-encode
+6. Wrap in JSON: `{"encrypted": "<base64>"}`
+
+### 8. Encrypted Response Format (Non-Streaming)
+
+```json
+{"encrypted": "<base64 of nonce(12) || ciphertext>"}
+```
+
+**Decryption steps:**
+1. Parse JSON, extract `encrypted` field
+2. Base64-decode → binary blob
+3. Split: first 12 bytes = nonce, remainder = ciphertext
+4. ChaCha20-Poly1305 decrypt with `session_key`
+5. Parse decrypted bytes as OpenAI-compatible JSON response
+
+### 9. Encrypted SSE Streaming Format
+
+For `stream: true` requests:
+
+1. Request encrypted identically to non-streaming
+2. Response is an SSE event stream (`Content-Type: text/event-stream`)
+3. Each `data:` line contains a **base64-encoded encrypted chunk** (raw base64 string,
+   NOT wrapped in JSON)
+4. Per-chunk decryption:
+   - Base64-decode the `data:` line value
+   - Split: first 12 bytes = nonce, remainder = ciphertext
+   - ChaCha20-Poly1305 decrypt with `session_key`
+   - Parse decrypted bytes as `ChatCompletionChunk` JSON
+5. `data: [DONE]` signals end of stream (not encrypted, pass through)
+6. Non-base64 data lines (heartbeats, empty lines) are silently skipped
+
+**This is whole-body encryption** (entire chunk encrypted), unlike NearCloud/Venice
+(per-field encryption within JSON). This requires a dedicated SSE relay function
+similar to `relay_chutes.go`, NOT the generic per-field `RelayStream` from `relay.go`.
+
+### 10. Available API Endpoints
+
+| Method | Path                    | Purpose                            | Encrypted |
+|--------|-------------------------|------------------------------------|-----------|
+| GET    | /health                 | Health check                       | No        |
+| GET    | /v1/models              | List models (OpenAI-compatible)    | No        |
+| GET    | /attestation/{nonce}    | Fetch attestation document         | No        |
+| POST   | /key_exchange           | Establish E2EE session             | No (but uses ECDH) |
+| POST   | /v1/chat/completions    | Chat completions                   | Yes       |
+| POST   | /v1/embeddings          | Create embeddings                  | Yes       |
+
+### 11. Session Retry Protocol
+
+MapleAI session retry handling requires explicit provider-specific logic in the proxy
+relay path. The current relay behavior forwards upstream non-200 responses directly for
+non-Chutes providers, so this plan must not treat every upstream HTTP 400 as a generic
+session failure signal.
+
+For MapleAI, retry behavior should apply only when the upstream response is identified
+as a MapleAI session/decryption failure (e.g., a documented stale-session or
+ChaCha20-Poly1305 authentication failure error body), not to arbitrary HTTP 400
+responses.
+
+Required MapleAI-specific proxy behavior:
+1. Detect MapleAI session/decryption failure responses in the relay loop (match on
+   specific error body content, not just HTTP status code)
+2. Invalidate the cached session for this model
+3. Invalidate the cached attestation report for this model
+4. Re-perform full attestation handshake (attestation fetch → verify → key exchange)
+5. Retry the original request once with the new session
+6. If retry also fails, return error to client (do NOT retry indefinitely)
+
+Until this provider-specific handling is implemented, generic upstream HTTP 400 and
+other non-200 responses from MapleAI should be forwarded as upstream errors rather than
+triggering session+attestation invalidation implicitly.
+
+## Attestation Factor Design
+
+### Factor Rename: `tdx_*` → `tee_*`
+
+This plan uses generalized `tee_*` factor names throughout. The tinfoil support plan
+(`docs/plans/tinfoil_support.md`) proposes an atomic rename of existing `tdx_*` factors
+to `tee_*` to support multiple TEE hardware platforms (Intel TDX, AMD SEV-SNP, AWS
+Nitro). The rename mapping:
+
+| Current (TDX-specific)    | Generalized            | Applies To             |
+|---------------------------|------------------------|------------------------|
+| `tdx_quote_present`       | `tee_quote_present`    | TDX, SEV-SNP, Nitro   |
+| `tdx_quote_structure`     | `tee_quote_structure`  | TDX, SEV-SNP, Nitro   |
+| `tdx_cert_chain`          | `tee_cert_chain`       | TDX, Nitro             |
+| `tdx_quote_signature`     | `tee_quote_signature`  | TDX, SEV-SNP, Nitro   |
+| `tdx_debug_disabled`      | `tee_debug_disabled`   | TDX, Nitro             |
+| `tdx_mrseam_mrtd`         | `tee_mrseam_mrtd`      | TDX (MRTD/MRSEAM), Nitro (PCR0) |
+| `tdx_hardware_config`     | `tee_hardware_config`  | TDX (RTMR0), Nitro (PCR1) |
+| `tdx_boot_config`         | `tee_boot_config`      | TDX (RTMR1/2), Nitro (PCR2) |
+| `tdx_reportdata_binding`  | `tee_reportdata_binding` | TDX, Nitro (public_key binding) |
+| `intel_pcs_collateral`    | `intel_pcs_collateral` | TDX only (unchanged)   |
+| `tdx_tcb_current`         | `tdx_tcb_current`      | TDX only (unchanged)   |
+| `tdx_tcb_not_revoked`     | `tdx_tcb_not_revoked`  | TDX only (unchanged)   |
+
+**Implementation note**: If the `tee_*` rename has not yet been performed when MapleAI
+implementation begins, the implementer should either (a) perform the rename as Phase 1
+of this plan, or (b) use `nitro_*` prefixed names initially and participate in the
+rename later. Option (a) is preferred for consistency.
+
+### MapleAI Enforced Factor Set
+
+**Enforced factors** (must pass or request is blocked):
+
+| Factor                   | What It Verifies (Nitro)                          |
+|--------------------------|---------------------------------------------------|
+| `nonce_match`            | Client UUID nonce matches attestation doc nonce    |
+| `tee_quote_present`      | COSE_Sign1 attestation document received           |
+| `tee_quote_structure`    | Valid CBOR structure, all required payload fields  |
+| `tee_cert_chain`         | Certificate chain validates to AWS Nitro root      |
+| `tee_quote_signature`    | COSE_Sign1 ECDSA-P384 signature verifies           |
+| `tee_debug_disabled`     | PCR0 is NOT all-zeros (not debug mode)             |
+| `tee_mrseam_mrtd`        | PCR0 matches measurement allowlist                 |
+| `signing_key_present`    | X25519 `public_key` present in attestation doc     |
+| `tee_reportdata_binding` | Attested public_key matches key exchange public_key |
+| `e2ee_capable`           | E2EE material (session key) successfully derived   |
+| `e2ee_usable`            | Successful E2EE round-trip (post-relay check)      |
+
+**MapleAI DefaultAllowFail** (factors that Skip or are allowed to fail):
+
+```go
+var MapleAIDefaultAllowFail = []string{
+    "tee_hardware_config",      // PCR1 — kernel hash, TBD
+    "tee_boot_config",          // PCR2 — app hash, TBD
+    "intel_pcs_collateral",     // Intel-only, N/A
+    "tdx_tcb_current",          // Intel-only, N/A
+    "tdx_tcb_not_revoked",      // Intel-only, N/A
+    "nvidia_payload_present",   // No GPU attestation exposed
+    "nvidia_signature",         // No GPU attestation exposed
+    "nvidia_claims",            // No GPU attestation exposed
+    "nvidia_nonce_client_bound",// No GPU attestation exposed
+    "nvidia_nras_verified",     // No GPU attestation exposed
+    "tls_key_binding",          // No TLS pinning (E2EE instead)
+    "cpu_gpu_chain",            // No GPU binding exposed
+    "measured_model_weights",   // No weight hashes
+    "build_transparency_log",   // No Rekor
+    "cpu_id_registry",          // No Proof of Cloud
+    "compose_binding",          // No Docker compose
+    "sigstore_verification",    // No Sigstore
+    "event_log_integrity",      // No event log
+    // All gateway_* factors — no gateway architecture
+}
+```
+
+### NitroVerifyResult Type
+
+New type in `internal/attestation/`:
+
+```go
+type NitroVerifyResult struct {
+    Parsed          bool       // COSE_Sign1 + CBOR successfully decoded
+    CertChainValid  bool       // Certificate chain validates to AWS root
+    SignatureValid  bool       // COSE_Sign1 signature verifies
+    DebugMode       bool       // PCR0 is all-zeros
+    NonceMatch      bool       // Attestation nonce matches client nonce
+    PCRs            map[uint][]byte // All PCR values (48 bytes each)
+    PublicKey       []byte     // X25519 public key (32 bytes) from attestation
+    ModuleID        string     // Enclave module identifier
+    Timestamp       int64      // Attestation timestamp (Unix ms)
+    CertChainDetail string     // Human-readable cert chain status
+    SignatureDetail string     // Human-readable signature status
+    ParseDetail     string     // Human-readable parse status
+    Error           error      // First fatal error encountered
+}
+```
+
+New field in `ReportInput`: `Nitro *NitroVerifyResult`
+
+### Evaluator Generalization
+
+Existing TDX evaluator functions (after rename to `tee_*`) must become TEE-generic,
+checking whichever hardware result is present. Pattern:
+
+```
+evalTEEQuotePresent:
+  if in.TDX != nil → check TDX quote present
+  else if in.Nitro != nil → check Nitro doc present
+  else → Skip("no TEE attestation available")
+
+evalTEEQuoteStructure:
+  if in.TDX != nil → check TDX parsed
+  else if in.Nitro != nil → check Nitro parsed
+  (similar pattern for cert_chain, signature, debug_disabled, etc.)
+
+evalTEEMrseamMrtd:
+  if in.TDX != nil → check MRTD/MRSEAM against policy
+  else if in.Nitro != nil → check PCR0 against policy.PCR0Allow
+```
+
+The `MeasurementPolicy` struct needs a new field: `PCR0Allow []string` (hex-encoded
+48-byte SHA-384 hashes). Existing MRTD/MRSEAM fields remain for TDX.
+
+## Implementation Phases
+
+### Phase 1: Nitro Attestation Core (`internal/attestation/nitro.go`)
+
+**New dependency**: `fxamacker/cbor/v2` (add to go.mod)
+
+**New files:**
+- `internal/attestation/nitro.go` — Nitro COSE_Sign1 parsing and verification
+- `internal/attestation/nitro_test.go` — Unit tests
+- `internal/attestation/certs/aws_nitro_root.der` — Embedded AWS root certificate
+
+**Functions to implement:**
+
+1. `ParseNitroDocument(docBase64 string) (*NitroDocument, error)` — Base64-decode →
+   CBOR-decode COSE_Sign1 → extract all fields
+2. `VerifyNitroCertChain(doc *NitroDocument, now time.Time) error` — Validate chain
+   from cabundle[0] (must match embedded root) through intermediates to leaf cert
+3. `VerifyNitroSignature(doc *NitroDocument) error` — Construct Sig_structure, verify
+   ECDSA-P384-SHA384 with leaf cert's public key
+4. `VerifyNitroDocument(docBase64, clientNonce string) (*NitroVerifyResult, error)` —
+   Orchestrator: parse → verify chain → verify signature → check nonce → check
+   debug mode → extract public_key → return result
+5. `IsNitroDebugMode(pcrs map[uint][]byte) bool` — Check PCR0 all-zeros
+6. `NitroPCRMatchesPolicy(pcrs map[uint][]byte, policy *MeasurementPolicy) (bool, string)` —
+   Check PCR0/1/2/8 against allowlists
+
+**Internal types:**
+```go
+type NitroDocument struct {
+    Protected   []byte          // Raw protected headers
+    Payload     []byte          // Raw payload bytes (for Sig_structure)
+    Signature   []byte          // Raw signature (96 bytes)
+    ModuleID    string
+    Timestamp   uint64
+    Digest      string
+    PCRs        map[uint][]byte
+    Certificate []byte          // DER leaf cert
+    CABundle    [][]byte        // DER cert chain
+    PublicKey   []byte          // X25519 (32 bytes) or nil
+    UserData    []byte          // or nil
+    Nonce       []byte          // UTF-8 encoded nonce or nil
+}
+```
+
+**AWS root certificate embedding:**
+- Download from `https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip`
+- Extract DER file, embed via `//go:embed certs/aws_nitro_root.der`
+- Verify the embedded DER's SHA-256 fingerprint against the published AWS value via a
+  unit test over the embedded bytes (not at runtime in the hot path). The fingerprint
+  check is an asset-integrity guard, ensuring the checked-in file hasn't been
+  corrupted or substituted. Do not hash the embedded root during request handling.
+- Reject chains where `cabundle[0]` is not byte-identical to embedded root
+
+**Test plan:**
+- Embedded root integrity test: hash the `//go:embed` bytes of
+  `certs/aws_nitro_root.der` with `sha256.Sum256` and compare against the expected
+  published fingerprint. This is a unit test, not a build-time assertion or runtime
+  check.
+- Parsing round-trip: construct a synthetic/self-signed COSE_Sign1 test document with
+  known values and verify parsing extracts all fields correctly. This covers parsing
+  and field handling only, not a successful `VerifyNitroCertChain` path.
+- Positive cert-chain + signature verification: check in a captured real AWS Nitro
+  attestation fixture under `testdata/` whose `cabundle[0]` matches the embedded AWS
+  root by byte identity. Use this fixture to exercise `VerifyNitroCertChain` success
+  and full COSE signature verification success without weakening root pinning.
+- Invalid signature: tamper with the payload or signature bytes of the real fixture
+  after capture, verify signature check fails.
+- Invalid cert chain: use a synthetic/self-signed chain or mutate the fixture
+  `cabundle` so `cabundle[0]` is not the embedded AWS root, verify chain validation
+  fails closed.
+- Expired certificate: drive verification with a time after `NotAfter` against a real
+  Nitro fixture chain. Do not relax the root pin for this test.
+- Do **not** add a test-only bypass or alternate root for `VerifyNitroCertChain`;
+  tests must preserve the same pinned-root requirement as production.
+- Missing nonce: verify nonce check fails when nonce field is nil
+- Wrong nonce: verify nonce mismatch is detected
+- Debug mode: PCR0 all-zeros → `IsNitroDebugMode` returns true
+- Missing public_key: verify detection
+- Malformed CBOR: truncated, wrong types, extra fields
+- Fuzz tests: `fuzz_test.go` with `ParseNitroDocument` on random base64 inputs
+- **Bound reads**: CBOR arrays/maps must be bounded (reject docs with >64 PCRs,
+  >32 cabundle certs, fields >1 MiB)
+
+**Reference patterns:**
+- `internal/attestation/tdx.go` for TDX quote parsing structure
+- `internal/attestation/nvidia_eat.go` for external token parsing + verification
+- Use `internal/jsonstrict` for any JSON parsing (attestation fetch response)
+
+### Phase 2: Attestation Report Integration
+
+**Depends on**: Phase 1
+
+**Modified files:**
+- `internal/attestation/report.go` — Add `NitroVerifyResult`, `Nitro` field in
+  `ReportInput`, update evaluator functions, add `MapleAIDefaultAllowFail`
+- `internal/attestation/report_test.go` — Tests for Nitro factors
+- `internal/attestation/attestation.go` — Add `FormatNitro` to `BackendFormat`,
+  add Nitro-related fields to `RawAttestation`
+- `internal/attestation/measurement_policy.go` — Add `PCR0Allow`, `PCR1Allow`,
+  `PCR2Allow`, `PCR8Allow` fields to `MeasurementPolicy`
+- `internal/attestation/export_test.go` — Export new test helpers
+
+**Factor implementation approach (two options):**
+
+*If `tee_*` rename is done first:* Update existing `eval*` functions to check for
+Nitro results alongside TDX results. Each evaluator becomes a dispatcher:
+`in.TDX` present → existing TDX logic; `in.Nitro` present → new Nitro logic.
+
+*If `tee_*` rename is deferred:* Add parallel `nitro_*` factors and evaluators.
+Add them to `KnownFactors`. The rename folds them into `tee_*` later.
+
+**Test plan:**
+- `TestBuildReportNitroFactorCount` — Assert correct factor count with Nitro input
+- `TestBuildReportNitroEnforcedFlags` — Verify enforcement for MapleAI allow-fail
+- `TestBuildReportNitroBlocked` — Verify `Blocked()` when Nitro signature fails
+- `TestBuildReportNitroPass` — Verify all Nitro factors pass with valid input
+- `TestBuildReportNitroDebugMode` — Verify `tee_debug_disabled` fails
+- `TestBuildReportNitroPCRMismatch` — Verify `tee_mrseam_mrtd` fails
+- `TestBuildReportMixedTDXNitro` — Verify only one TEE type evaluated (mutual exclusion)
+- Counter consistency: `Passed + Failed + Skipped == len(Factors)`
+
+### Phase 3: MapleAI E2EE Session (`internal/e2ee/mapleai.go`)
+
+**Depends on**: None (can parallel with Phases 1-2)
+
+**New files:**
+- `internal/e2ee/mapleai.go` — `MapleAISession` E2EE implementation
+- `internal/e2ee/mapleai_test.go` — Unit tests
+- `internal/e2ee/relay_mapleai.go` — SSE relay for MapleAI encrypted streams
+- `internal/e2ee/relay_mapleai_test.go` — Relay tests
+
+**`MapleAISession` struct:**
+```go
+type MapleAISession struct {
+    clientPrivate  *ecdh.PrivateKey  // X25519 ephemeral private key
+    clientPublic   []byte            // 32 bytes
+    serverPublic   []byte            // 32 bytes (from attestation)
+    sessionKey     []byte            // 32 bytes (from key exchange)
+    sessionID      string            // UUID from server
+}
+```
+
+**Methods:**
+- `NewMapleAISession() (*MapleAISession, error)` — Generate X25519 keypair via
+  `ecdh.X25519().GenerateKey(crypto/rand)`. Fail if RNG fails.
+- `SetServerPublicKey(pubKey []byte) error` — Store the attested server public key.
+  Validate length == 32 bytes.
+- `ClientPublicKeyBase64() string` — Base64-encode client public key for key exchange
+- `EstablishSession(encryptedSessionKey []byte, sessionID string) error`:
+  1. Compute shared secret: `clientPrivate.ECDH(serverPublicKey)`
+  2. Split `encryptedSessionKey`: nonce(12) || ciphertext
+  3. ChaCha20-Poly1305 Open with shared secret as key, nonce, ciphertext
+  4. Validate decrypted key is 32 bytes
+  5. Store `sessionKey` and `sessionID`
+  6. **Zero shared secret immediately after deriving session key**
+- `EncryptRequest(plaintext []byte) ([]byte, error)`:
+  1. Generate 12-byte random nonce
+  2. ChaCha20-Poly1305 Seal with sessionKey
+  3. Return `nonce || ciphertext`
+- `DecryptResponse(encrypted []byte) ([]byte, error)`:
+  1. Validate length ≥ 12 + 16 (nonce + min ciphertext with tag)
+  2. Split nonce(12), ciphertext
+  3. ChaCha20-Poly1305 Open with sessionKey
+  4. Return plaintext
+- `SessionID() string` — Return session_id for header injection
+- `IsEncryptedChunk(val string) bool` — Check if value is base64 and decodes to ≥28
+  bytes (12 nonce + 16 tag minimum)
+- `Decrypt(ciphertext string) ([]byte, error)` — Base64-decode → `DecryptResponse`
+- `Zero()` — Zero sessionKey bytes, nil all key references
+
+**Implements `Decryptor` interface** (for type assertion in proxy relay dispatch).
+
+**Relay functions:**
+
+`RelayStreamMapleAI(ctx, w http.ResponseWriter, body io.ReadCloser, session *MapleAISession) (*StreamStats, error)`:
+1. Set response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`
+2. Read SSE lines via `newSSEScanner(body)`
+3. For each `data:` line:
+   - If value is `[DONE]` → write `data: [DONE]\n\n`, return
+   - Base64-decode the value
+   - If base64 decode fails → skip (heartbeat/non-data)
+   - Decrypt via `session.DecryptResponse(decoded)`
+   - Write decrypted JSON as `data: <json>\n\n`
+   - Flush
+4. Track `StreamStats` (chunk count, timing)
+5. On decryption failure → return `ErrDecryptionFailed`
+
+`RelayNonStreamMapleAI(body io.ReadCloser, session *MapleAISession) ([]byte, error)`:
+1. Read full response body (bounded read, 10 MiB max — consistent with
+   `internal/e2ee/relay.go`'s `io.LimitReader(..., 10<<20)`)
+2. Parse as `{"encrypted": "<base64>"}`
+3. Base64-decode the `encrypted` field
+4. Decrypt via `session.DecryptResponse(decoded)`
+5. Return decrypted JSON bytes
+
+**Test plan:**
+- Round-trip: generate keypair → encrypt → decrypt → assert plaintext matches
+- Wrong session key: encrypt with key A, decrypt with key B → must fail
+- Empty plaintext: encrypt empty bytes → decrypt → empty bytes
+- Large payload: encrypt 1 MiB JSON → decrypt → verify
+- Nonce uniqueness: encrypt same plaintext twice → ciphertexts must differ
+- Zero cleanup: all key references nil after `Zero()`
+- Interface compliance: `var _ Decryptor = (*MapleAISession)(nil)`
+- Relay streaming: mock SSE server with encrypted chunks, verify decrypted output
+- Relay `[DONE]`: verify pass-through
+- Relay decryption failure: verify `ErrDecryptionFailed` returned
+- Relay non-streaming: mock `{"encrypted": "..."}` response, verify decryption
+- Pre-header error: verify no partial HTTP response written on early failure
+
+**Reference patterns:**
+- `internal/e2ee/chutes.go` for session structure and `Zero()` pattern
+- `internal/e2ee/nearcloud.go` for X25519 key exchange pattern
+- `internal/e2ee/relay_chutes.go` for custom SSE relay pattern
+- `internal/e2ee/relay_test.go` and `relay_chutes_test.go` for test helpers
+
+### Phase 4: MapleAI Provider (`internal/provider/mapleai/`)
+
+**Depends on**: Phases 1, 2, 3
+
+**New files:**
+- `internal/provider/mapleai/mapleai.go` — Attester, Preparer, ParseAttestationResponse
+- `internal/provider/mapleai/e2ee.go` — RequestEncryptor with key exchange + session cache
+- `internal/provider/mapleai/reportdata.go` — Key binding verifier
+- `internal/provider/mapleai/policy.go` — Default PCR measurement policy
+- `internal/provider/mapleai/mapleai_test.go`
+- `internal/provider/mapleai/e2ee_test.go`
+- `internal/provider/mapleai/reportdata_test.go`
+- `internal/provider/mapleai/policy_test.go`
+- `internal/provider/mapleai/export_test.go`
+- `internal/provider/mapleai/fuzz_test.go`
+
+**Attester (`mapleai.go`):**
+
+```go
+type Attester struct {
+    baseURL string
+    client  *http.Client
+    apiKey  string
+}
+```
+
+- `NewAttester(baseURL, apiKey string, client *http.Client) *Attester`
+- `FetchAttestation(ctx, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error)`:
+  1. Preserve the `nonce attestation.Nonce` argument unchanged as teep's canonical
+     anti-replay nonce. This remains the value used by the shared attestation
+     pipeline for cache keys and report inputs.
+  2. Generate a separate UUID v4 `nitroNonce` for MapleAI's Nitro attestation
+     endpoint, because MapleAI requires a UUID string rather than teep's 32-byte
+     hex nonce format.
+  3. `GET {baseURL}/attestation/{nitroNonce}` — do **not** use
+     `provider.FetchAttestationJSON` directly, because its error formatting
+     includes the full URL path (`"GET host+path: err"`), which would leak the
+     UUID nonce into logs/error strings. Instead, perform the GET manually and
+     wrap any network error with a fixed path prefix such as
+     `"GET .../attestation/<redacted>: %w"` before returning. Alternatively,
+     create a thin wrapper around `FetchAttestationJSON` that immediately
+     redacts the nonce from the returned error.
+  4. Parse JSON response: `{"attestation_document": "<base64>"}`
+     (use `internal/jsonstrict` for parsing)
+  5. Call `attestation.VerifyNitroDocument(docBase64, nitroNonce)` →
+     `NitroVerifyResult`
+  6. Populate `RawAttestation`:
+     - `BackendFormat`: `attestation.FormatNitro` (new constant)
+     - `SigningKey`: hex-encode the X25519 public key from NitroVerifyResult
+     - `TEEProvider`: `"nitro"`
+     - `Model`: model
+     - `Nonce`: store the original `nonce.Hex()` value (unchanged, 64 hex chars)
+     - `NitroNonce`: store the UUID v4 string used for the MapleAI challenge
+     - Store `NitroVerifyResult` in a dedicated `NitroResult *NitroVerifyResult`
+       field on `RawAttestation`. Do NOT overload `RawBody` — it is reserved for
+       the unmodified HTTP response body used by `--capture` to write the original
+       provider JSON as-is. `RawBody` should still store the raw JSON response
+       from `/attestation/{nonce}` for capture purposes.
+  7. Return `RawAttestation`
+
+**Required data-model changes for nonce plumbing:**
+
+1. Add `NitroNonce string` field to `RawAttestation` — the provider-specific UUID v4
+   sent to `/attestation/{uuid}` and echoed back in the Nitro attestation document.
+   Do NOT repurpose `NonceSource`; it has different semantics.
+2. Add `NitroNonce string` to `ReportInput` — populated from `RawAttestation.NitroNonce`
+   so report generation can include the provider-specific UUID.
+3. Extend `evalNonceMatch` with a Nitro path: when `in.Raw.BackendFormat == FormatNitro`,
+   compare `in.Raw.NitroNonce` against `in.NitroNonce` (the UUID from `ReportInput`)
+   via `subtle.ConstantTimeCompare`. The standard `in.Nonce` / `in.Raw.Nonce` check
+   remains for all other providers.
+4. Keep `Attester.FetchAttestation(ctx, model, nonce attestation.Nonce)` interface
+   unchanged — callers continue supplying the standard proxy/client nonce.
+
+**Preparer (`mapleai.go`):**
+
+```go
+type Preparer struct {
+    apiKey string
+}
+```
+
+- `NewPreparer(apiKey string) *Preparer`
+- `PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool, path string) error`:
+  Matches the `provider.RequestPreparer` interface signature exactly:
+  `PrepareRequest(req *http.Request, e2eeHeaders http.Header, meta *e2ee.ChutesE2EE, stream bool, path string) error`
+  1. Set `Authorization: Bearer <p.apiKey>` — API key stored on struct, matching
+     the venice/neardirect/chutes Preparer pattern
+  2. Set `Content-Type: application/json`
+  3. Merge any E2EE headers from `e2eeHeaders` (populated by `prepareUpstreamHeaders`)
+  4. `meta` (`*e2ee.ChutesE2EE`) is unused for MapleAI — pass nil from caller
+
+**RequestEncryptor (`e2ee.go`):**
+
+```go
+type E2EE struct {
+    baseURL  string
+    client   *http.Client
+    mu       sync.RWMutex
+    sessions map[string]*sessionEntry // keyed by hex(serverPublicKey)
+    sf       singleflight.Group       // coalesces concurrent key exchanges per key
+}
+
+type sessionEntry struct {
+    session   *e2ee.MapleAISession
+    createdAt time.Time
+}
+```
+
+- `NewE2EE(baseURL string, client *http.Client) *E2EE`
+- `EncryptRequest(body []byte, raw *attestation.RawAttestation, endpointPath string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)`:
+  1. Extract server public key from `raw.SigningKey` (hex-decode to 32 bytes)
+  2. Look up cached session by `hex(serverPublicKey)` under read lock (`mu.RLock`).
+     If a valid (non-expired) session exists, use it directly.
+  3. If no session or expired: use `singleflight.Group.Do` keyed by
+     `hex(serverPublicKey)` to coalesce concurrent key exchanges for the same
+     enclave instance. Inside the singleflight callback:
+     a. Re-check cache (another goroutine's singleflight may have just populated it)
+     b. Create `e2ee.NewMapleAISession()`
+     c. Store the 32-byte server public key from step 1 as the session's
+        `attestedKey`. This is the key authenticated by COSE_Sign1 verification
+        (populated from `NitroVerifyResult.PublicKey` → `RawAttestation.SigningKey`
+        during `FetchAttestation`). The session uses this key for ECDH and also
+        records the actual ECDH peer key separately so `tee_reportdata_binding`
+        can verify the match (see Implementation Implications §1 and §3).
+     d. `POST {baseURL}/key_exchange` with `{"client_public_key": "<base64>", "nonce": "<uuid>"}`
+     e. Parse response: `{"encrypted_session_key": "<base64>", "session_id": "<uuid>"}`
+        (use `internal/jsonstrict` for parsing)
+     f. Base64-decode encrypted_session_key
+     g. `session.EstablishSession(encSessionKey, sessionID)` — this derives the AEAD
+        cipher using the ECDH shared secret and decrypts the session key
+     h. Write lock (`mu.Lock`), cache the session, unlock
+  4. Create a **per-request copy** of the cached session via `session.Copy()`.
+     The copy holds its own references to session_id and session_key (immutable
+     values cloned from the cached entry). This is required because the proxy
+     calls `Decryptor.Zero()` on the returned session after each request/relay
+     attempt — if the cached pointer were returned directly, `Zero()` would wipe
+     it for all concurrent and subsequent users. The cached entry retains its
+     original key material until explicit invalidation.
+  5. Encrypt request body: `copy.EncryptRequest(body)`
+  6. Wrap: `{"encrypted": "<base64>"}`
+  7. Return `(wrappedBody, copy, nil, nil)` — `copy` is the per-request Decryptor;
+     `ChutesE2EE` is nil. `EncryptRequest` does NOT set headers directly.
+  8. Update `proxy.prepareUpstreamHeaders` to add a `*e2ee.MapleAISession` case
+     in the existing decryptor type switch (alongside `*e2ee.VeniceSession` and
+     `*e2ee.NearCloudSession`) that sets `x-session-id: <sessionID>` from the
+     session. This must fail closed if the session ID is empty/unavailable.
+
+**Concurrency design**: The mutex protects only the session map reads/writes, not the
+HTTP key exchange. `singleflight.Group` keyed by server public key hex ensures that
+concurrent requests for the same enclave instance coalesce into a single key exchange,
+while requests for different enclave instances (after a restart with a new key) proceed
+independently. This matches the `neardirect` attestation fetch pattern and the
+`chutes.NoncePool` refresh pattern.
+
+**Session lifecycle**: The session cache stores the canonical `*MapleAISession` with
+immutable session material (session_id, session_key). Each `EncryptRequest` call
+returns a per-request `Copy()` as the `Decryptor`. The proxy's `Zero()` call after
+each request/relay attempt wipes only the copy, leaving the cached original intact for
+concurrent and subsequent requests. The `Copy()` method clones the session_id and
+session_key byte slices to prevent aliasing. On session invalidation (attestation cache
+miss or retry), the cached entry is removed and its `Zero()` is called.
+
+**Key binding verifier (`reportdata.go`):**
+
+For the `tee_reportdata_binding` factor, MapleAI's binding is: the X25519 `public_key`
+in the verified attestation document is the same key used in the ECDH key exchange.
+
+Unlike TDX providers where REPORTDATA contains a hash of the signing key (requiring a
+runtime comparison between two independent values), the Nitro binding has a structural
+component: the `public_key` field is inside the COSE_Sign1-signed payload, so
+COSE_Sign1 verification itself proves the key was placed there by the enclave
+hardware. However, the factor must also verify that this attested key was actually the
+one used for ECDH session establishment — otherwise the factor would be equivalent to
+the weaker `signing_key_present` check.
+
+The `MapleAISession` records both the attested key (from `RawAttestation.SigningKey`)
+and the actual ECDH peer key used during `EstablishSession`. The session compares
+them via `subtle.ConstantTimeCompare` before marking the session usable (fail-closed
+on mismatch). This comparison is defense-in-depth against code-path bugs that could
+cause a different key to be used for ECDH than the one authenticated by attestation.
+
+The `ReportDataVerifier` interface (`VerifyReportData(reportData [64]byte, raw, nonce)`)
+doesn't fit Nitro (no TDX REPORTDATA). Options:
+
+- Implement a Nitro-specific verifier that returns Pass with detail "Attested X25519
+  public key authenticated by COSE_Sign1 and matched to ECDH peer key" when
+  `in.Nitro.PublicKey != nil && len(in.Nitro.PublicKey) == 32 &&
+  in.Nitro.SignatureValid && in.Nitro.ECDHPeerKeyMatched`
+- Or: the `tee_reportdata_binding` evaluator handles Nitro directly by checking
+  these conditions
+
+**Default measurement policy (`policy.go`):**
+
+```go
+func DefaultMeasurementPolicy() attestation.MeasurementPolicy {
+    return attestation.MeasurementPolicy{
+        PCR0Allow: []string{
+            // Known-good PCR0 values obtained from live attestation
+            // or OpenSecret's published PCR history
+        },
+    }
+}
+```
+
+PCR0 values must be obtained from the production endpoint before implementation
+(fetch live attestation, extract PCR0, add as hex string). Multiple values may be
+needed if the enclave image has been updated. Consult:
+`https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrProdHistory.json`
+
+**Test plan:**
+- Attester: mock HTTP server returning canned attestation JSON, verify parsing
+- Attester: invalid JSON response → error
+- Attester: HTTP error → error
+- Preparer: verify headers set correctly
+- E2EE: mock key exchange endpoint, verify session establishment
+- E2EE: session reuse — second call uses cached session
+- E2EE: session invalidation — different server public key → new session
+- E2EE: concurrent access — `sync.WaitGroup` + parallel goroutines verify mutex safety
+- Key binding: constant-time comparison verified (test with timing-safe assertions)
+- Policy: PCR0 match/mismatch
+- Fuzz: `ParseAttestationResponse` with random inputs
+
+**Reference patterns:**
+- `internal/provider/chutes/chutes.go` for non-pinned Attester pattern
+- `internal/provider/chutes/e2ee.go` for RequestEncryptor with E2EE material
+- `internal/provider/chutes/reportdata.go` for ReportDataVerifier
+- `internal/provider/chutes/policy.go` for measurement policy
+- `internal/provider/neardirect/neardirect.go` for Preparer pattern
+
+### Phase 5: Wiring & Configuration
+
+**Depends on**: Phases 1-4
+
+**Modified files:**
+
+`internal/proxy/proxy.go:fromConfig()` — Add `"mapleai"` case:
+```
+case "mapleai":
+    p.ChatPath = "/v1/chat/completions"
+    p.EmbeddingsPath = "/v1/embeddings"
+    p.E2EE = true  // Always E2EE
+    p.Attester = mapleai.NewAttester(cp.BaseURL, cp.APIKey, s.attestClient)
+    p.Preparer = mapleai.NewPreparer(cp.APIKey)
+    p.Encryptor = mapleai.NewE2EE(cp.BaseURL, s.attestClient)
+    p.ReportDataVerifier = nil  // Nitro key binding is verified in the attestation document, not via the TDX REPORTDATA hook
+    p.SupplyChainPolicy = nil  // No supply chain attestation
+    p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, s.upstreamClient)
+```
+
+**Proxy relay dispatch**: The proxy's `handleChat` function needs to detect MapleAI
+E2EE for both streaming and non-streaming responses. Since `EncryptRequest` returns
+`(body, Decryptor, nil, nil)` with `Decryptor` being a `*e2ee.MapleAISession`, the
+proxy can use a type assertion:
+```
+switch dec := decryptor.(type) {
+case *e2ee.MapleAISession:
+    // Use RelayStreamMapleAI / RelayNonStreamMapleAI
+default:
+    // Use existing per-field RelayStream / DecryptNonStreamResponse
+}
+```
+This is analogous to the existing `if chutesE2EE != nil` check for Chutes.
+
+`internal/config/config.go:applyEnvOverrides()` — Add:
+```
+"mapleai" → env: "MAPLEAI_API_KEY", base: "https://enclave.trymaple.ai", e2ee: true
+```
+
+`internal/defaults/defaults.go` — Add to registry:
+```
+"mapleai": { model: mapleai.DefaultMeasurementPolicy() }
+```
+
+`internal/verify/factory.go` — Add `"mapleai"` case to all switch functions:
+- `newAttester` → `mapleai.NewAttester`
+- `newReportDataVerifier` → `mapleai.ReportDataVerifier{}`
+- `supplyChainPolicy` → `nil`
+- `e2eeEnabledByDefault` → `true`
+- `chatPathForProvider` → `"/v1/chat/completions"`
+
+`internal/verify/e2ee.go` — Add `"mapleai"` case to the `testE2EE` switch
+(alongside venice/nearcloud/neardirect/chutes). The MapleAI E2EE test path must:
+- Perform attestation fetch + Nitro verification (reusing the verify report's attestation)
+- Execute the `/key_exchange` endpoint to establish a session
+- Send a test chat request with the `x-session-id` header
+- Verify whole-body encrypted response can be decrypted
+- Verify `session.Zero()` cleans up key material
+- Report E2EE test pass/fail in the verification output
+
+`internal/attestation/report.go` — Add `MapleAIDefaultAllowFail` (listed above)
+
+`internal/attestation/attestation.go`:
+- Add `FormatNitro BackendFormat = "nitro"`
+- Add to `RawAttestation`: `NitroNonce string` (UUID nonce), consider
+  `NitroDocument *NitroDocument` or `NitroVerifyResult *NitroVerifyResult`
+
+**Test plan:**
+- Config parsing: TOML with `[providers.mapleai]` section parses correctly
+- Config env override: `MAPLEAI_API_KEY` env var creates provider
+- Unknown provider rejection: verify `fromConfig` still errors on unknown names
+- Verify command: `teep verify mapleai` with mock transport
+
+### Phase 6: Integration Tests
+
+**Depends on**: Phase 5
+
+**New files:**
+- `internal/integration/mapleai_test.go` — Integration tests
+
+**Mock integration tests** (run without API key):
+- Fixture-based replay: capture real attestation from live endpoint, save as testdata
+  fixture, replay through full verification pipeline
+- `loadFixture(t, "mapleai")` pattern matching existing fixtures
+- Assert all Nitro factors evaluate correctly
+- Assert report is not blocked with MapleAI allow-fail list
+- Assert E2EE session establishment succeeds with mock key exchange
+
+**Live integration tests** (gated behind `TEEP_LIVE_TESTS` + `MAPLEAI_API_KEY`):
+- `TestMapleAIModels` — GET /v1/models returns valid model list
+- `TestMapleAIAttestation` — Full attestation fetch + verify cycle
+- `TestMapleAIChatNonStreaming` — Non-streaming chat completion with E2EE
+- `TestMapleAIChatStreaming` — Streaming chat completion with E2EE
+- `TestMapleAIEmbeddings` — Embeddings endpoint with E2EE
+- `TestMapleAIVerifyReport` — Full verification report (all factors evaluated)
+- `TestMapleAIInvalidAPIKey` — Verify rejection with bad API key
+- `TestMapleAIConcurrent` — 10 parallel requests verify cache and session safety
+  (`sync.WaitGroup` + goroutines, all tests use `-race`)
+
+**Capture tests:**
+- Capture mode: record live API interactions for replay
+- Self-verify: captured data replays identically
+
+**Reference patterns:**
+- `internal/integration/nearcloud_test.go` for fixture-based replay
+- `internal/integration/neardirect_test.go` for live test gating
+- `internal/integration/helpers_test.go` for shared test helpers
+
+## Verification
+
+1. `make check` passes (fmt, vet, lint, unit tests with `-race`)
+2. `make integration` passes with `MAPLEAI_API_KEY` and `TEEP_LIVE_TESTS` set
+3. `make reports` generates MapleAI verification report
+4. Report shows: all enforced `tee_*` factors Pass; non-applicable factors correctly
+   in allow-fail
+5. E2EE round-trip succeeds (`e2ee_usable` = Pass)
+6. Manual: `teep verify mapleai` produces correct human-readable report
+7. Manual: `teep serve` with mapleai provider routes chat requests correctly
+8. Manual: concurrent load test — 10+ parallel requests verify no races
+9. `gocyclo` — all new functions ≤ complexity 32
+
+## Relevant Files
+
+**New:**
+- `internal/attestation/nitro.go`, `nitro_test.go` — Nitro COSE_Sign1 verification
+- `internal/attestation/certs/aws_nitro_root.der` — Embedded AWS root certificate
+- `internal/e2ee/mapleai.go`, `mapleai_test.go` — E2EE session
+- `internal/e2ee/relay_mapleai.go`, `relay_mapleai_test.go` — SSE relay
+- `internal/provider/mapleai/*.go` — Provider implementation
+- `internal/integration/mapleai_test.go` — Integration tests
+
+**Modified:**
+- `go.mod` — Add `fxamacker/cbor/v2`
+- `internal/attestation/attestation.go` — `FormatNitro`, `RawAttestation` fields
+- `internal/attestation/report.go` — `NitroVerifyResult`, evaluators, `MapleAIDefaultAllowFail`, `KnownFactors`
+- `internal/attestation/report_test.go` — Nitro factor tests
+- `internal/attestation/measurement_policy.go` — `PCR0Allow` etc. fields
+- `internal/proxy/proxy.go` — `fromConfig()` mapleai case, relay dispatch
+- `internal/config/config.go` — `applyEnvOverrides()` for MAPLEAI_API_KEY
+- `internal/defaults/defaults.go` — Registry entry
+- `internal/verify/factory.go` — All switch blocks
+
+**Reference (read, do not modify):**
+- `internal/provider/chutes/` — Non-pinned provider pattern
+- `internal/provider/nearcloud/pinned.go` — `attestOnConn` orchestration pattern
+- `internal/e2ee/chutes.go` — Session + Zero() pattern
+- `internal/e2ee/relay_chutes.go` — Custom SSE relay pattern
+- `internal/proxy/proxy.go:handleChat` — Request routing and E2EE dispatch
+
+## Decisions
+
+- **Non-pinned architecture**: E2EE provides channel security; no TLS pinning needed
+  (Nitro attestation doesn't include TLS fingerprints)
+- **CBOR library**: `fxamacker/cbor/v2` for COSE_Sign1 parsing
+- **Session caching**: Cache session alongside attestation (same 1h TTL), re-establish
+  on failure. Session keyed by server public key hex.
+- **UUID nonce**: MapleAI uses UUID v4 nonces, not 32-byte hex. Provider generates its
+  own nonce format.
+- **Factor naming**: Plan uses `tee_*` names. If rename hasn't occurred, implementer
+  may use `nitro_*` initially.
+- **No supply chain attestation**: MapleAI does not expose compose hashes, Sigstore,
+  Rekor, or event logs. These factors are in allow-fail. No sigstore/Rekor
+  transparency log entries exist for any OpenSecret or Edgeless component.
+- **GPU attestation gap**: MapleAI's Nitro Enclave is a proxy — actual inference
+  runs on AMD SEV-SNP backends (Edgeless Privatemode AI, Tinfoil). Sidecar proxies
+  inside the enclave DO verify backend attestation (Contrast SDK for Privatemode,
+  tinfoil-go for Tinfoil) and re-encrypt/establish attested TLS. However, this
+  backend attestation is NOT exposed through the MapleAI Nitro attestation endpoint.
+  See "Authentication Chain Analysis §Chain 3" for full source-code-backed gap
+  analysis. All backend attestation and GPU-related factors are in allow-fail. The
+  report detail strings MUST communicate that backend attestation is enclave-internal
+  and not client-verifiable through the Nitro attestation.
+- **Source code fully available**: All enclave source code is publicly available and
+  auditable: [`OpenSecretCloud/opensecret`](https://github.com/OpenSecretCloud/opensecret)
+  (Rust server), [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public)
+  (Continuum proxy), and in-tree `tinfoil-proxy/` (Tinfoil proxy). Nix builds are
+  reproducible with CI-verified PCR values. However, the sidecar proxy binaries
+  are pre-compiled in git — not built from source in the Nix build.
+- **Pre-compiled binary provenance gap**: The `continuum-proxy` and `tinfoil-proxy`
+  binaries are checked into the opensecret repo as pre-compiled binaries. The Nix
+  build copies these into the EIF without building from source. An auditor must
+  manually reproduce the binaries from the linked git submodule
+  (`edgelesssys/privatemode-public`) or the in-tree Go source (`tinfoil-proxy/`) to
+  verify that the checked-in binaries match the source code.
+
+## Public References
+
+- [AWS Nitro Enclaves — Verifying Root of Trust](https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html)
+- [AWS Nitro Enclaves NSM API — Attestation Process](https://github.com/aws/aws-nitro-enclaves-nsm-api/blob/main/docs/attestation_process.md)
+- [OpenSecret SDK — Remote Attestation Guide](https://docs.opensecret.cloud/docs/guides/remote-attestation/)
+- [OpenSecret SDK — Maple AI Integration](https://docs.opensecret.cloud/docs/maple-ai/)
+- [OpenSecret Technical Blog](https://blog.opensecret.cloud/opensecret-technicals/)
+- [OpenSecretCloud/opensecret — Nitro Enclave Server Source](https://github.com/OpenSecretCloud/opensecret)
+- [edgelesssys/privatemode-public — Continuum Proxy Source](https://github.com/edgelesssys/privatemode-public)
+- [Privatemode AI — Verification from Source Guide](https://docs.privatemode.ai/guides/verify-source)
+- [Privatemode AI — Security Documentation](https://docs.privatemode.ai/security)
+- [RFC 9052 — CBOR Object Signing and Encryption (COSE)](https://datatracker.ietf.org/doc/html/rfc9052)
+- [RFC 8949 — Concise Binary Object Representation (CBOR)](https://datatracker.ietf.org/doc/html/rfc8949)
+- [RFC 7748 — Elliptic Curves for Security (X25519)](https://datatracker.ietf.org/doc/html/rfc7748)
+- [RFC 8439 — ChaCha20 and Poly1305](https://datatracker.ietf.org/doc/html/rfc8439)
