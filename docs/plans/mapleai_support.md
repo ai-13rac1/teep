@@ -507,24 +507,35 @@ session_key (from Chain 2)
 The authentication chain analysis has these specific implications for the implementation:
 
 1. **The `tee_reportdata_binding` factor for Nitro** should verify that
-   `NitroVerifyResult.PublicKey` is non-nil, 32 bytes, and that the same key was used
-   for the ECDH key exchange. The binding is via COSE_Sign1 signature (the public_key
-   is in the signed payload), NOT via a separate REPORTDATA field like TDX. The
-   factor should Pass with detail like "X25519 public key bound via COSE_Sign1
-   hardware signature" to distinguish from TDX's REPORTDATA binding.
+   `NitroVerifyResult.PublicKey` is non-nil, exactly 32 bytes, and matches the server
+   X25519 public key actually used for the ECDH key exchange in `MapleAISession`.
+   The attestation-side authentication is via the COSE_Sign1 signature (the
+   `public_key` is in the signed payload), NOT via a separate REPORTDATA field like
+   TDX; the factor is only complete once the verified attested `public_key` is
+   compared to the runtime ECDH peer key. The factor should Pass with detail like
+   "Attested X25519 public key authenticated by COSE_Sign1 and matched to ECDH peer
+   key" to distinguish it from both TDX REPORTDATA binding and the weaker structural
+   `signing_key_present` check.
 
 2. **The `signing_key_present` factor** should check
    `NitroVerifyResult.PublicKey != nil && len(NitroVerifyResult.PublicKey) == 32`.
    For Nitro, the "signing key" is the X25519 public key (used for ECDH, not signing),
    so the factor detail should say "X25519 public key (32 bytes) present in attestation"
    to avoid confusion with dstack providers where it's an Ed25519 or secp256k1 signing
-   key.
+   key. This factor is intentionally structural only; it does not by itself prove that
+   the attested key was the one used during session establishment.
 
 3. **The E2EE session (`MapleAISession`) MUST store the attested server public key**
-   and enforce that the same key is used for ECDH. The session cache MUST be keyed
-   by the hex-encoded server public key. If a new attestation returns a different
-   server public key (enclave restarted), existing cached sessions for the old key
-   MUST be invalidated.
+   and the exact server public key observed during ECDH session establishment, then
+   compare them via `subtle.ConstantTimeCompare` before marking the session usable.
+   A mismatch MUST fail closed and abort the request. This comparison is
+   defense-in-depth: even though both values originate from the same
+   `RawAttestation.SigningKey`, recording and comparing them independently guards
+   against code-path bugs that could cause a different key to be used for ECDH than
+   the one authenticated by attestation. The session cache MUST be keyed by the
+   hex-encoded verified attested server public key. If a new attestation returns a
+   different server public key (enclave restarted), existing cached sessions for the
+   old key MUST be invalidated.
 
 4. **Session invalidation on attestation cache miss**: When the attestation cache
    expires (1h TTL) or is manually invalidated, all E2EE sessions derived from that
@@ -1032,15 +1043,33 @@ type NitroDocument struct {
 **AWS root certificate embedding:**
 - Download from `https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip`
 - Extract DER file, embed via `//go:embed certs/aws_nitro_root.der`
-- Verify SHA-256 fingerprint matches published value at build time
+- Verify the embedded DER's SHA-256 fingerprint against the published AWS value via a
+  unit test over the embedded bytes (not at runtime in the hot path). The fingerprint
+  check is an asset-integrity guard, ensuring the checked-in file hasn't been
+  corrupted or substituted. Do not hash the embedded root during request handling.
 - Reject chains where `cabundle[0]` is not byte-identical to embedded root
 
 **Test plan:**
-- Valid COSE_Sign1 round-trip: construct a self-signed test attestation doc with known
-  values, verify parsing extracts all fields correctly
-- Invalid signature: tamper with payload after signing, verify signature check fails
-- Invalid cert chain: use wrong root cert, verify chain validation fails
-- Expired certificate: use cert with NotAfter in the past
+- Embedded root integrity test: hash the `//go:embed` bytes of
+  `certs/aws_nitro_root.der` with `sha256.Sum256` and compare against the expected
+  published fingerprint. This is a unit test, not a build-time assertion or runtime
+  check.
+- Parsing round-trip: construct a synthetic/self-signed COSE_Sign1 test document with
+  known values and verify parsing extracts all fields correctly. This covers parsing
+  and field handling only, not a successful `VerifyNitroCertChain` path.
+- Positive cert-chain + signature verification: check in a captured real AWS Nitro
+  attestation fixture under `testdata/` whose `cabundle[0]` matches the embedded AWS
+  root by byte identity. Use this fixture to exercise `VerifyNitroCertChain` success
+  and full COSE signature verification success without weakening root pinning.
+- Invalid signature: tamper with the payload or signature bytes of the real fixture
+  after capture, verify signature check fails.
+- Invalid cert chain: use a synthetic/self-signed chain or mutate the fixture
+  `cabundle` so `cabundle[0]` is not the embedded AWS root, verify chain validation
+  fails closed.
+- Expired certificate: drive verification with a time after `NotAfter` against a real
+  Nitro fixture chain. Do not relax the root pin for this test.
+- Do **not** add a test-only bypass or alternate root for `VerifyNitroCertChain`;
+  tests must preserve the same pinned-root requirement as production.
 - Missing nonce: verify nonce check fails when nonce field is nil
 - Wrong nonce: verify nonce mismatch is detected
 - Debug mode: PCR0 all-zeros → `IsNitroDebugMode` returns true
@@ -1283,11 +1312,12 @@ type sessionEntry struct {
      enclave instance. Inside the singleflight callback:
      a. Re-check cache (another goroutine's singleflight may have just populated it)
      b. Create `e2ee.NewMapleAISession()`
-     c. Copy the 32-byte server public key from step 1 into the session. The key is
-        derived from `raw.SigningKey`, which was populated from the verified Nitro
-        attestation document's `public_key` field during `FetchAttestation`. There is
-        no second independent source of the key to compare against — the attestation
-        binding is established by COSE_Sign1 verification, not by a runtime comparison.
+     c. Store the 32-byte server public key from step 1 as the session's
+        `attestedKey`. This is the key authenticated by COSE_Sign1 verification
+        (populated from `NitroVerifyResult.PublicKey` → `RawAttestation.SigningKey`
+        during `FetchAttestation`). The session uses this key for ECDH and also
+        records the actual ECDH peer key separately so `tee_reportdata_binding`
+        can verify the match (see Implementation Implications §1 and §3).
      d. `POST {baseURL}/key_exchange` with `{"client_public_key": "<base64>", "nonce": "<uuid>"}`
      e. Parse response: `{"encrypted_session_key": "<base64>", "session_id": "<uuid>"}`
         (use `internal/jsonstrict` for parsing)
@@ -1313,23 +1343,28 @@ For the `tee_reportdata_binding` factor, MapleAI's binding is: the X25519 `publi
 in the verified attestation document is the same key used in the ECDH key exchange.
 
 Unlike TDX providers where REPORTDATA contains a hash of the signing key (requiring a
-runtime comparison between two independent values), the Nitro binding is structural:
-the `public_key` field is inside the COSE_Sign1-signed payload, so COSE_Sign1
-verification itself proves the key was placed there by the enclave hardware. The key
-flows from `VerifyNitroDocument` → `NitroVerifyResult.PublicKey` → `RawAttestation.SigningKey`
-→ `EncryptRequest` step 1 → ECDH. There is only one source of the key (the verified
-attestation document), so there are no two independent values to compare at runtime.
-The attestation-to-encryption binding is established by the COSE_Sign1 signature
-chain, not by a separate comparison step.
+runtime comparison between two independent values), the Nitro binding has a structural
+component: the `public_key` field is inside the COSE_Sign1-signed payload, so
+COSE_Sign1 verification itself proves the key was placed there by the enclave
+hardware. However, the factor must also verify that this attested key was actually the
+one used for ECDH session establishment — otherwise the factor would be equivalent to
+the weaker `signing_key_present` check.
+
+The `MapleAISession` records both the attested key (from `RawAttestation.SigningKey`)
+and the actual ECDH peer key used during `EstablishSession`. The session compares
+them via `subtle.ConstantTimeCompare` before marking the session usable (fail-closed
+on mismatch). This comparison is defense-in-depth against code-path bugs that could
+cause a different key to be used for ECDH than the one authenticated by attestation.
 
 The `ReportDataVerifier` interface (`VerifyReportData(reportData [64]byte, raw, nonce)`)
 doesn't fit Nitro (no TDX REPORTDATA). Options:
 
-- Implement a Nitro-specific verifier that returns Pass with detail "X25519 public_key
-  bound via COSE_Sign1 hardware signature" when `in.Nitro.PublicKey != nil &&
-  len(in.Nitro.PublicKey) == 32 && in.Nitro.SignatureValid`
+- Implement a Nitro-specific verifier that returns Pass with detail "Attested X25519
+  public key authenticated by COSE_Sign1 and matched to ECDH peer key" when
+  `in.Nitro.PublicKey != nil && len(in.Nitro.PublicKey) == 32 &&
+  in.Nitro.SignatureValid && in.Nitro.ECDHPeerKeyMatched`
 - Or: the `tee_reportdata_binding` evaluator handles Nitro directly by checking
-  `in.Nitro.PublicKey != nil && in.Nitro.SignatureValid`
+  these conditions
 
 **Default measurement policy (`policy.go`):**
 
