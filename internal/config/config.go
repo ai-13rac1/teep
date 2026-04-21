@@ -584,7 +584,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			case <-timer.C:
 			}
 			slog.WarnContext(req.Context(), "retrying after error",
-				"url", req.URL.String(), "attempt", attempt+1, "err", lastErr)
+				"host", req.URL.Host, "path", req.URL.Path, "attempt", attempt+1, "err", lastErr)
 			if req.GetBody != nil {
 				body, err := req.GetBody()
 				if err != nil {

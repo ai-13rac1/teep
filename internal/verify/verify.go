@@ -253,8 +253,7 @@ func saveCapture(
 		return runErr
 	}
 	if errMsg != "" {
-		slog.Info("capture saved on error", "dir", subdir,
-			"responses", len(recorder.Entries), "run_error", errMsg)
+		slog.Info("capture saved on error", "dir", subdir, "responses", len(recorder.Entries))
 	} else {
 		slog.Info("capture saved", "dir", subdir, "responses", len(recorder.Entries))
 	}
