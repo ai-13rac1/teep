@@ -612,6 +612,90 @@ func TestLoad_BadEntryJSON(t *testing.T) {
 	t.Logf("bad entry JSON error: %v", err)
 }
 
+func TestSaveAndLoad_Error(t *testing.T) {
+	dir := t.TempDir()
+
+	errMsg := "fetch attestation: connection refused"
+	m := &Manifest{
+		Provider:   "venice",
+		Model:      "test-model",
+		NonceHex:   "0000000000000000",
+		CapturedAt: time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC),
+		Error:      errMsg,
+	}
+
+	subdir, err := Save(dir, m, "Error: "+errMsg+"\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, _, err := Load(subdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("loaded Error: %q", loaded.Error)
+	if loaded.Error != errMsg {
+		t.Errorf("Error = %q, want %q", loaded.Error, errMsg)
+	}
+}
+
+func TestSaveAndLoad_E2EEType(t *testing.T) {
+	dir := t.TempDir()
+
+	m := &Manifest{
+		Provider:   "venice",
+		Model:      "test-model",
+		NonceHex:   "0000000000000000",
+		CapturedAt: time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC),
+		E2EE:       &E2EEOutcome{Attempted: true, KeyType: "ecdsa", Detail: "E2EE venice: 5 fields"},
+	}
+
+	subdir, err := Save(dir, m, "ok\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, _, err := Load(subdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("loaded E2EE: %+v", loaded.E2EE)
+	if loaded.E2EE == nil {
+		t.Fatal("E2EE should not be nil")
+	}
+	if loaded.E2EE.KeyType != "ecdsa" {
+		t.Errorf("E2EE.KeyType = %q, want %q", loaded.E2EE.KeyType, "ecdsa")
+	}
+}
+
+func TestSaveAndLoad_ErrorOmittedWhenEmpty(t *testing.T) {
+	// Manifests with no error should omit the field in JSON (omitempty),
+	// so older teep versions that lack the field can still load them.
+	dir := t.TempDir()
+
+	m := &Manifest{
+		Provider:   "venice",
+		Model:      "test-model",
+		NonceHex:   "0000000000000000",
+		CapturedAt: time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC),
+		// Error deliberately left empty.
+	}
+
+	subdir, err := Save(dir, m, "ok\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(subdir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("manifest JSON: %s", data)
+	if strings.Contains(string(data), `"error"`) {
+		t.Errorf("manifest JSON should omit 'error' field when empty, got: %s", data)
+	}
+}
+
 // roundTripFunc adapts a function to http.RoundTripper.
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

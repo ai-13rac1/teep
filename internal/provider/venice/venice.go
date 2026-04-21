@@ -192,7 +192,7 @@ func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
 	return &Attester{
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		client:  config.NewAttestationClient(offline...),
+		client:  config.NewAttestationClient(len(offline) > 0 && offline[0]),
 	}
 }
 

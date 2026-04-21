@@ -51,6 +51,7 @@ type E2EEOutcome struct {
 	Failed    bool   `json:"failed,omitempty"`
 	ErrMsg    string `json:"error,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	KeyType   string `json:"key_type,omitempty"`
 }
 
 // Manifest holds top-level metadata for a capture directory.
@@ -60,6 +61,9 @@ type Manifest struct {
 	NonceHex   string       `json:"nonce_hex"`
 	CapturedAt time.Time    `json:"captured_at"`
 	E2EE       *E2EEOutcome `json:"e2ee,omitempty"`
+	// Error is set when verification failed. May contain provider HTTP response
+	// fragments; treat capture directories as potentially sensitive.
+	Error string `json:"error,omitempty"`
 }
 
 // RecordingTransport wraps a base RoundTripper and records all request/response pairs.
@@ -69,7 +73,10 @@ type RecordingTransport struct {
 	Entries []RecordedEntry
 }
 
-// WrapRecording wraps base with a RecordingTransport.
+// WrapRecording wraps base with a RecordingTransport. It must be the outermost
+// transport in the chain (above RetryTransport) so only the final successful
+// response is recorded; intermediate retry attempts are invisible to the recorder.
+// base must be non-nil.
 func WrapRecording(base http.RoundTripper) *RecordingTransport {
 	return &RecordingTransport{Base: base}
 }
@@ -408,6 +415,14 @@ func hostSlug(rawURL string) string {
 	if path != "" {
 		slug += "_" + path
 	}
+	// Apply a filesystem-safe allowlist (extends slugify with '_' to preserve
+	// the path separators already replaced above).
+	slug = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(slug))
 	// Truncate to keep filenames reasonable.
 	if len(slug) > 80 {
 		slug = slug[:80]

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 )
 
@@ -389,10 +390,7 @@ func TestRun_EmptyRaw_NoTDX(t *testing.T) {
 	cp := cfg.Providers["venice"]
 
 	// Use a mock attester that returns minimal raw attestation.
-	ts := newMinimalAttestServer(t)
-	defer ts.Close()
-
-	replayClient := &http.Client{Transport: ts.Transport}
+	replayClient := &http.Client{Transport: minimalAttestTransport{}}
 
 	report, err := Run(context.Background(), &Options{
 		Config:       cfg,
@@ -422,10 +420,7 @@ func TestRun_EmptyRaw_WithCapture(t *testing.T) {
 	}
 	cp := cfg.Providers["venice"]
 
-	ts := newMinimalAttestServer(t)
-	defer ts.Close()
-
-	replayClient := &http.Client{Transport: ts.Transport}
+	replayClient := &http.Client{Transport: minimalAttestTransport{}}
 
 	captureDir := t.TempDir()
 	report, err := Run(context.Background(), &Options{
@@ -459,18 +454,6 @@ func (minimalAttestTransport) RoundTrip(_ *http.Request) (*http.Response, error)
 		Header:     make(http.Header),
 	}, nil
 }
-
-// newMinimalAttestServer creates a test HTTP server that returns minimal attestation JSON.
-type minimalAttestServerResult struct {
-	Transport http.RoundTripper
-}
-
-func newMinimalAttestServer(t *testing.T) *minimalAttestServerResult {
-	t.Helper()
-	return &minimalAttestServerResult{Transport: minimalAttestTransport{}}
-}
-
-func (s *minimalAttestServerResult) Close() {}
 
 // --------------------------------------------------------------------------
 // Replay error paths
@@ -523,5 +506,66 @@ func TestReplay_CfgLoaderError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "load config for replay") {
 		t.Errorf("error = %q, should mention 'load config for replay'", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Capture-on-failure: Run saves the capture dir even when fetch errors
+// --------------------------------------------------------------------------
+
+// failTransport always returns a network error.
+type failTransport struct{ err error }
+
+func (f failTransport) RoundTrip(_ *http.Request) (*http.Response, error) { return nil, f.err }
+
+func TestRun_CaptureOnFetchError(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]*config.Provider{
+			"venice": {Name: "venice", BaseURL: "http://test", APIKey: ""},
+		},
+	}
+	cp := cfg.Providers["venice"]
+
+	captureDir := t.TempDir()
+	report, err := Run(context.Background(), &Options{
+		Config:       cfg,
+		Provider:     cp,
+		ProviderName: "venice",
+		ModelName:    "test-model",
+		Offline:      true,
+		Client:       &http.Client{Transport: failTransport{err: errors.New("connection refused")}},
+		Nonce:        attestation.NewNonce(),
+		CaptureDir:   captureDir,
+	})
+	if err == nil {
+		t.Fatal("expected error from failing transport")
+	}
+	if report != nil {
+		t.Error("expected nil report on error")
+	}
+	t.Logf("Run error: %v", err)
+
+	// Capture directory must be created despite the failure.
+	subdirs, readErr := os.ReadDir(captureDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(subdirs) == 0 {
+		t.Fatal("expected capture subdirectory to be created on fetch failure")
+	}
+	subdir := filepath.Join(captureDir, subdirs[0].Name())
+	t.Logf("capture subdir: %s", subdir)
+
+	// Manifest must record the error.
+	m, _, loadErr := capture.Load(subdir)
+	if loadErr != nil {
+		t.Fatalf("capture.Load: %v", loadErr)
+	}
+	t.Logf("manifest.Error: %q", m.Error)
+	if m.Error == "" {
+		t.Error("manifest.Error should be non-empty on fetch failure")
+	}
+	if !strings.Contains(m.Error, "fetch attestation") {
+		t.Errorf("manifest.Error = %q, want mention of 'fetch attestation'", m.Error)
 	}
 }

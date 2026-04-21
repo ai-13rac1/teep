@@ -147,7 +147,7 @@ type Attester struct {
 func NewAttester(apiKey string, offline ...bool) *Attester {
 	return &Attester{
 		apiKey: apiKey,
-		client: config.NewAttestationClient(offline...),
+		client: config.NewAttestationClient(len(offline) > 0 && offline[0]),
 	}
 }
 

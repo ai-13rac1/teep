@@ -357,6 +357,42 @@ type E2EETestResult struct {
 	Err error
 	// Detail is a human-readable summary of the test outcome.
 	Detail string
+	// KeyType is the canonical E2EE key type derived from the attestation
+	// (e.g. "ecdsa", "ed25519", "ml-kem-768").
+	KeyType string
+}
+
+// knownSigningAlgos is the allowlist of canonical algorithm names that may
+// appear in RawAttestation.SigningAlgo. Values outside this set are reported
+// as "unknown" rather than passed through verbatim, since SigningAlgo is
+// provider-supplied and flows into on-disk manifests.
+var knownSigningAlgos = map[string]bool{
+	"ecdsa":      true,
+	"ed25519":    true,
+	"ml-kem-768": true,
+	"secp256k1":  true,
+}
+
+// E2EEKeyType returns the canonical E2EE key-type string for the attestation.
+// Returns "" when no signing key is present.
+// When SigningAlgo is absent, the type is inferred from key length as a
+// best-effort heuristic; this is informational only and must not be used for
+// security decisions.
+func (r *RawAttestation) E2EEKeyType() string {
+	if r.SigningKey == "" {
+		return ""
+	}
+	if r.SigningAlgo != "" {
+		if knownSigningAlgos[r.SigningAlgo] {
+			return r.SigningAlgo
+		}
+		return "unknown"
+	}
+	// Infer from key length as best-effort fallback (informational only).
+	if len(r.SigningKey) == 64 {
+		return "ed25519"
+	}
+	return "ecdsa"
 }
 
 // ComposeBindingResult holds the outcome of verifying the app_compose → MRConfigID binding.

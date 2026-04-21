@@ -43,7 +43,7 @@ type CfgLoader func(providerName string) (*config.Config, *config.Provider, erro
 // captured). When opts.Client is non-nil, it replaces the default attestation
 // client (used for replay). When opts.Nonce is non-zero, it replaces the
 // generated nonce.
-func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, error) {
+func Run(ctx context.Context, opts *Options) (report *attestation.VerificationReport, retErr error) {
 	cfg := opts.Config
 
 	attester, err := newAttester(opts.ProviderName, opts.Provider, opts.Offline)
@@ -55,14 +55,25 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 	if client == nil {
 		client = config.NewAttestationClient(opts.Offline)
 	}
+
+	nonce := opts.Nonce
+	if nonce == (attestation.Nonce{}) {
+		nonce = attestation.NewNonce()
+	}
+
 	// Wrap transport with recording when capturing. Shallow-copy the client so
 	// the caller's *http.Client is not mutated.
 	var recorder *capture.RecordingTransport
+	var e2eeResult *attestation.E2EETestResult
 	if opts.CaptureDir != "" {
 		recorder = capture.WrapRecording(client.Transport)
 		wrapped := *client
 		wrapped.Transport = recorder
 		client = &wrapped
+
+		defer func() {
+			retErr = saveCapture(ctx, opts, recorder, nonce, e2eeResult, report, retErr)
+		}()
 	}
 
 	// Build a per-call verifier so concurrent Run calls don't race on a global.
@@ -72,11 +83,6 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 	type clientSetter interface{ SetClient(*http.Client) }
 	if cs, ok := attester.(clientSetter); ok {
 		cs.SetClient(client)
-	}
-
-	nonce := opts.Nonce
-	if nonce == (attestation.Nonce{}) {
-		nonce = attestation.NewNonce()
 	}
 
 	slog.Debug("nonce generated", "provider", opts.ProviderName, "model", opts.ModelName, "nonce", nonce.Hex()[:16]+"...")
@@ -118,18 +124,20 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
 	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, client, opts.Offline)
 
-	var e2eeResult *attestation.E2EETestResult
 	if opts.CapturedE2EE != nil {
 		e2eeResult = opts.CapturedE2EE
 	} else {
 		e2eeResult = testE2EE(ctx, raw, opts.ProviderName, opts.Provider, opts.ModelName, opts.Offline)
+	}
+	if e2eeResult != nil && e2eeResult.KeyType == "" {
+		e2eeResult.KeyType = raw.E2EEKeyType()
 	}
 
 	mDefaults, gwDefaults := defaults.MeasurementDefaults(opts.ProviderName)
 	mergedPolicy := config.MergedMeasurementPolicy(opts.ProviderName, cfg, mDefaults)
 	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(opts.ProviderName, cfg, gwDefaults)
 
-	report := attestation.BuildReport(&attestation.ReportInput{
+	report = attestation.BuildReport(&attestation.ReportInput{
 		Provider:          opts.ProviderName,
 		Model:             opts.ModelName,
 		Raw:               raw,
@@ -156,28 +164,6 @@ func Run(ctx context.Context, opts *Options) (*attestation.VerificationReport, e
 		GatewayEventLog:   raw.GatewayEventLog,
 		E2EETest:          e2eeResult,
 	})
-
-	// Save capture after building report so report.txt is available.
-	if opts.CaptureDir != "" {
-		reportText := FormatReport(report)
-		subdir, saveErr := capture.Save(opts.CaptureDir, &capture.Manifest{
-			Provider:   opts.ProviderName,
-			Model:      opts.ModelName,
-			NonceHex:   nonce.Hex(),
-			CapturedAt: time.Now().UTC(),
-			E2EE:       outcomeFromE2EEResult(e2eeResult),
-		}, reportText, recorder.Entries)
-		if saveErr != nil {
-			return nil, fmt.Errorf("save capture: %w", saveErr)
-		}
-		slog.Info("capture saved", "dir", subdir, "responses", len(recorder.Entries))
-		cfgLoader := func(_ string) (*config.Config, *config.Provider, error) {
-			return opts.Config, opts.Provider, nil
-		}
-		if err := verifyCapture(ctx, subdir, reportText, cfgLoader); err != nil {
-			return nil, fmt.Errorf("capture self-check: %w", err)
-		}
-	}
 
 	return report, nil
 }
@@ -227,6 +213,61 @@ func Replay(ctx context.Context, captureDir string, cfgLoader CfgLoader) (report
 	}
 	reportText = FormatReport(report)
 	return report, reportText, nil
+}
+
+// saveCapture writes the capture to disk and returns the error to set as retErr.
+// It preserves a pre-existing run error over a save error so the caller always
+// sees the primary failure.
+func saveCapture(
+	ctx context.Context,
+	opts *Options,
+	recorder *capture.RecordingTransport,
+	nonce attestation.Nonce,
+	e2eeResult *attestation.E2EETestResult,
+	report *attestation.VerificationReport,
+	runErr error,
+) error {
+	reportText := ""
+	if report != nil {
+		reportText = FormatReport(report)
+	} else if runErr != nil {
+		reportText = "Error: " + runErr.Error() + "\n"
+	}
+	errMsg := ""
+	if runErr != nil {
+		errMsg = runErr.Error()
+	}
+	subdir, saveErr := capture.Save(opts.CaptureDir, &capture.Manifest{
+		Provider:   opts.ProviderName,
+		Model:      opts.ModelName,
+		NonceHex:   nonce.Hex(),
+		CapturedAt: time.Now().UTC(),
+		E2EE:       outcomeFromE2EEResult(e2eeResult),
+		Error:      errMsg,
+	}, reportText, recorder.Entries)
+	if saveErr != nil {
+		slog.Error("save capture failed", "err", saveErr)
+		if runErr == nil {
+			return fmt.Errorf("save capture: %w", saveErr)
+		}
+		return runErr
+	}
+	if errMsg != "" {
+		slog.Info("capture saved on error", "dir", subdir, "responses", len(recorder.Entries))
+	} else {
+		slog.Info("capture saved", "dir", subdir, "responses", len(recorder.Entries))
+	}
+	// Self-check only on success — partial captures can't round-trip.
+	if runErr != nil {
+		return runErr
+	}
+	cfgLoader := func(_ string) (*config.Config, *config.Provider, error) {
+		return opts.Config, opts.Provider, nil
+	}
+	if err := verifyCapture(ctx, subdir, reportText, cfgLoader); err != nil {
+		return fmt.Errorf("capture self-check: %w", err)
+	}
+	return nil
 }
 
 // verifyCapture loads a just-saved capture and re-verifies it to confirm the

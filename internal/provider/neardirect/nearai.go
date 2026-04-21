@@ -125,7 +125,7 @@ func NewAttesterWithResolver(baseURL, apiKey string, resolver DomainResolver, of
 	return &Attester{
 		baseURL:  baseURL,
 		apiKey:   apiKey,
-		client:   config.NewAttestationClient(offline...),
+		client:   config.NewAttestationClient(len(offline) > 0 && offline[0]),
 		resolver: resolver,
 	}
 }
