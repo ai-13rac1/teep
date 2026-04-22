@@ -555,7 +555,7 @@ func printOverview() {
 
 Usage:
   teep serve      PROVIDER [flags]                 Start the HTTP proxy server.
-  teep verify     PROVIDER --model M [flags]       Fetch and print attestation report.
+  teep verify     PROVIDER [flags]                 Fetch and print attestation report.
   teep self-check                                  Verify this binary's build provenance.
   teep version                                     Print version information.
   teep help       [topic]                          Show detailed help for a topic.
@@ -588,10 +588,10 @@ func printServeHelp() {
 	fmt.Print(`teep serve — Start the HTTP proxy server
 
 Usage:
-  teep serve PROVIDER [--offline] [--log-level LEVEL]
+  teep serve PROVIDER [flags]
 
-Arguments:
-  PROVIDER   Provider name (venice, neardirect, nearcloud, nanogpt, phalacloud, chutes).
+PROVIDER:
+  venice, neardirect, nearcloud, nanogpt, phalacloud, chutes
 
 The proxy intercepts OpenAI-compatible chat completion requests, performs TEE
 attestation verification against the upstream provider, and optionally enables
@@ -620,8 +620,8 @@ Example TOML:
   e2ee = true
 
 Flags:
-	--offline           Skip external verification (Intel PCS, Proof of Cloud,
-											Certificate Transparency).
+  --offline           Skip external verification (Intel PCS, Proof of Cloud,
+                      Certificate Transparency).
   --log-level LEVEL   Set log verbosity: debug, info, warn, error (default: info).
 `)
 }
@@ -633,8 +633,8 @@ func printVerifyHelp() {
 Usage:
   teep verify PROVIDER --model MODEL [flags]
 
-Arguments:
-  PROVIDER   Provider name (venice, neardirect, nearcloud, nanogpt, phalacloud, chutes).
+PROVIDER:
+  venice, neardirect, nearcloud, nanogpt, phalacloud, chutes
 
 Connects to the specified provider's attestation endpoint, fetches the TEE
 attestation for the given model, and runs all verification factors. The
