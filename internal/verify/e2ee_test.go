@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -610,4 +611,346 @@ func encryptChunkForTest(t *testing.T, plaintext, key []byte) []byte {
 	wire = append(wire, nonce...)
 	wire = append(wire, ct...)
 	return wire
+}
+
+// --------------------------------------------------------------------------
+// testE2EE switch — chutes dispatch path (L52-53)
+// --------------------------------------------------------------------------
+
+// TestTestE2EE_ChutesDispatch exercises the "chutes" case in the testE2EE
+// switch by supplying a valid signing key and API key but no instance_id, so
+// testE2EEChutes returns an error immediately after being called.
+func TestTestE2EE_ChutesDispatch(t *testing.T) {
+	t.Logf("testing chutes case in testE2EE switch (L52-53)")
+	raw := &attestation.RawAttestation{
+		SigningKey: "dGVzdA==",
+		InstanceID: "", // causes testE2EEChutes to fail fast
+	}
+	cp := &config.Provider{APIKey: "key", BaseURL: "https://example.com"}
+	got := testE2EE(context.Background(), raw, "chutes", cp, "model", false)
+	if got == nil {
+		t.Fatal("expected non-nil result from chutes dispatch")
+	}
+	if !got.Attempted {
+		t.Error("Attempted should be true")
+	}
+	if got.Err == nil {
+		t.Fatal("expected error for missing instance_id")
+	}
+	if !strings.Contains(got.Err.Error(), "instance_id") {
+		t.Errorf("error should mention instance_id, got: %v", got.Err)
+	}
+	t.Logf("chutes dispatch error: %v", got.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEStreamTest — JSON parse error (L393-398)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEStreamTest_JSONParseError exercises the JSON unmarshal error path
+// (L393-398) by serving an SSE line that is not valid JSON.
+func TestDoE2EEStreamTest_JSONParseError(t *testing.T) {
+	t.Logf("testing JSON parse error in doE2EEStreamTest (L393-398)")
+	sseBody := "data: not-valid-json\n\ndata: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEStreamTest(req, &mockDecryptor{encrypted: true}, "venice")
+	if result.Err == nil {
+		t.Fatal("expected error for invalid JSON SSE chunk")
+	}
+	t.Logf("JSON parse error: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEStreamTest — empty choices (L401-402)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEStreamTest_EmptyChoices exercises the empty-choices continue path
+// (L401-402): with no choices the chunk is skipped, encryptedCount stays 0,
+// and the function returns "no encrypted content" at the end.
+func TestDoE2EEStreamTest_EmptyChoices(t *testing.T) {
+	t.Logf("testing empty choices path in doE2EEStreamTest (L401-402)")
+	sseBody := `data: {"choices":[]}` + "\n\ndata: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEStreamTest(req, &mockDecryptor{encrypted: true}, "venice")
+	if result.Err == nil {
+		t.Fatal("expected error when all chunks have empty choices")
+	}
+	if !strings.Contains(result.Err.Error(), "no encrypted content") {
+		t.Errorf("error should mention 'no encrypted content', got: %v", result.Err)
+	}
+	t.Logf("empty choices result: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEStreamTest — nil delta (L406-407)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEStreamTest_NilDelta exercises the nil-delta continue path
+// (L406-407): with a null delta the chunk is skipped, encryptedCount stays 0,
+// and the function returns "no encrypted content" at the end.
+func TestDoE2EEStreamTest_NilDelta(t *testing.T) {
+	t.Logf("testing nil delta path in doE2EEStreamTest (L406-407)")
+	sseBody := `data: {"choices":[{"delta":null}]}` + "\n\ndata: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEStreamTest(req, &mockDecryptor{encrypted: true}, "venice")
+	if result.Err == nil {
+		t.Fatal("expected error when all chunks have null delta")
+	}
+	if !strings.Contains(result.Err.Error(), "no encrypted content") {
+		t.Errorf("error should mention 'no encrypted content', got: %v", result.Err)
+	}
+	t.Logf("nil delta result: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEStreamTest — non-map delta (L410-415)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEStreamTest_NonMapDelta exercises the non-map-delta error path
+// (L410-415): a delta that is a JSON number rather than an object causes the
+// map[string]any type assertion to fail.
+func TestDoE2EEStreamTest_NonMapDelta(t *testing.T) {
+	t.Logf("testing non-map delta path in doE2EEStreamTest (L410-415)")
+	sseBody := `data: {"choices":[{"delta":42}]}` + "\n\ndata: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEStreamTest(req, &mockDecryptor{encrypted: true}, "venice")
+	if result.Err == nil {
+		t.Fatal("expected error for non-map delta")
+	}
+	if !strings.Contains(result.Err.Error(), "delta") {
+		t.Errorf("error should mention 'delta', got: %v", result.Err)
+	}
+	t.Logf("non-map delta error: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEStreamTest — decrypt error (L432-437)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEStreamTest_DecryptError exercises the decrypt-failure path
+// (L432-437): IsEncryptedChunk returns true so the field is treated as
+// encrypted, but Decrypt returns an error.
+func TestDoE2EEStreamTest_DecryptError(t *testing.T) {
+	t.Logf("testing decrypt error path in doE2EEStreamTest (L432-437)")
+	chunk := `{"choices":[{"delta":{"content":"encrypted-data"},"index":0}]}`
+	sseBody := "data: " + chunk + "\n\ndata: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	dec := &mockDecryptor{
+		encrypted: true,
+		decryptFn: func(s string) ([]byte, error) {
+			return nil, errors.New("simulated decrypt failure")
+		},
+	}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEStreamTest(req, dec, "venice")
+	if result.Err == nil {
+		t.Fatal("expected error from decrypt failure")
+	}
+	if !strings.Contains(result.Err.Error(), "decrypt") {
+		t.Errorf("error should mention 'decrypt', got: %v", result.Err)
+	}
+	t.Logf("decrypt error: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEChutesStreamTest — no e2e_init event (L325-327)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEChutesStreamTest_NoE2EInitEvent exercises the missing-e2e_init
+// error path (L325-327): the stream ends with only [DONE], so streamKey stays
+// nil and the function returns "no e2e_init event received".
+func TestDoE2EEChutesStreamTest_NoE2EInitEvent(t *testing.T) {
+	t.Logf("testing no e2e_init event path in doE2EEChutesStreamTest (L325-327)")
+	sseBody := "data: [DONE]\n\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	session, err := e2ee.NewChutesSession()
+	if err != nil {
+		t.Fatalf("NewChutesSession: %v", err)
+	}
+	defer session.Zero()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEChutesStreamTest(req, session)
+	if result.Err == nil {
+		t.Fatal("expected error for missing e2e_init")
+	}
+	if !strings.Contains(result.Err.Error(), "no e2e_init event received") {
+		t.Errorf("error should mention 'no e2e_init event received', got: %v", result.Err)
+	}
+	t.Logf("no e2e_init error: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEChutesStreamTest — e2e_init received but no encrypted chunks (L328-330)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEChutesStreamTest_NoEncryptedChunks exercises the zero-decrypted-
+// chunks error path (L328-330): the stream has a valid e2e_init event but no
+// subsequent e2e events, so decryptedChunks stays 0.
+func TestDoE2EEChutesStreamTest_NoEncryptedChunks(t *testing.T) {
+	t.Logf("testing no encrypted chunks path in doE2EEChutesStreamTest (L328-330)")
+
+	// Build a session so we can produce a valid e2e_init event.
+	body, _ := json.Marshal(map[string]any{
+		"model":    "test-model",
+		"messages": []map[string]string{{"role": "user", "content": "Say hello"}},
+		"stream":   true,
+	})
+	// We need a real server ML-KEM key to encrypt against.
+	serverDecap, err := mlkem.GenerateKey768()
+	if err != nil {
+		t.Fatalf("generate ML-KEM key: %v", err)
+	}
+	serverPubB64 := base64.StdEncoding.EncodeToString(serverDecap.EncapsulationKey().Bytes())
+
+	_, session, err := e2ee.EncryptChatRequestChutes(body, serverPubB64)
+	if err != nil {
+		t.Fatalf("EncryptChatRequestChutes: %v", err)
+	}
+	defer session.Zero()
+
+	// Build a valid e2e_init using the client's public key.
+	clientPubBytes, _ := base64.StdEncoding.DecodeString(session.MLKEMClientPubKeyBase64())
+	clientEncapKey, err := mlkem.NewEncapsulationKey768(clientPubBytes)
+	if err != nil {
+		t.Fatalf("parse client encap key: %v", err)
+	}
+	_, kemCt := clientEncapKey.Encapsulate()
+	kemCtB64 := base64.StdEncoding.EncodeToString(kemCt)
+
+	initEvent, _ := json.Marshal(map[string]string{"e2e_init": kemCtB64})
+	// No e2e events — only the init and DONE.
+	sseBody := fmt.Sprintf("data: %s\n\ndata: [DONE]\n\n", initEvent)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEChutesStreamTest(req, session)
+	if result.Err == nil {
+		t.Fatal("expected error for no encrypted chunks")
+	}
+	if !strings.Contains(result.Err.Error(), "no encrypted chunks") {
+		t.Errorf("error should mention 'no encrypted chunks', got: %v", result.Err)
+	}
+	t.Logf("no encrypted chunks error: %v", result.Err)
+}
+
+// --------------------------------------------------------------------------
+// doE2EEChutesStreamTest — usage event path (L317-318)
+// --------------------------------------------------------------------------
+
+// TestDoE2EEChutesStreamTest_WithUsageEvent exercises the usage-event counter
+// path (L317-318): the stream includes a usage event alongside valid e2e_init
+// and e2e events, and the final detail string mentions the cleartext usage event.
+func TestDoE2EEChutesStreamTest_WithUsageEvent(t *testing.T) {
+	t.Logf("testing usage event path in doE2EEChutesStreamTest (L317-318)")
+
+	// Build a valid Chutes session.
+	serverDecap, err := mlkem.GenerateKey768()
+	if err != nil {
+		t.Fatalf("generate ML-KEM key: %v", err)
+	}
+	serverPubB64 := base64.StdEncoding.EncodeToString(serverDecap.EncapsulationKey().Bytes())
+
+	body, _ := json.Marshal(map[string]any{
+		"model":    "test-model",
+		"messages": []map[string]string{{"role": "user", "content": "Say hello"}},
+		"stream":   true,
+	})
+	_, session, err := e2ee.EncryptChatRequestChutes(body, serverPubB64)
+	if err != nil {
+		t.Fatalf("EncryptChatRequestChutes: %v", err)
+	}
+	defer session.Zero()
+
+	// Simulate the server encapsulating against the client's public key.
+	clientPubBytes, _ := base64.StdEncoding.DecodeString(session.MLKEMClientPubKeyBase64())
+	clientEncapKey, err := mlkem.NewEncapsulationKey768(clientPubBytes)
+	if err != nil {
+		t.Fatalf("parse client encap key: %v", err)
+	}
+	sharedSecret, kemCt := clientEncapKey.Encapsulate()
+	streamKey := deriveStreamKeyForTest(t, sharedSecret, kemCt)
+	kemCtB64 := base64.StdEncoding.EncodeToString(kemCt)
+
+	// Encrypt one chunk.
+	enc := encryptChunkForTest(t, []byte(`{"choices":[{"delta":{"content":"Hi"}}]}`), streamKey)
+
+	initEvent, _ := json.Marshal(map[string]string{"e2e_init": kemCtB64})
+	e2eEvent, _ := json.Marshal(map[string]string{"e2e": base64.StdEncoding.EncodeToString(enc)})
+	usageEvent, _ := json.Marshal(map[string]any{"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 3}})
+
+	sseBody := fmt.Sprintf("data: %s\n\ndata: %s\n\ndata: %s\n\ndata: [DONE]\n\n",
+		initEvent, e2eEvent, usageEvent)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sseBody))
+	}))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	result := doE2EEChutesStreamTest(req, session)
+	if result.Err != nil {
+		t.Fatalf("unexpected error: %v", result.Err)
+	}
+	if !result.Attempted {
+		t.Error("Attempted should be true")
+	}
+	if !strings.Contains(result.Detail, "usage events") {
+		t.Errorf("Detail should mention usage events, got: %s", result.Detail)
+	}
+	t.Logf("usage event result detail: %s", result.Detail)
 }

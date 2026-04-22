@@ -266,3 +266,14 @@ func TestUpdateConfigCreatesParentDir(t *testing.T) {
 		t.Errorf("parent dir permissions = %o, want 700", perm)
 	}
 }
+
+// TestUpdateConfigEmptyPath verifies that UpdateConfig with empty path writes
+// TOML to stdout (used by the --dry-run / no-file workflow).
+func TestUpdateConfigEmptyPath(t *testing.T) {
+	obs := ObservedMeasurements{MRSeam: strings.Repeat("ab", 48)}
+	err := UpdateConfig("", "venice", &obs)
+	t.Logf("UpdateConfig(empty path) error: %v", err)
+	if err != nil {
+		t.Errorf("UpdateConfig with empty path returned error: %v", err)
+	}
+}

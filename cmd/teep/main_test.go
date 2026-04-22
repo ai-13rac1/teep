@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -422,5 +423,141 @@ func TestVerifyArgsConflict_ProviderNoReverify(t *testing.T) {
 	err := verifyArgsConflict("", []string{"venice"})
 	if err != nil {
 		t.Errorf("expected no error for provider without --reverify, got: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// runSelfCheck / runVersion / printSelfCheckHelp smoke tests
+// --------------------------------------------------------------------------
+
+func TestRunSelfCheck_Runs(t *testing.T) {
+	// runSelfCheck reads BuildInfo from the test binary and prints a report.
+	// In test binaries vcs_revision is not embedded (ENFORCED → fails),
+	// so runSelfCheck returns errSilentExit. We verify it runs without panic
+	// and returns either nil or errSilentExit (not some unexpected error).
+	err := runSelfCheck()
+	t.Logf("runSelfCheck() error: %v", err)
+	if err != nil && !errors.Is(err, errSilentExit) {
+		t.Errorf("runSelfCheck returned unexpected error: %v", err)
+	}
+}
+
+func TestRunVersion_NoError(t *testing.T) {
+	err := runVersion()
+	t.Logf("runVersion() error: %v", err)
+	if err != nil {
+		t.Errorf("runVersion returned error: %v", err)
+	}
+}
+
+func TestPrintSelfCheckHelp_NoError(t *testing.T) {
+	// Just verify it doesn't panic.
+	printSelfCheckHelp()
+}
+
+// --------------------------------------------------------------------------
+// knownProviders tests
+// --------------------------------------------------------------------------
+
+func TestKnownProviders_Empty(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{}}
+	got := knownProviders(cfg)
+	t.Logf("knownProviders(empty) = %q", got)
+	if got != "" {
+		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+func TestKnownProviders_Single(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"venice": {Name: "venice"},
+	}}
+	got := knownProviders(cfg)
+	t.Logf("knownProviders(single) = %q", got)
+	if got != "venice" {
+		t.Errorf("got %q, want %q", got, "venice")
+	}
+}
+
+func TestKnownProviders_Sorted(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]*config.Provider{
+		"venice":     {Name: "venice"},
+		"neardirect": {Name: "neardirect"},
+		"nanogpt":    {Name: "nanogpt"},
+	}}
+	got := knownProviders(cfg)
+	t.Logf("knownProviders(sorted) = %q", got)
+	if got != "nanogpt, neardirect, venice" {
+		t.Errorf("got %q, want %q", got, "nanogpt, neardirect, venice")
+	}
+}
+
+// --------------------------------------------------------------------------
+// runReverify error path tests
+// --------------------------------------------------------------------------
+
+func TestRunReverify_MissingDir(t *testing.T) {
+	err := runReverify(context.Background(), "/nonexistent/capture/dir/xyz")
+	t.Logf("runReverify(missing dir) error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing capture directory")
+	}
+}
+
+func TestRunVerify_LoadConfigFails(t *testing.T) {
+	ctx := context.Background()
+	err := runVerify(ctx, "nonexistent-provider-xyz", "test-model", "", false, false, "")
+	t.Logf("runVerify(nonexistent provider): err=%v", err)
+	if err == nil {
+		t.Fatal("expected error when provider config not found")
+	}
+	if !strings.Contains(err.Error(), "verification failed") {
+		t.Errorf("error %q should mention 'verification failed'", err)
+	}
+}
+
+func TestLoadConfig_SuccessPath(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := dir + "/teep.toml"
+	content := `[providers.venice]
+base_url = "https://api.venice.ai"
+api_key = "test-key"
+`
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("TEEP_CONFIG", cfgFile)
+
+	cfg, cp, err := loadConfig("venice")
+	t.Logf("loadConfig(venice): cfg=%v cp=%v err=%v", cfg != nil, cp != nil, err)
+	if err != nil {
+		t.Fatalf("loadConfig(venice): unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Error("expected non-nil config")
+	}
+	if cp == nil {
+		t.Error("expected non-nil provider config")
+	}
+}
+
+// --------------------------------------------------------------------------
+// force_release.go — release-build no-op stubs
+// --------------------------------------------------------------------------
+
+func TestForceRelease_RegisterForceFlag_ReturnsNil(t *testing.T) {
+	flags := ff.NewFlagSet("test")
+	result := registerForceFlag(flags)
+	t.Logf("registerForceFlag: result=%v", result)
+	if result != nil {
+		t.Error("expected nil from registerForceFlag in release build")
+	}
+}
+
+func TestForceRelease_ForceValue_ReturnsFalse(t *testing.T) {
+	result := forceValue(nil)
+	t.Logf("forceValue: result=%v", result)
+	if result {
+		t.Error("expected false from forceValue in release build")
 	}
 }

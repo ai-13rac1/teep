@@ -921,3 +921,54 @@ func TestJSONBool_NonBoolValue(t *testing.T) {
 		t.Error("jsonBool non-bool value should return false")
 	}
 }
+
+// TestEvictOldestLocked verifies that evictOldestLocked removes the oldest
+// entry when the cache reaches maxJWKSInstances capacity.
+func TestEvictOldestLocked(t *testing.T) {
+	v := NewNVIDIAVerifier("http://nras.example.com", "http://jwks.example.com")
+
+	// Fill the cache to exactly maxJWKSInstances entries with distinct timestamps.
+	base := time.Now()
+	v.mu.Lock()
+	for i := range maxJWKSInstances {
+		url := fmt.Sprintf("http://example.com/jwks/%d", i)
+		v.cache[url] = &jwksEntry{createdAt: base.Add(time.Duration(i) * time.Second)}
+	}
+	v.mu.Unlock()
+
+	t.Logf("cache size before evict: %d (maxJWKSInstances=%d)", len(v.cache), maxJWKSInstances)
+	if len(v.cache) != maxJWKSInstances {
+		t.Fatalf("expected %d cache entries, got %d", maxJWKSInstances, len(v.cache))
+	}
+
+	// Call evictOldestLocked; oldest entry (index 0, earliest timestamp) should go.
+	v.mu.Lock()
+	v.evictOldestLocked()
+	v.mu.Unlock()
+
+	t.Logf("cache size after evict: %d", len(v.cache))
+	if len(v.cache) != maxJWKSInstances-1 {
+		t.Errorf("after eviction cache size = %d, want %d", len(v.cache), maxJWKSInstances-1)
+	}
+
+	// The oldest entry (index 0) should have been removed.
+	if _, ok := v.cache["http://example.com/jwks/0"]; ok {
+		t.Error("oldest cache entry (index 0) should have been evicted")
+	}
+}
+
+// TestEvictOldestLocked_BelowCap verifies that evictOldestLocked is a no-op
+// when the cache is below capacity.
+func TestEvictOldestLocked_BelowCap(t *testing.T) {
+	v := NewNVIDIAVerifier("http://nras.example.com", "http://jwks.example.com")
+	v.mu.Lock()
+	v.cache["http://example.com/jwks/1"] = &jwksEntry{createdAt: time.Now()}
+	v.evictOldestLocked() // should be a no-op: len(cache)=1 < maxJWKSInstances
+	size := len(v.cache)
+	v.mu.Unlock()
+
+	t.Logf("cache size after no-op evict: %d", size)
+	if size != 1 {
+		t.Errorf("cache size = %d, want 1 (eviction should be no-op below cap)", size)
+	}
+}

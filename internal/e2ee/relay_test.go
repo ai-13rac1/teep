@@ -1205,3 +1205,139 @@ func TestMergeToolCallDelta_ValidIndex(t *testing.T) {
 		t.Errorf("unexpected tool call: %+v", tc)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DecryptSSEChunk: malformed choices and delta parse errors
+// ---------------------------------------------------------------------------
+
+func TestDecryptSSEChunk_ChoicesNotArray(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices": "not-an-array", "id": "test"}`
+	t.Logf("input: %s", input)
+
+	_, err := DecryptSSEChunk(input, session)
+	if err == nil {
+		t.Fatal("expected error when choices is not an array")
+	}
+	if !strings.Contains(err.Error(), "parse choices array") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	t.Logf("got expected error: %v", err)
+}
+
+func TestDecryptSSEChunk_DeltaNotObject(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices":[{"delta":"not-an-object"}]}`
+	t.Logf("input: %s", input)
+
+	_, err := DecryptSSEChunk(input, session)
+	if err == nil {
+		t.Fatal("expected error when delta is not an object")
+	}
+	if !strings.Contains(err.Error(), "parse delta object") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	t.Logf("got expected error: %v", err)
+}
+
+// ---------------------------------------------------------------------------
+// decryptSSEChunkContent: targeted coverage of each error/early-return branch
+// ---------------------------------------------------------------------------
+
+func TestDecryptSSEChunkContent_InvalidJSON(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	t.Logf("calling decryptSSEChunkContent with invalid JSON")
+	_, err := decryptSSEChunkContent("not-valid-json", session)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "parse SSE chunk JSON") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	t.Logf("got expected error: %v", err)
+}
+
+func TestDecryptSSEChunkContent_NoChoicesKey(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	t.Logf("calling decryptSSEChunkContent with empty object (no choices key)")
+	result, err := decryptSSEChunkContent("{}", session)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %v", result)
+	}
+	t.Logf("got empty map as expected")
+}
+
+func TestDecryptSSEChunkContent_ChoicesNotArray(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices": 42}`
+	t.Logf("calling decryptSSEChunkContent with choices=42 (not an array)")
+	_, err := decryptSSEChunkContent(input, session)
+	if err == nil {
+		t.Fatal("expected error when choices is not an array")
+	}
+	if !strings.Contains(err.Error(), "parse choices array") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	t.Logf("got expected error: %v", err)
+}
+
+func TestDecryptSSEChunkContent_EmptyChoices(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices":[]}`
+	t.Logf("calling decryptSSEChunkContent with empty choices array")
+	result, err := decryptSSEChunkContent(input, session)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %v", result)
+	}
+	t.Logf("got empty map as expected")
+}
+
+func TestDecryptSSEChunkContent_NoDeltaKey(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices":[{}]}`
+	t.Logf("calling decryptSSEChunkContent with choices[0] missing delta key")
+	result, err := decryptSSEChunkContent(input, session)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %v", result)
+	}
+	t.Logf("got empty map as expected")
+}
+
+func TestDecryptSSEChunkContent_DeltaNotObject(t *testing.T) {
+	session := testVeniceSession(t)
+	defer session.Zero()
+
+	input := `{"choices":[{"delta":"not-an-object"}]}`
+	t.Logf("calling decryptSSEChunkContent with delta as a string (not an object)")
+	_, err := decryptSSEChunkContent(input, session)
+	if err == nil {
+		t.Fatal("expected error when delta is not an object")
+	}
+	if !strings.Contains(err.Error(), "parse delta object") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	t.Logf("got expected error: %v", err)
+}
