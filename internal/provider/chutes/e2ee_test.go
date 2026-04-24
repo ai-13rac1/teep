@@ -79,9 +79,15 @@ func TestChutesE2EE_EncryptRequest(t *testing.T) {
 	if len(encPayload) == 0 {
 		t.Fatal("encrypted payload is empty")
 	}
-	// Payload should be binary, not JSON.
-	if encPayload[0] == '{' || encPayload[0] == '[' {
-		t.Error("encrypted payload appears to be JSON, expected binary blob")
+	// Payload should be binary (ML-KEM-768 ct + ChaCha20 blob), not JSON.
+	// Check length rather than first byte — the first byte is random and
+	// happens to be '{' or '[' with probability ~1/128, causing flakes.
+	// ML-KEM-768 ct = 1088 bytes, nonce = 12, tag = 16; minimum > 1100.
+	if len(encPayload) < 1100 {
+		t.Errorf("encrypted payload too short (%d bytes), expected binary blob ≥1100", len(encPayload))
+	}
+	if json.Valid(encPayload) {
+		t.Error("encrypted payload is valid JSON, expected binary blob")
 	}
 }
 
