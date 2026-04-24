@@ -28,12 +28,14 @@ type dashboardProvider struct {
 }
 
 type dashboardRequests struct {
-	Total     int64 `json:"total"`
-	Streaming int64 `json:"streaming"`
-	NonStream int64 `json:"non_stream"`
-	E2EE      int64 `json:"e2ee"`
-	Plaintext int64 `json:"plaintext"`
-	Errors    int64 `json:"errors"`
+	Total         int64  `json:"total"`
+	Streaming     int64  `json:"streaming"`
+	NonStream     int64  `json:"non_stream"`
+	E2EE          int64  `json:"e2ee"`
+	Plaintext     int64  `json:"plaintext"`
+	Errors        int64  `json:"errors"`
+	LastRequestAt string `json:"last_request_at"`
+	LastSuccessAt string `json:"last_success_at"`
 }
 
 type dashboardCache struct {
@@ -62,6 +64,15 @@ func hitRateString(hits, misses int64) string {
 		return fmt.Sprintf("%.0f%%", float64(hits)/float64(total)*100)
 	}
 	return "—"
+}
+
+// nanoAgo converts a unix-nanosecond timestamp to a human-readable "Xs ago"
+// string, or "—" if the timestamp is zero (never recorded).
+func nanoAgo(ns int64) string {
+	if ns == 0 {
+		return "—"
+	}
+	return time.Since(time.Unix(0, ns)).Truncate(time.Second).String() + " ago"
 }
 
 func (s *Server) buildHTTPStats() dashboardHTTP {
@@ -127,12 +138,14 @@ func (s *Server) buildDashboardData() dashboardData {
 			E2EE:     e2eeStatus,
 		},
 		Requests: dashboardRequests{
-			Total:     s.stats.requests.Load(),
-			Streaming: s.stats.streaming.Load(),
-			NonStream: s.stats.nonStream.Load(),
-			E2EE:      s.stats.e2ee.Load(),
-			Plaintext: s.stats.plaintext.Load(),
-			Errors:    s.stats.errors.Load(),
+			Total:         s.stats.requests.Load(),
+			Streaming:     s.stats.streaming.Load(),
+			NonStream:     s.stats.nonStream.Load(),
+			E2EE:          s.stats.e2ee.Load(),
+			Plaintext:     s.stats.plaintext.Load(),
+			Errors:        s.stats.errors.Load(),
+			LastRequestAt: nanoAgo(s.stats.lastRequestAt.Load()),
+			LastSuccessAt: nanoAgo(s.stats.lastSuccessAt.Load()),
 		},
 		Cache: dashboardCache{
 			Entries:  s.cache.Len(),
@@ -336,6 +349,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
   <tr><th>Errors</th><td id="req-errors"></td></tr>
 </table>
 </div>
+<table style="margin-top:8px">
+  <tr><th>Last request</th><td id="req-last-request"></td></tr>
+  <tr><th>Last success</th><td id="req-last-success"></td></tr>
+</table>
 </section>
 
 <h2>Attestation Cache</h2>
@@ -397,6 +414,8 @@ function render(d) {
   var errors = document.getElementById("req-errors");
   errors.textContent = d.requests.errors;
   errors.className = d.requests.errors > 0 ? "text-red" : "";
+  document.getElementById("req-last-request").textContent = d.requests.last_request_at;
+  document.getElementById("req-last-success").textContent = d.requests.last_success_at;
   document.getElementById("cache-entries").textContent = d.cache.entries;
   document.getElementById("cache-negative").textContent = d.cache.negative;
   document.getElementById("cache-hitrate").textContent =
