@@ -433,6 +433,10 @@ func New(cfg *config.Config) (*Server, error) {
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral)
 
+	for _, factor := range cfg.AllowFail {
+		slog.Warn("security factor in global allow_fail; failures will not block requests", "factor", factor)
+	}
+
 	for name, cp := range cfg.Providers {
 		if cp == nil {
 			return nil, fmt.Errorf("provider %q: config is nil", name)
@@ -458,6 +462,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		s.providers[name] = p
 		slog.Info("registered provider", "provider", name, "base_url", cp.BaseURL, "api_key", config.RedactKey(cp.APIKey), "e2ee", cp.E2EE)
+		for _, factor := range cfg.ProviderAllowFail[name] {
+			slog.Warn("security factor in provider allow_fail; failures will not block requests", "provider", name, "factor", factor)
+		}
 	}
 
 	if len(s.providers) == 0 {
