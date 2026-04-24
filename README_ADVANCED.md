@@ -42,15 +42,52 @@ NEAR AI Cloud routes all traffic through a single TEE-attested API gateway (`clo
 4. Verifies the gateway's own TDX quote, event log, and compose binding (Tier 4 factors).
 5. Sends the chat request on the same verified connection.
 
-The gateway adds 8 additional verification factors (Tier 4) covering gateway nonce, TDX quote, debug mode, compose binding, sigstore verification, and event log integrity.
+The gateway adds 13 additional verification factors (Tier 4) covering gateway nonce, TDX quote, cert chain, debug mode, measurement allowlists, REPORTDATA binding, compose binding, CPU registry, and event log integrity.
+
+### NanoGPT (TLS, dStack Format)
+
+NanoGPT runs inference nodes using the dStack TEE framework. The proxy:
+
+1. Fetches attestation in dStack format. NanoGPT uses `signing_public_key` (not `signing_key`) and allows the event log to be either a JSON array or a JSON-encoded string (`eventLogFlexible`).
+2. Verifies the TDX quote and event log against the dStack measurement policy.
+3. Forwards the request over a standard TLS connection.
+
+There is no E2EE and no explicit REPORTDATA binding for the TLS key — channel security relies on TLS alone.
+
+### Chutes (E2EE, Multi-Instance, ML-KEM-768)
+
+Chutes runs multiple confidential compute instances per model. The proxy uses a two-step protocol:
+
+1. **Discovery**: `GET /e2e/instances/{chute}` returns a list of available instances, each with an ML-KEM-768 public key and a one-time nonce.
+2. **Evidence**: `GET /chutes/{chute}/evidence?nonce={hex}` returns the TDX quote and optional GPU evidence for the selected instance.
+3. Verifies the TDX quote and REPORTDATA binding: `sha256(nonce_hex + e2e_pubkey_base64)` is placed in REPORTDATA.
+4. Performs ML-KEM-768 key encapsulation to derive a shared secret.
+5. Encrypts the request body with ChaCha20-Poly1305.
+6. Decrypts the streaming response with the same shared secret.
+
+Nonces are managed by a pool per instance to avoid repeated evidence fetches on every request. Failed instances are tracked for failover across the multi-instance deployment.
+
+### Phala Cloud (Format-Agnostic Gateway)
+
+Phala Cloud's RedPill gateway accepts traffic destined for multiple underlying TEE backends and returns attestation in the backend's native format. The proxy:
+
+1. Sends a request to `api.redpill.ai/v1`.
+2. Receives an attestation response and inspects the JSON keys to determine the backend format: Chutes (`attestation_type`) or dStack (`intel_quote`).
+3. Delegates parsing and verification to the appropriate backend handler.
+4. Uses a 120-second timeout to accommodate multi-instance attestation latency.
+
+Channel security depends on the detected backend. Chutes backends use ML-KEM-768 E2EE; dStack backends use TLS only.
 
 ## Provider Comparison
 
 | Provider | Attestation | Channel Security | REPORTDATA Binding |
-|----------|-------------|-----------------|-------------------|
-| Venice AI | TDX + NVIDIA | E2EE (ECDH + AES-256-GCM) | `keccak256(enclave_pubkey)` + nonce |
+|----------|-------------|------------------|--------------------|
+| Venice AI | TDX + NVIDIA | E2EE (secp256k1 ECDH + AES-256-GCM) | `keccak256(enclave_pubkey)` + nonce |
 | NEAR AI Direct | TDX + NVIDIA | TLS pinning (model subdomain) | `sha256(signing_address ‖ tls_fingerprint)` + nonce |
 | NEAR AI Cloud | TDX + NVIDIA | TLS pinning (gateway) | `sha256(signing_address ‖ tls_fingerprint)` + nonce |
+| NanoGPT | TDX (dStack) | TLS only | None (dStack format) |
+| Chutes | TDX + GPU evidence | E2EE (ML-KEM-768 + ChaCha20-Poly1305) | `sha256(nonce_hex + e2e_pubkey_base64)` |
+| Phala Cloud | Backend-dependent | Backend-dependent | Backend-dependent |
 
 ## Verification Factor Reference
 
@@ -94,6 +131,26 @@ Each factor produces PASS, FAIL, or SKIP. Factors marked `[ENFORCED]` cause the 
 | 22 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID (encoded as `0x01 + sha256`). Binds the docker-compose deployment manifest to hardware attestation. |
 | 23 | `sigstore_verification` | Container image sha256 digests from docker-compose found in Sigstore transparency log. Proves verifiable CI/CD provenance. |
 | 24 | `event_log_integrity` | TDX event log replayed: `RTMR_new = SHA384(RTMR_old ‖ digest)` starting from 48 zero bytes. All 4 replayed RTMRs match quote. Proves the log is authentic and complete. |
+
+### Tier 4: Gateway Attestation (nearcloud only)
+
+Verifies the TEE gateway itself (`cloud-api.near.ai`), in addition to the model inference node.
+
+| # | Factor | Description |
+|---|--------|-------------|
+| 25 | `gateway_nonce_match` | Gateway `request_nonce` matches the client nonce. Prevents replay attacks against the gateway. |
+| 26 | `gateway_tdx_quote_present` | Gateway TDX quote is present in the attestation response. |
+| 27 | `gateway_tdx_quote_structure` | Gateway TDX quote parses as valid QuoteV4. |
+| 28 | `gateway_tdx_cert_chain` | Gateway certificate chain verifies against Intel SGX/TDX root CA. |
+| 29 | `gateway_tdx_quote_signature` | ECDSA signature over the gateway TDX quote body is valid. |
+| 30 | `gateway_tdx_debug_disabled` | Gateway TD_ATTRIBUTES debug bit is 0 (production enclave). |
+| 31 | `gateway_tdx_mrseam_mrtd` | Gateway MRTD and MRSEAM match configured measurement policy allowlists. |
+| 32 | `gateway_tdx_hardware_config` | Gateway RTMR[0] matches the hardware config allowlist. |
+| 33 | `gateway_tdx_boot_config` | Gateway RTMR[1] and RTMR[2] match the boot config allowlists. |
+| 34 | `gateway_tdx_reportdata_binding` | Gateway REPORTDATA binds `sha256(signing_address ‖ tls_fingerprint)` — same scheme as NEAR AI Direct. |
+| 35 | `gateway_compose_binding` | Gateway `sha256(app_compose)` matches TDX MRConfigID. |
+| 36 | `gateway_cpu_id_registry` | Gateway CPU PPID verified against the Proof of Cloud registry. |
+| 37 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match the gateway TDX quote. |
 
 ## TOML Configuration
 

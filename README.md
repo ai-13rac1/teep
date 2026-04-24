@@ -8,7 +8,7 @@
 
 When you send a prompt to an AI API, the provider can see everything: your questions, your data, the responses. Teep changes that. It's a local proxy that cryptographically proves the AI model is running inside tamper-proof hardware (a Trusted Execution Environment), then encrypts your conversation so only that hardware can read it.
 
-Teep also scores each provider against a 24-point checklist covering hardware authenticity, encryption strength, and supply-chain integrity — so you can see exactly where the security guarantees hold and where they don't.
+Teep also scores each provider against a verification checklist — 24 standard factors covering hardware authenticity, encryption strength, and supply-chain integrity, plus 13 gateway-layer factors for providers that run an attested gateway — so you can see exactly where the security guarantees hold and where they don't.
 
 ```
 Client (any OpenAI SDK) ──► localhost:8337 (teep)
@@ -41,6 +41,14 @@ teep serve nearcloud
 # NanoGPT
 export NANOGPT_API_KEY="your-key-here"
 teep serve nanogpt
+
+# Chutes
+export CHUTES_API_KEY="your-key-here"
+teep serve chutes
+
+# Phala Cloud
+export PHALA_API_KEY="your-key-here"
+teep serve phalacloud
 ```
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8337`:
@@ -194,6 +202,33 @@ Is the software what it claims to be? These checks verify container provenance, 
 
 </details>
 
+### Tier 4: Gateway Attestation
+
+Available only for providers that route traffic through an independently-attested TEE
+gateway (currently `nearcloud`). These factors verify the gateway itself, in addition
+to the model inference node.
+
+<details>
+<summary>13 factors</summary>
+
+| # | Factor | Description |
+|---|--------|-------------|
+| 25 | `gateway_nonce_match` | Gateway request nonce matches the client nonce |
+| 26 | `gateway_tdx_quote_present` | Gateway TDX quote is present |
+| 27 | `gateway_tdx_quote_structure` | Gateway TDX quote parses as valid QuoteV4 |
+| 28 | `gateway_tdx_cert_chain` | Gateway cert chain verifies against Intel root CA |
+| 29 | `gateway_tdx_quote_signature` | Gateway quote signature valid |
+| 30 | `gateway_tdx_debug_disabled` | Gateway debug bit is 0 (production enclave) |
+| 31 | `gateway_tdx_mrseam_mrtd` | Gateway MRTD and MRSEAM match measurement policy allowlists |
+| 32 | `gateway_tdx_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
+| 33 | `gateway_tdx_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists |
+| 34 | `gateway_tdx_reportdata_binding` | Gateway REPORTDATA binding verified |
+| 35 | `gateway_compose_binding` | Gateway sha256(app_compose) matches TDX MRConfigID |
+| 36 | `gateway_cpu_id_registry` | Gateway CPU PPID verified in Proof of Cloud registry |
+| 37 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match quote |
+
+</details>
+
 For full factor descriptions, run `teep help factors` or see [README_ADVANCED.md](README_ADVANCED.md).
 
 ## Supported Providers
@@ -204,6 +239,8 @@ For full factor descriptions, run `teep help factors` or see [README_ADVANCED.md
 | [NEAR AI Direct](https://near.ai) | TLS connection pinning to model-specific TEE nodes |
 | [NEAR AI Cloud](https://near.ai) | TLS connection pinning through TEE-attested gateway |
 | [NanoGPT](https://nano-gpt.com) | TEE attestation with Intel TDX + NVIDIA GPU |
+| [Chutes](https://chutes.ai) | End-to-end encryption (ML-KEM-768 + ChaCha20-Poly1305) with multi-instance failover |
+| [Phala Cloud](https://phala.network) | Format-agnostic gateway supporting Chutes and dStack attestation backends |
 
 See [README_ADVANCED.md](README_ADVANCED.md) for cryptographic details (ECDH key exchange, REPORTDATA binding schemes, SPKI pinning).
 
