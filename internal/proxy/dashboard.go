@@ -28,12 +28,14 @@ type dashboardProvider struct {
 }
 
 type dashboardRequests struct {
-	Total     int64 `json:"total"`
-	Streaming int64 `json:"streaming"`
-	NonStream int64 `json:"non_stream"`
-	E2EE      int64 `json:"e2ee"`
-	Plaintext int64 `json:"plaintext"`
-	Errors    int64 `json:"errors"`
+	Total         int64  `json:"total"`
+	Streaming     int64  `json:"streaming"`
+	NonStream     int64  `json:"non_stream"`
+	E2EE          int64  `json:"e2ee"`
+	Plaintext     int64  `json:"plaintext"`
+	Errors        int64  `json:"errors"`
+	LastRequestAt string `json:"last_request_at"`
+	LastSuccessAt string `json:"last_success_at"`
 }
 
 type dashboardCache struct {
@@ -62,6 +64,15 @@ func hitRateString(hits, misses int64) string {
 		return fmt.Sprintf("%.0f%%", float64(hits)/float64(total)*100)
 	}
 	return "—"
+}
+
+// nanoAgo converts a unix-nanosecond timestamp to a human-readable "Xs ago"
+// string, or "—" if the timestamp is zero (never recorded).
+func nanoAgo(ns int64) string {
+	if ns == 0 {
+		return "—"
+	}
+	return time.Since(time.Unix(0, ns)).Truncate(time.Second).String() + " ago"
 }
 
 func (s *Server) buildHTTPStats() dashboardHTTP {
@@ -127,12 +138,14 @@ func (s *Server) buildDashboardData() dashboardData {
 			E2EE:     e2eeStatus,
 		},
 		Requests: dashboardRequests{
-			Total:     s.stats.requests.Load(),
-			Streaming: s.stats.streaming.Load(),
-			NonStream: s.stats.nonStream.Load(),
-			E2EE:      s.stats.e2ee.Load(),
-			Plaintext: s.stats.plaintext.Load(),
-			Errors:    s.stats.errors.Load(),
+			Total:         s.stats.requests.Load(),
+			Streaming:     s.stats.streaming.Load(),
+			NonStream:     s.stats.nonStream.Load(),
+			E2EE:          s.stats.e2ee.Load(),
+			Plaintext:     s.stats.plaintext.Load(),
+			Errors:        s.stats.errors.Load(),
+			LastRequestAt: nanoAgo(s.stats.lastRequestAt.Load()),
+			LastSuccessAt: nanoAgo(s.stats.lastSuccessAt.Load()),
 		},
 		Cache: dashboardCache{
 			Entries:  s.cache.Len(),
@@ -143,6 +156,42 @@ func (s *Server) buildDashboardData() dashboardData {
 		},
 		HTTP:   s.buildHTTPStats(),
 		Models: models,
+	}
+}
+
+// handleHealth returns a JSON health snapshot for process managers and monitoring.
+// The endpoint always returns 200; the presence of last_request_at (non-null)
+// tells an automated monitor that the proxy is actively processing requests.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	type healthResponse struct {
+		Status        string  `json:"status"`
+		UptimeSeconds float64 `json:"uptime_seconds"`
+		LastRequestAt *string `json:"last_request_at"`
+		LastSuccessAt *string `json:"last_success_at"`
+		RequestsTotal int64   `json:"requests_total"`
+		ErrorsTotal   int64   `json:"errors_total"`
+	}
+
+	nanoToPtr := func(ns int64) *string {
+		if ns == 0 {
+			return nil
+		}
+		t := time.Unix(0, ns).UTC().Format(time.RFC3339)
+		return &t
+	}
+
+	resp := healthResponse{
+		Status:        "ok",
+		UptimeSeconds: time.Since(s.stats.startTime).Seconds(),
+		LastRequestAt: nanoToPtr(s.stats.lastRequestAt.Load()),
+		LastSuccessAt: nanoToPtr(s.stats.lastSuccessAt.Load()),
+		RequestsTotal: s.stats.requests.Load(),
+		ErrorsTotal:   s.stats.errors.Load(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.ErrorContext(r.Context(), "health encode", "err", err)
 	}
 }
 
@@ -300,6 +349,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
   <tr><th>Errors</th><td id="req-errors"></td></tr>
 </table>
 </div>
+<table style="margin-top:8px">
+  <tr><th>Last request</th><td id="req-last-request"></td></tr>
+  <tr><th>Last success</th><td id="req-last-success"></td></tr>
+</table>
 </section>
 
 <h2>Attestation Cache</h2>
@@ -361,6 +414,8 @@ function render(d) {
   var errors = document.getElementById("req-errors");
   errors.textContent = d.requests.errors;
   errors.className = d.requests.errors > 0 ? "text-red" : "";
+  document.getElementById("req-last-request").textContent = d.requests.last_request_at;
+  document.getElementById("req-last-success").textContent = d.requests.last_success_at;
   document.getElementById("cache-entries").textContent = d.cache.entries;
   document.getElementById("cache-negative").textContent = d.cache.negative;
   document.getElementById("cache-hitrate").textContent =
