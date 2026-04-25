@@ -406,7 +406,7 @@ All of these should run under the repository's race-enabled workflow.
 
 ## 7. Implementation Plan
 
-### 7.1 Phase 1: Remove the single-provider serve contract
+### 7.1 Phase 1: Remove the single-provider serve contract ✅ Done
 
 ### Objective
 
@@ -436,7 +436,7 @@ A provider is active in serve mode if and only if its resolved `APIKey` is non-e
 
 ---
 
-## Phase 2: Define deterministic aggregated `/v1/models`
+## Phase 2: Define deterministic aggregated `/v1/models` ✅ Done
 
 ### Objective
 
@@ -470,7 +470,7 @@ Reason:
 
 ---
 
-## Phase 3: Replace `resolveModel()` with strict prefix parsing
+## Phase 3: Replace `resolveModel()` with strict prefix parsing ✅ Done
 
 ### Objective
 
@@ -513,7 +513,7 @@ This is not a locking change. It is a deterministic lookup over immutable state.
 
 ---
 
-## Phase 4: Add request normalization and body rewriting
+## Phase 4: Add request normalization and body rewriting ✅ Done
 
 ### Objective
 

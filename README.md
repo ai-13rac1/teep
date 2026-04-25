@@ -34,41 +34,35 @@ Binary releases coming soon. For now, requires Go 1.23+.
 # Install
 go install github.com/13rac1/teep/cmd/teep@latest
 
-# Venice AI
+# Set API keys for whichever providers you want to use
 export VENICE_API_KEY="your-key-here"
-teep serve venice
-
-# NEAR AI (direct to inference nodes)
 export NEARAI_API_KEY="your-key-here"
-teep serve neardirect
-
-# NEAR AI (via cloud gateway)
-export NEARAI_API_KEY="your-key-here"
-teep serve nearcloud
-
-# NanoGPT
-export NANOGPT_API_KEY="your-key-here"
-teep serve nanogpt
-
-# Chutes
 export CHUTES_API_KEY="your-key-here"
-teep serve chutes
 
-# Phala Cloud
-export PHALA_API_KEY="your-key-here"
-teep serve phalacloud
+# Start the proxy — all providers with a configured key are active simultaneously
+teep serve
 ```
 
-Point any OpenAI-compatible client at `http://127.0.0.1:8337`:
+Query `/v1/models` to see all available `provider:model` combinations:
+
+```bash
+curl http://127.0.0.1:8337/v1/models | jq '.data[].id'
+# "venice:e2ee-qwen3-5-122b-a10b"
+# "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct"
+# "chutes:deepseek-ai/DeepSeek-V3-0324-TEE"
+# ...
+```
+
+Point any OpenAI-compatible client at `http://127.0.0.1:8337` and use the `provider:model` format:
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8337/v1", api_key="unused")
 resp = client.chat.completions.create(
-    model="e2ee-qwen3-5-122b-a10b",  # Venice
-    # model="qwen3-235b-a22b",       # NEAR AI
-    # model="TEE/llama-3.3-70b-instruct",  # NanoGPT
+    model="venice:e2ee-qwen3-5-122b-a10b",
+    # model="neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct",
+    # model="chutes:deepseek-ai/DeepSeek-V3-0324-TEE",
     messages=[{"role": "user", "content": "Hello from a TEE"}],
 )
 print(resp.choices[0].message.content)

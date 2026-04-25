@@ -5,6 +5,13 @@
 #
 # API keys are resolved from environment variables (api_key_env) or can be
 # set directly (api_key). Environment variables take precedence.
+#
+# Multi-provider serve mode:
+#   teep serve
+#   All providers with a resolved API key are active simultaneously.
+#   Clients must use the provider:model format (e.g. venice:qwen3-5b,
+#   neardirect:Qwen/Qwen3-VL-30B, nearcloud:black-forest-labs/FLUX.2-klein-4B).
+#   Query GET /v1/models to see all available provider:model combinations.
 
 # ---------------------------------------------------------------------------
 # Provider Definitions
