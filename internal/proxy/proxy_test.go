@@ -3203,7 +3203,7 @@ func TestHandleEvents(t *testing.T) {
 			}
 			t.Logf("SSE payload keys: %v", keys(obj))
 			// Expect dashboard data fields.
-			for _, key := range []string{"listen_addr", "uptime", "provider", "requests", "cache", "models"} {
+			for _, key := range []string{"listen_addr", "uptime", "providers", "requests", "cache", "models"} {
 				if _, ok := obj[key]; !ok {
 					t.Errorf("SSE payload missing key %q", key)
 				}

@@ -554,7 +554,7 @@ func printOverview() {
 	fmt.Print(`teep — TEE attestation verifier and E2EE proxy for AI providers
 
 Usage:
-  teep serve      PROVIDER [flags]                 Start the HTTP proxy server.
+  teep serve      [flags]                          Start the HTTP proxy server.
   teep verify     PROVIDER [flags]                 Fetch and print attestation report.
   teep self-check                                  Verify this binary's build provenance.
   teep version                                     Print version information.
@@ -588,36 +588,41 @@ func printServeHelp() {
 	fmt.Print(`teep serve — Start the HTTP proxy server
 
 Usage:
-  teep serve PROVIDER [flags]
+  teep serve [flags]
 
-PROVIDER:
-  venice, neardirect, nearcloud, nanogpt, phalacloud, chutes
-
-The proxy intercepts OpenAI-compatible chat completion requests, performs TEE
-attestation verification against the upstream provider, and optionally enables
-end-to-end encryption (E2EE) when the attestation passes.
+The proxy activates every provider whose API key is configured (via TOML or
+environment variable). Supported providers: venice, neardirect, nearcloud,
+nanogpt, phalacloud, chutes. All active providers are served simultaneously
+from a single proxy instance.
 
 Clients send requests to http://127.0.0.1:8337/v1/chat/completions (or the
 address set by TEEP_LISTEN_ADDR) using the same format as the OpenAI API.
+Model names must include the provider prefix: provider:model
+
+  venice:e2ee-qwen3-5-122b-a10b
+  neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct
+  chutes:deepseek-ai/DeepSeek-V3-0324-TEE
 
 The proxy:
-  1. Parses the model name to determine the upstream provider.
+  1. Parses the model prefix to determine the upstream provider.
   2. Fetches and verifies TEE attestation for the provider.
   3. Caches passing attestation reports (TTL configurable).
   4. If E2EE is supported and attestation passes, encrypts the request
      body and decrypts the response using ECIES with the enclave's
      attested enclave public key.
-  5. Forwards the request to the provider's API endpoint.
+  5. Strips the provider prefix and forwards the request to the provider.
 
 Configuration is loaded from the TOML file at $TEEP_CONFIG. Each provider
-section specifies the base URL, API key, model mappings, and whether E2EE
-is enabled.
+section specifies the base URL, API key, and whether E2EE is enabled.
 
 Example TOML:
   [providers.venice]
   base_url = "https://api.venice.ai"
   api_key_env = "VENICE_API_KEY"
   e2ee = true
+
+  [providers.chutes]
+  api_key_env = "CHUTES_API_KEY"
 
 Flags:
   --offline           Skip external verification (Intel PCS, Proof of Cloud,

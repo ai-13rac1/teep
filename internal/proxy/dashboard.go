@@ -12,17 +12,16 @@ import (
 // dashboardData is the JSON-serializable snapshot of all dashboard stats.
 // Used by both the initial page render and the SSE /events endpoint.
 type dashboardData struct {
-	ListenAddr string               `json:"listen_addr"`
-	Uptime     string               `json:"uptime"`
-	Provider   dashboardProvider    `json:"provider"`
-	Requests   dashboardRequests    `json:"requests"`
-	Cache      dashboardCache       `json:"cache"`
-	HTTP       dashboardHTTP        `json:"http"`
-	Models     map[string]dashModel `json:"models"`
+	ListenAddr string                       `json:"listen_addr"`
+	Uptime     string                       `json:"uptime"`
+	Providers  map[string]dashboardProvider `json:"providers"`
+	Requests   dashboardRequests            `json:"requests"`
+	Cache      dashboardCache               `json:"cache"`
+	HTTP       dashboardHTTP                `json:"http"`
+	Models     map[string]dashModel         `json:"models"`
 }
 
 type dashboardProvider struct {
-	Name     string `json:"name"`
 	Upstream string `json:"upstream"`
 	E2EE     string `json:"e2ee"`
 }
@@ -83,14 +82,15 @@ func (s *Server) buildHTTPStats() dashboardHTTP {
 }
 
 func (s *Server) buildDashboardData() dashboardData {
-	var provName, baseURL, e2eeStatus string
+	providers := make(map[string]dashboardProvider, len(s.providers))
 	for name, p := range s.providers {
-		provName = name
-		baseURL = p.BaseURL
+		e2eeStatus := "disabled"
 		if p.E2EE {
 			e2eeStatus = "enabled"
-		} else {
-			e2eeStatus = "disabled"
+		}
+		providers[name] = dashboardProvider{
+			Upstream: p.BaseURL,
+			E2EE:     e2eeStatus,
 		}
 	}
 
@@ -132,11 +132,7 @@ func (s *Server) buildDashboardData() dashboardData {
 	return dashboardData{
 		ListenAddr: s.cfg.ListenAddr,
 		Uptime:     time.Since(s.stats.startTime).Truncate(time.Second).String(),
-		Provider: dashboardProvider{
-			Name:     provName,
-			Upstream: baseURL,
-			E2EE:     e2eeStatus,
-		},
+		Providers:  providers,
 		Requests: dashboardRequests{
 			Total:         s.stats.requests.Load(),
 			Streaming:     s.stats.streaming.Load(),
@@ -326,12 +322,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 <h1>teep</h1>
 <p class="subtitle">TEE attestation proxy on <code id="listen-addr"></code> &mdash; up <span id="uptime"></span></p>
 
-<h2>Provider</h2>
+<h2>Providers</h2>
 <section>
-<table>
-  <tr><th>Name</th><td id="prov-name"></td></tr>
-  <tr><th>Upstream</th><td id="prov-upstream"></td></tr>
-  <tr><th>E2EE</th><td id="prov-e2ee"></td></tr>
+<table class="model-table">
+  <tr><th>Name</th><th>Upstream</th><th>E2EE</th></tr>
+  <tbody id="prov-rows"></tbody>
 </table>
 </section>
 
@@ -401,11 +396,17 @@ function esc(s) {
 function render(d) {
   document.getElementById("listen-addr").textContent = d.listen_addr;
   document.getElementById("uptime").textContent = d.uptime;
-  document.getElementById("prov-name").textContent = d.provider.name;
-  document.getElementById("prov-upstream").textContent = d.provider.upstream;
-  var e2ee = document.getElementById("prov-e2ee");
-  e2ee.textContent = d.provider.e2ee;
-  e2ee.className = d.provider.e2ee === "enabled" ? "text-green" : "text-red";
+  var provRows = document.getElementById("prov-rows");
+  provRows.innerHTML = "";
+  var provNames = Object.keys(d.providers).sort();
+  for (var i = 0; i < provNames.length; i++) {
+    var pname = provNames[i];
+    var p = d.providers[pname];
+    var e2eeClass = p.e2ee === "enabled" ? "text-green" : "text-red";
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(pname) + "</td><td>" + esc(p.upstream) + "</td><td class=\"" + e2eeClass + "\">" + esc(p.e2ee) + "</td>";
+    provRows.appendChild(tr);
+  }
   document.getElementById("req-total").textContent = d.requests.total;
   document.getElementById("req-streaming").textContent = d.requests.streaming;
   document.getElementById("req-nonstream").textContent = d.requests.non_stream;
@@ -436,7 +437,7 @@ function render(d) {
     tbody.appendChild(tr);
   }
   document.getElementById("footer").innerHTML =
-    "Live via SSE. Point any OpenAI-compatible client at <code>http://" + esc(d.listen_addr) + "/v1</code>";
+    "Live via SSE &mdash; Point any OpenAI-compatible client at <code>http://" + esc(d.listen_addr) + "/v1</code> using <code>provider:model</code> format (e.g. <code>venice:qwen3-5b</code>).";
 }
 
 render(%s);

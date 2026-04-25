@@ -59,39 +59,69 @@ func TestFactorTiersMatchRegistry(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// filterProviders tests
+// pruneInactiveProviders tests
 // --------------------------------------------------------------------------
 
-func TestFilterProviders_KeepNamedProvider(t *testing.T) {
+func TestPruneInactiveProviders_RemovesEmptyKey(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]*config.Provider{
-			"venice":     {Name: "venice"},
-			"neardirect": {Name: "neardirect"},
+			"venice":     {Name: "venice", APIKey: "key-v"},
+			"neardirect": {Name: "neardirect", APIKey: ""},
 		},
 	}
 
-	if err := filterProviders(cfg, "neardirect"); err != nil {
-		t.Fatalf("filterProviders: %v", err)
+	if err := pruneInactiveProviders(cfg); err != nil {
+		t.Fatalf("pruneInactiveProviders: %v", err)
 	}
-
+	t.Logf("remaining providers: %v", knownProviders(cfg))
 	if len(cfg.Providers) != 1 {
 		t.Fatalf("providers len = %d, want 1", len(cfg.Providers))
 	}
-	if _, ok := cfg.Providers["neardirect"]; !ok {
-		t.Fatalf("neardirect provider missing after filter")
+	if _, ok := cfg.Providers["venice"]; !ok {
+		t.Fatal("venice provider missing after pruning")
 	}
 }
 
-func TestFilterProviders_UnknownProvider(t *testing.T) {
+func TestPruneInactiveProviders_KeepsAll(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]*config.Provider{
-			"venice": {Name: "venice"},
+			"venice":     {Name: "venice", APIKey: "key-v"},
+			"neardirect": {Name: "neardirect", APIKey: "key-n"},
 		},
 	}
 
-	err := filterProviders(cfg, "neardirect")
+	if err := pruneInactiveProviders(cfg); err != nil {
+		t.Fatalf("pruneInactiveProviders: %v", err)
+	}
+	t.Logf("remaining providers: %v", knownProviders(cfg))
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers len = %d, want 2", len(cfg.Providers))
+	}
+}
+
+func TestPruneInactiveProviders_AllEmpty(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]*config.Provider{
+			"venice": {Name: "venice", APIKey: ""},
+		},
+	}
+
+	err := pruneInactiveProviders(cfg)
+	t.Logf("pruneInactiveProviders(all empty): %v", err)
 	if err == nil {
-		t.Fatal("expected error for unknown provider")
+		t.Fatal("expected error when all providers have empty API keys")
+	}
+}
+
+func TestPruneInactiveProviders_NoProviders(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]*config.Provider{},
+	}
+
+	err := pruneInactiveProviders(cfg)
+	t.Logf("pruneInactiveProviders(empty): %v", err)
+	if err == nil {
+		t.Fatal("expected error for empty providers map")
 	}
 }
 
@@ -341,44 +371,44 @@ func TestNormalizeArgs(t *testing.T) {
 		want []string
 	}{
 		{
-			"no_flags",
-			[]string{"serve", "venice"},
-			[]string{"serve", "venice"},
+			"serve_no_flags",
+			[]string{"serve", "--offline"},
+			[]string{"serve", "--offline"},
 		},
 		{
-			"trailing_bool_flag",
-			[]string{"serve", "venice", "--offline"},
-			[]string{"serve", "--offline", "venice"},
+			"verify_trailing_bool_flag",
+			[]string{"verify", "venice", "--offline"},
+			[]string{"verify", "--offline", "venice"},
 		},
 		{
-			"trailing_value_flag",
-			[]string{"serve", "venice", "--log-level", "debug"},
-			[]string{"serve", "--log-level", "debug", "venice"},
+			"verify_trailing_value_flag",
+			[]string{"verify", "venice", "--model", "qwen3-5b"},
+			[]string{"verify", "--model", "qwen3-5b", "venice"},
 		},
 		{
-			"trailing_multiple_flags",
-			[]string{"serve", "venice", "--offline", "--log-level", "debug"},
-			[]string{"serve", "--offline", "--log-level", "debug", "venice"},
+			"verify_trailing_multiple_flags",
+			[]string{"verify", "venice", "--offline", "--model", "qwen3-5b"},
+			[]string{"verify", "--offline", "--model", "qwen3-5b", "venice"},
 		},
 		{
 			"root_flag_before_subcmd",
-			[]string{"--log-level", "debug", "serve", "venice", "--offline"},
-			[]string{"--log-level", "debug", "serve", "--offline", "venice"},
+			[]string{"--log-level", "debug", "verify", "venice", "--offline"},
+			[]string{"--log-level", "debug", "verify", "--offline", "venice"},
 		},
 		{
 			"flag_before_and_after_provider",
-			[]string{"serve", "--offline", "venice", "--log-level", "debug"},
-			[]string{"serve", "--offline", "--log-level", "debug", "venice"},
+			[]string{"verify", "--offline", "venice", "--model", "qwen3-5b"},
+			[]string{"verify", "--offline", "--model", "qwen3-5b", "venice"},
 		},
 		{
 			"equals_form",
-			[]string{"serve", "venice", "--log-level=debug"},
-			[]string{"serve", "--log-level=debug", "venice"},
+			[]string{"verify", "venice", "--model=qwen3-5b"},
+			[]string{"verify", "--model=qwen3-5b", "venice"},
 		},
 		{
 			"extra_positional",
-			[]string{"serve", "venice", "nanogpt"},
-			[]string{"serve", "venice", "nanogpt"},
+			[]string{"verify", "venice", "nanogpt"},
+			[]string{"verify", "venice", "nanogpt"},
 		},
 		{
 			"verify_model_after_provider",
@@ -397,8 +427,8 @@ func TestNormalizeArgs(t *testing.T) {
 		},
 		{
 			"end_of_flags_marker",
-			[]string{"serve", "venice", "--", "--not-a-flag"},
-			[]string{"serve", "venice", "--", "--not-a-flag"},
+			[]string{"verify", "venice", "--", "--not-a-flag"},
+			[]string{"verify", "venice", "--", "--not-a-flag"},
 		},
 	}
 	for _, tc := range tests {
