@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -344,7 +344,7 @@ func runServe(ctx context.Context, offline, force bool) error {
 		slog.Warn("--force enabled: requests will be forwarded even when enforced attestation factors fail")
 	}
 
-	if err := pruneInactiveProviders(cfg); err != nil {
+	if err := pruneInactiveProviders(cfg.Providers); err != nil {
 		return err
 	}
 
@@ -364,18 +364,24 @@ func runServe(ctx context.Context, offline, force bool) error {
 	return nil
 }
 
-// pruneInactiveProviders removes providers with empty resolved API keys from cfg.
+// pruneInactiveProviders removes providers with empty resolved API keys from providers.
+// It modifies the map in place.
 // Returns an error if no providers remain after pruning.
-func pruneInactiveProviders(cfg *config.Config) error {
-	for name, p := range cfg.Providers {
+func pruneInactiveProviders(providers map[string]*config.Provider) error {
+	for name, p := range providers {
 		if p.APIKey == "" {
-			delete(cfg.Providers, name)
+			delete(providers, name)
 		}
 	}
-	if len(cfg.Providers) == 0 {
+	if len(providers) == 0 {
 		return errors.New("no providers configured: set at least one provider API key (e.g. VENICE_API_KEY)")
 	}
-	slog.Info("serve: active providers", "count", len(cfg.Providers), "names", knownProviders(cfg))
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	slog.Info("serve: active providers", "count", len(providers), "names", strings.Join(names, ", "))
 	return nil
 }
 
@@ -518,6 +524,6 @@ func knownProviders(cfg *config.Config) string {
 	for name := range cfg.Providers {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return strings.Join(names, ", ")
 }

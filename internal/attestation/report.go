@@ -49,6 +49,12 @@ const (
 	TierGateway     = "Tier 4: Gateway Attestation"
 )
 
+// Factor name constants for E2EE verification factors.
+const (
+	FactorE2EECapable = "e2ee_capable"
+	FactorE2EEUsable  = "e2ee_usable"
+)
+
 // FactorResult records the outcome of one verification factor.
 type FactorResult struct {
 	Name     string `json:"name"`

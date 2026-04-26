@@ -30,7 +30,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,8 +200,8 @@ func extractMultipartField(contentType string, body []byte, fieldName string) (s
 // "model" JSON field is rewritten. For multipart bodies (audio transcription)
 // the "model" form field is replaced while preserving all other parts and the
 // original boundary.
-func rewriteModelInBody(contentType string, body []byte, ep *endpointConfig, upstreamModel string) ([]byte, error) {
-	if ep.contentType == "application/json" {
+func rewriteModelInBody(contentType string, body []byte, epContentType, upstreamModel string) ([]byte, error) {
+	if epContentType == "application/json" {
 		var m map[string]json.RawMessage
 		if err := json.Unmarshal(body, &m); err != nil {
 			return nil, fmt.Errorf("unmarshal request body: %w", err)
@@ -901,17 +901,7 @@ func (s *Server) verifySupplyChain(
 				okDigests = append(okDigests, sr.Digest)
 			}
 		}
-		rekorResults := make([]attestation.RekorProvenance, len(okDigests))
-		var wg sync.WaitGroup
-		for i, d := range okDigests {
-			wg.Add(1)
-			go func(i int, d string) {
-				defer wg.Done()
-				rekorResults[i] = s.rekorClient.FetchRekorProvenance(ctx, d)
-			}(i, d)
-		}
-		wg.Wait()
-		sc.Rekor = rekorResults
+		sc.Rekor = s.rekorClient.FetchRekorProvenances(ctx, okDigests)
 	}
 
 	return sc, time.Since(start)
@@ -1068,7 +1058,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 			return
 		}
 
-		body, err = rewriteModelInBody(r.Header.Get("Content-Type"), body, ep, upstreamModel)
+		body, err = rewriteModelInBody(r.Header.Get("Content-Type"), body, ep.contentType, upstreamModel)
 		if err != nil {
 			slog.ErrorContext(ctx, "rewrite model in body", "provider", prov.Name, "model", upstreamModel, "err", err)
 			http.Error(w, "failed to normalize request body", http.StatusInternalServerError)
@@ -2345,27 +2335,45 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for name := range s.providers {
 		provNames = append(provNames, name)
 	}
-	sort.Strings(provNames)
+	slices.Sort(provNames)
 
-	var all []json.RawMessage
-	for _, name := range provNames {
-		p := s.providers[name]
-		if p.ModelLister == nil {
+	// Fan out model listing to all providers concurrently.
+	// Results are collected in provNames order for deterministic output.
+	type provResult struct{ models []json.RawMessage }
+	results := make([]provResult, len(provNames))
+	var wg sync.WaitGroup
+	for i, name := range provNames {
+		prov := s.providers[name]
+		if prov.ModelLister == nil {
 			continue
 		}
-		models, err := p.ModelLister.ListModels(ctx)
-		if err != nil {
-			slog.WarnContext(ctx, "model listing failed", "provider", p.Name, "err", err)
-			continue
-		}
-		for _, raw := range models {
-			prefixed, err := prefixModelID(name, raw)
+		wg.Add(1)
+		go func(i int, name string, prov *provider.Provider) {
+			defer wg.Done()
+			models, err := prov.ModelLister.ListModels(ctx)
 			if err != nil {
-				slog.WarnContext(ctx, "model ID prefix failed", "provider", name, "err", err)
-				continue
+				slog.WarnContext(ctx, "model listing failed", "provider", prov.Name, "err", err)
+				return
 			}
-			all = append(all, prefixed)
-		}
+			for _, raw := range models {
+				prefixed, err := prefixModelID(name, raw)
+				if err != nil {
+					slog.WarnContext(ctx, "model ID prefix failed", "provider", name, "err", err)
+					continue
+				}
+				results[i].models = append(results[i].models, prefixed)
+			}
+		}(i, name, prov)
+	}
+	wg.Wait()
+
+	totalCap := 0
+	for _, r := range results {
+		totalCap += len(r.models)
+	}
+	all := make([]json.RawMessage, 0, totalCap)
+	for _, r := range results {
+		all = append(all, r.models...)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

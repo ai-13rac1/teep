@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -541,15 +540,5 @@ func (h *PinnedHandler) verifySigstore(
 			okDigests = append(okDigests, sr.Digest)
 		}
 	}
-	rekorResults := make([]attestation.RekorProvenance, len(okDigests))
-	var wg sync.WaitGroup
-	for i, d := range okDigests {
-		wg.Add(1)
-		go func(i int, d string) {
-			defer wg.Done()
-			rekorResults[i] = h.rekorClient.FetchRekorProvenance(ctx, d)
-		}(i, d)
-	}
-	wg.Wait()
-	return sigstoreResults, rekorResults
+	return sigstoreResults, h.rekorClient.FetchRekorProvenances(ctx, okDigests)
 }

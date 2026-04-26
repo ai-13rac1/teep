@@ -70,7 +70,7 @@ func TestPruneInactiveProviders_RemovesEmptyKey(t *testing.T) {
 		},
 	}
 
-	if err := pruneInactiveProviders(cfg); err != nil {
+	if err := pruneInactiveProviders(cfg.Providers); err != nil {
 		t.Fatalf("pruneInactiveProviders: %v", err)
 	}
 	t.Logf("remaining providers: %v", knownProviders(cfg))
@@ -90,7 +90,7 @@ func TestPruneInactiveProviders_KeepsAll(t *testing.T) {
 		},
 	}
 
-	if err := pruneInactiveProviders(cfg); err != nil {
+	if err := pruneInactiveProviders(cfg.Providers); err != nil {
 		t.Fatalf("pruneInactiveProviders: %v", err)
 	}
 	t.Logf("remaining providers: %v", knownProviders(cfg))
@@ -106,7 +106,7 @@ func TestPruneInactiveProviders_AllEmpty(t *testing.T) {
 		},
 	}
 
-	err := pruneInactiveProviders(cfg)
+	err := pruneInactiveProviders(cfg.Providers)
 	t.Logf("pruneInactiveProviders(all empty): %v", err)
 	if err == nil {
 		t.Fatal("expected error when all providers have empty API keys")
@@ -118,7 +118,7 @@ func TestPruneInactiveProviders_NoProviders(t *testing.T) {
 		Providers: map[string]*config.Provider{},
 	}
 
-	err := pruneInactiveProviders(cfg)
+	err := pruneInactiveProviders(cfg.Providers)
 	t.Logf("pruneInactiveProviders(empty): %v", err)
 	if err == nil {
 		t.Fatal("expected error for empty providers map")

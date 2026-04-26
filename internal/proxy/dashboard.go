@@ -26,15 +26,15 @@ type dashboardData struct {
 }
 
 type dashAttestation struct {
-	Provider       string `json:"provider"`
-	Model          string `json:"model"`
-	Passed         int    `json:"passed"`
-	EnforcedFailed int    `json:"enforced_failed"`
-	AllowedFailed  int    `json:"allowed_failed"`
-	Blocked        bool   `json:"blocked"`
-	BlockedFactors string `json:"blocked_factors"` // comma-separated names, non-empty when Blocked
-	E2EE           string `json:"e2ee"`
-	Verified       string `json:"verified"`
+	Provider       string   `json:"provider"`
+	Model          string   `json:"model"`
+	Passed         int      `json:"passed"`
+	EnforcedFailed int      `json:"enforced_failed"`
+	AllowedFailed  int      `json:"allowed_failed"`
+	Blocked        bool     `json:"blocked"`
+	BlockedFactors []string `json:"blocked_factors"` // non-empty when Blocked
+	E2EE           string   `json:"e2ee"`
+	Verified       string   `json:"verified"`
 }
 
 type dashboardProvider struct {
@@ -88,6 +88,16 @@ func nanoAgo(ns int64) string {
 		return "—"
 	}
 	return time.Since(time.Unix(0, ns)).Truncate(time.Second).String() + " ago"
+}
+
+// timestampPtr converts a unix-nanosecond timestamp to an RFC3339 string pointer,
+// or nil if the timestamp is zero (never recorded).
+func timestampPtr(ns int64) *string {
+	if ns == 0 {
+		return nil
+	}
+	t := time.Unix(0, ns).UTC().Format(time.RFC3339)
+	return &t
 }
 
 func (s *Server) buildHTTPStats() dashboardHTTP {
@@ -158,22 +168,21 @@ func (s *Server) buildDashboardData() dashboardData {
 		}
 		e2ee := ""
 		for _, f := range report.Factors {
-			if f.Name == "e2ee_usable" && f.Status == attestation.Pass {
+			if f.Name == attestation.FactorE2EEUsable && f.Status == attestation.Pass {
 				e2ee = "usable"
 				break
 			}
-			if f.Name == "e2ee_capable" && f.Status == attestation.Pass {
+			if f.Name == attestation.FactorE2EECapable && f.Status == attestation.Pass {
 				e2ee = "capable"
 			}
 		}
 		blocked := report.Blocked()
-		blockedFactors := ""
+		var blockedFactors []string
 		if blocked {
-			for i, f := range report.BlockedFactors() {
-				if i > 0 {
-					blockedFactors += ", "
-				}
-				blockedFactors += f.Name
+			bf := report.BlockedFactors()
+			blockedFactors = make([]string, len(bf))
+			for i, f := range bf {
+				blockedFactors[i] = f.Name
 			}
 		}
 		attestations = append(attestations, dashAttestation{
@@ -229,19 +238,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		ErrorsTotal   int64   `json:"errors_total"`
 	}
 
-	nanoToPtr := func(ns int64) *string {
-		if ns == 0 {
-			return nil
-		}
-		t := time.Unix(0, ns).UTC().Format(time.RFC3339)
-		return &t
-	}
-
 	resp := healthResponse{
 		Status:        "ok",
 		UptimeSeconds: time.Since(s.stats.startTime).Seconds(),
-		LastRequestAt: nanoToPtr(s.stats.lastRequestAt.Load()),
-		LastSuccessAt: nanoToPtr(s.stats.lastSuccessAt.Load()),
+		LastRequestAt: timestampPtr(s.stats.lastRequestAt.Load()),
+		LastSuccessAt: timestampPtr(s.stats.lastSuccessAt.Load()),
 		RequestsTotal: s.stats.requests.Load(),
 		ErrorsTotal:   s.stats.errors.Load(),
 	}
@@ -529,7 +530,7 @@ function render(d) {
     var dot, dotColor, detail;
     if (a.blocked) {
       dot = "\u2717"; dotColor = "#f85149";
-      detail = "Security blocked \u2014 " + esc(a.blocked_factors || "unknown");
+      detail = "Security blocked \u2014 " + esc((a.blocked_factors || []).join(", ") || "unknown");
     } else if (a.e2ee === "usable") {
       dot = "\u25cf"; dotColor = "#3fb950";
       detail = "Secure enclave \u00b7 End-to-end encrypted";
@@ -582,7 +583,6 @@ function render(d) {
   }
   var attestRows = document.getElementById("attest-rows");
   attestRows.innerHTML = "";
-  var atts = d.attestations || [];
   if (atts.length === 0) {
     var tr = document.createElement("tr");
     tr.innerHTML = "<td colspan=\"5\" style=\"color:#8b949e\">No attestations cached yet.</td>";
@@ -592,7 +592,7 @@ function render(d) {
       var a = atts[j];
       var scoreCell;
       if (a.blocked) {
-        var detail = a.blocked_factors ? " \u2014 " + esc(a.blocked_factors) : "";
+        var detail = (a.blocked_factors && a.blocked_factors.length) ? " \u2014 " + esc(a.blocked_factors.join(", ")) : "";
         scoreCell = "<td class=\"text-red\">BLOCKED" + detail + "</td>";
       } else if (a.allowed_failed > 0) {
         scoreCell = "<td>" + a.passed + " passed <span style=\"color:#8b949e\">(" + a.allowed_failed + " allowed)</span></td>";

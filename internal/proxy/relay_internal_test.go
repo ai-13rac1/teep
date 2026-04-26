@@ -1128,6 +1128,17 @@ func TestFromConfig_Phalacloud(t *testing.T) {
 	}
 }
 
+func TestFromConfig_Phalacloud_PathSuffix(t *testing.T) {
+	cp := &config.Provider{Name: "phalacloud", BaseURL: "https://api.redpill.ai/v1", APIKey: "test-key"}
+	_, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
+		attestation.MeasurementPolicy{}, attestation.MeasurementPolicy{},
+		nil, nil, nil)
+	t.Logf("fromConfig(phalacloud, bad base_url): err=%v", err)
+	if err == nil {
+		t.Fatal("expected error when phalacloud base_url includes /v1 path suffix")
+	}
+}
+
 func TestFromConfig_Venice(t *testing.T) {
 	cp := &config.Provider{Name: "venice", BaseURL: "https://api.venice.ai", APIKey: "test-key"}
 	p, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
@@ -1639,9 +1650,8 @@ func TestHandleEvents_FlusherNotSupported(t *testing.T) {
 
 func TestRewriteModelInBody_Chat(t *testing.T) {
 	body := []byte(`{"model":"venice:qwen3-5b","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	ep := &endpointConfig{contentType: "application/json"}
 
-	got, err := rewriteModelInBody("application/json", body, ep, "qwen3-5b")
+	got, err := rewriteModelInBody("application/json", body, "application/json", "qwen3-5b")
 	if err != nil {
 		t.Fatalf("rewriteModelInBody: %v", err)
 	}
@@ -1658,9 +1668,8 @@ func TestRewriteModelInBody_Chat(t *testing.T) {
 
 func TestRewriteModelInBody_PreservesOtherFields(t *testing.T) {
 	body := []byte(`{"model":"venice:qwen3-5b","messages":[{"role":"user","content":"hi"}],"stream":true,"temperature":0.7}`)
-	ep := &endpointConfig{contentType: "application/json"}
 
-	got, err := rewriteModelInBody("application/json", body, ep, "qwen3-5b")
+	got, err := rewriteModelInBody("application/json", body, "application/json", "qwen3-5b")
 	if err != nil {
 		t.Fatalf("rewriteModelInBody: %v", err)
 	}
@@ -1703,9 +1712,7 @@ func TestRewriteModelInBody_Audio(t *testing.T) {
 	}
 	body := buf.Bytes()
 	contentType := "multipart/form-data; boundary=" + boundary
-	ep := &endpointConfig{contentType: ""} // audio has no fixed content-type
-
-	got, err := rewriteModelInBody(contentType, body, ep, "whisper-large-v3")
+	got, err := rewriteModelInBody(contentType, body, "", "whisper-large-v3")
 	if err != nil {
 		t.Fatalf("rewriteModelInBody: %v", err)
 	}
@@ -1753,9 +1760,7 @@ func TestRewriteModelInBody_Audio_WithBinaryFile(t *testing.T) {
 	}
 	body := buf.Bytes()
 	contentType := "multipart/form-data; boundary=" + boundary
-	ep := &endpointConfig{contentType: ""} // audio has no fixed content-type
-
-	got, err := rewriteModelInBody(contentType, body, ep, "whisper-large-v3")
+	got, err := rewriteModelInBody(contentType, body, "", "whisper-large-v3")
 	if err != nil {
 		t.Fatalf("rewriteModelInBody: %v", err)
 	}

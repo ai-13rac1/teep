@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -148,17 +147,9 @@ func checkSigstore(ctx context.Context, digests []string, client *http.Client, o
 	if len(okDigests) == 0 {
 		return sigstoreResults, nil
 	}
-	rekorResults := make([]attestation.RekorProvenance, len(okDigests))
-	var wg sync.WaitGroup
-	for i, d := range okDigests {
-		wg.Add(1)
-		go func(i int, d string) {
-			defer wg.Done()
-			rekorResults[i] = rc.FetchRekorProvenance(ctx, d)
-		}(i, d)
-	}
-	wg.Wait()
-	for i, prov := range rekorResults {
+	rekorResults := rc.FetchRekorProvenances(ctx, okDigests)
+	for i := range rekorResults {
+		prov := &rekorResults[i]
 		d := okDigests[i]
 		switch {
 		case prov.Err != nil:

@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -497,16 +496,7 @@ func (h *PinnedHandler) verifySupplyChain(
 				okDigests = append(okDigests, sr.Digest)
 			}
 		}
-		rekor = make([]attestation.RekorProvenance, len(okDigests))
-		var wg sync.WaitGroup
-		for i, d := range okDigests {
-			wg.Add(1)
-			go func(i int, d string) {
-				defer wg.Done()
-				rekor[i] = h.rekorClient.FetchRekorProvenance(ctx, d)
-			}(i, d)
-		}
-		wg.Wait()
+		rekor = h.rekorClient.FetchRekorProvenances(ctx, okDigests)
 	}
 
 	return compose, imageRepos, digestToRepo, sigstore, rekor
