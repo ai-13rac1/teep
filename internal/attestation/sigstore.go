@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 )
 
 // SigstoreResult records the outcome of checking one container image digest
@@ -29,9 +30,15 @@ type SigstoreResult struct {
 // signature verification would additionally confirm the signing identity.
 func (rc *RekorClient) CheckSigstoreDigests(ctx context.Context, digests []string) []SigstoreResult {
 	results := make([]SigstoreResult, len(digests))
+	var wg sync.WaitGroup
 	for i, digest := range digests {
-		results[i] = rc.checkDigestViaRekor(ctx, digest)
+		wg.Add(1)
+		go func(i int, d string) {
+			defer wg.Done()
+			results[i] = rc.checkDigestViaRekor(ctx, d)
+		}(i, digest)
 	}
+	wg.Wait()
 	return results
 }
 

@@ -895,11 +895,23 @@ func (s *Server) verifySupplyChain(
 	}
 
 	if len(sc.Sigstore) > 0 && !s.cfg.Offline {
+		var okDigests []string
 		for _, sr := range sc.Sigstore {
 			if sr.OK {
-				sc.Rekor = append(sc.Rekor, s.rekorClient.FetchRekorProvenance(ctx, sr.Digest))
+				okDigests = append(okDigests, sr.Digest)
 			}
 		}
+		rekorResults := make([]attestation.RekorProvenance, len(okDigests))
+		var wg sync.WaitGroup
+		for i, d := range okDigests {
+			wg.Add(1)
+			go func(i int, d string) {
+				defer wg.Done()
+				rekorResults[i] = s.rekorClient.FetchRekorProvenance(ctx, d)
+			}(i, d)
+		}
+		wg.Wait()
+		sc.Rekor = rekorResults
 	}
 
 	return sc, time.Since(start)
