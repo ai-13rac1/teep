@@ -29,9 +29,9 @@ func skipNearDirectIntegration(t *testing.T) {
 // known-good model if NEARAI_E2EE_MODEL is unset.
 func nearDirectIntegrationModel() string {
 	if m := os.Getenv("NEARAI_E2EE_MODEL"); m != "" {
-		return m
+		return "neardirect:" + m
 	}
-	return "Qwen/Qwen3.5-122B-A10B"
+	return "neardirect:Qwen/Qwen3.5-122B-A10B"
 }
 
 // integrationNearDirectConfig returns a config pointing at the live NEAR AI API
@@ -115,6 +115,7 @@ func TestIntegration_NearDirect(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nearDirectIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// A chat request populates the report cache. For NEAR AI (a pinned
 		// provider), PinnedHandler.HandlePinned returns a non-nil Report only
@@ -132,7 +133,7 @@ func TestIntegration_NearDirect(t *testing.T) {
 		io.Copy(io.Discard, chatResp.Body) // drain so the proxy's relayStream finishes cleanly
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=neardirect&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=neardirect&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)

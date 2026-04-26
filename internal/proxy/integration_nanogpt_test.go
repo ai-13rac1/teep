@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -28,9 +29,9 @@ func skipNanogptIntegration(t *testing.T) {
 // known-good dstack-backed TEE model if NANOGPT_MODEL is unset.
 func nanogptIntegrationModel() string {
 	if m := os.Getenv("NANOGPT_MODEL"); m != "" {
-		return m
+		return "nanogpt:" + m
 	}
-	return "TEE/gemma-3-27b-it"
+	return "nanogpt:TEE/gemma-3-27b-it"
 }
 
 // nanogptIntegrationConfig returns a config pointing at the live NanoGPT API
@@ -79,13 +80,14 @@ func TestIntegration_NanoGPT(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nanogptIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
 		_, _ = io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nanogpt&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nanogpt&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)

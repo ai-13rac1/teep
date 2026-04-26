@@ -39,9 +39,9 @@ func skipIntegration(t *testing.T) {
 // known-good model if VENICE_E2EE_MODEL is unset.
 func integrationModel() string {
 	if m := os.Getenv("VENICE_E2EE_MODEL"); m != "" {
-		return m
+		return "venice:" + m
 	}
-	return "e2ee-qwen3-5-122b-a10b"
+	return "venice:e2ee-qwen3-5-122b-a10b"
 }
 
 // integrationPlaintextConfig returns a config pointing at the live Venice API
@@ -242,11 +242,13 @@ func TestIntegration_Venice(t *testing.T) {
 		proxySrv := newProxyServer(t, cfg)
 		defer proxySrv.Close()
 
-		chatResp := postChatIntegration(t, proxySrv.URL, integrationModel(), true)
+		model := integrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
+		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=venice&model=%s", proxySrv.URL, integrationModel())
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=venice&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)

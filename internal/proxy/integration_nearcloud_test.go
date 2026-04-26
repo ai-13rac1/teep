@@ -28,9 +28,9 @@ func skipNearCloudIntegration(t *testing.T) {
 // nearCloudIntegrationModel returns the model to use for nearcloud tests.
 func nearCloudIntegrationModel() string {
 	if m := os.Getenv("NEARAI_E2EE_MODEL"); m != "" {
-		return m
+		return "nearcloud:" + m
 	}
-	return "Qwen/Qwen3.5-122B-A10B"
+	return "nearcloud:Qwen/Qwen3.5-122B-A10B"
 }
 
 // integrationNearCloudConfig returns a config pointing at the live cloud-api.near.ai
@@ -144,13 +144,14 @@ func TestIntegration_NearCloud(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nearCloudIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation + E2EE and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, false)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nearcloud&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nearcloud&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)
@@ -253,9 +254,9 @@ func TestIntegration_NearCloud(t *testing.T) {
 // Reuses the NEARAI_IMAGES_MODEL env var shared with neardirect tests.
 func nearCloudImagesModel() string {
 	if m := os.Getenv("NEARAI_IMAGES_MODEL"); m != "" {
-		return m
+		return "nearcloud:" + m
 	}
-	return "black-forest-labs/FLUX.2-klein-4B"
+	return "nearcloud:black-forest-labs/FLUX.2-klein-4B"
 }
 
 func TestIntegration_NearCloud_Images(t *testing.T) {
@@ -296,9 +297,9 @@ func TestIntegration_NearCloud_Images(t *testing.T) {
 // Reuses the NEARAI_VL_MODEL env var shared with neardirect tests.
 func nearCloudVLModel() string {
 	if m := os.Getenv("NEARAI_VL_MODEL"); m != "" {
-		return m
+		return "nearcloud:" + m
 	}
-	return "Qwen/Qwen3-VL-30B-A3B-Instruct"
+	return "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"
 }
 
 func TestIntegration_NearCloud_VL(t *testing.T) {

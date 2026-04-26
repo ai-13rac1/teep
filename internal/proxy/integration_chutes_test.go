@@ -30,7 +30,7 @@ func skipChutesIntegration(t *testing.T) {
 // Supports human-readable names (resolved via /v1/models) or UUIDs.
 func chutesIntegrationModel() string {
 	if m := os.Getenv("CHUTES_E2EE_MODEL"); m != "" {
-		return m
+		return "chutes:" + m
 	}
 	return chutesVLModel()
 }
@@ -155,13 +155,14 @@ func TestIntegration_Chutes(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := chutesIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=chutes&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=chutes&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)
