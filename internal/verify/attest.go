@@ -137,28 +137,34 @@ func checkSigstore(ctx context.Context, digests []string, client *http.Client, o
 			slog.Warn("Sigstore check failed", "digest", "sha256:"+r.Digest[:min(16, len(r.Digest))]+"...", "status", r.Status)
 		}
 	}
-	var rekorResults []attestation.RekorProvenance
+	var okDigests []string
 	for _, sr := range sigstoreResults {
-		if !sr.OK {
-			continue
+		if sr.OK {
+			slog.Info("fetching Rekor provenance", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+			okDigests = append(okDigests, sr.Digest)
 		}
-		slog.Info("fetching Rekor provenance", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
-		prov := rc.FetchRekorProvenance(ctx, sr.Digest)
+	}
+	if len(okDigests) == 0 {
+		return sigstoreResults, nil
+	}
+	rekorResults := rc.FetchRekorProvenances(ctx, okDigests)
+	for i := range rekorResults {
+		prov := &rekorResults[i]
+		d := okDigests[i]
 		switch {
 		case prov.Err != nil:
-			slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...", "err", prov.Err)
+			slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+d[:min(16, len(d))]+"...", "err", prov.Err)
 		case prov.HasCert:
 			slog.Info("Rekor provenance found",
-				"digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...",
+				"digest", "sha256:"+d[:min(16, len(d))]+"...",
 				"issuer", prov.OIDCIssuer,
 				"repo", prov.SourceRepo,
 				"commit", prov.SourceCommit[:min(7, len(prov.SourceCommit))],
 				"runner", prov.RunnerEnv,
 			)
 		default:
-			slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+sr.Digest[:min(16, len(sr.Digest))]+"...")
+			slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+d[:min(16, len(d))]+"...")
 		}
-		rekorResults = append(rekorResults, prov)
 	}
 	return sigstoreResults, rekorResults
 }

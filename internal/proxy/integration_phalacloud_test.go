@@ -29,12 +29,32 @@ func skipPhalaCloudIntegration(t *testing.T) {
 // to a known-good dstack-backed model if PHALA_MODEL is unset.
 func phalaCloudIntegrationModel() string {
 	if m := os.Getenv("PHALA_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "phalacloud:") {
+			return m
+		}
+		return "phalacloud:" + m
 	}
-	return "phala/gemma-3-27b-it"
+	return "phalacloud:phala/gemma-3-27b-it"
 }
 
-// integrationPhalaCloudConfig returns a config pointing at the live Phala Cloud
+func TestPhalaCloudIntegrationModel_PrefixHandling(t *testing.T) {
+	t.Setenv("PHALA_MODEL", "phala/gemma-3-27b-it")
+	if got, want := phalaCloudIntegrationModel(), "phalacloud:phala/gemma-3-27b-it"; got != want {
+		t.Fatalf("phalaCloudIntegrationModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("PHALA_MODEL", "phalacloud:phala/gemma-3-27b-it")
+	if got, want := phalaCloudIntegrationModel(), "phalacloud:phala/gemma-3-27b-it"; got != want {
+		t.Fatalf("phalaCloudIntegrationModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the phalacloud: prefix must still be prefixed.
+	t.Setenv("PHALA_MODEL", "other:model-id")
+	if got, want := phalaCloudIntegrationModel(), "phalacloud:other:model-id"; got != want {
+		t.Fatalf("phalaCloudIntegrationModel() = %q, want %q", got, want)
+	}
+}
+
 // API with Offline true (skips Intel PCS, NRAS, PoC network calls).
 func integrationPhalaCloudConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -44,7 +64,7 @@ func integrationPhalaCloudConfig(t *testing.T) *config.Config {
 		Providers: map[string]*config.Provider{
 			"phalacloud": {
 				Name:    "phalacloud",
-				BaseURL: "https://api.redpill.ai/v1",
+				BaseURL: "https://api.redpill.ai",
 				APIKey:  os.Getenv("PHALA_API_KEY"),
 				E2EE:    false,
 			},
@@ -115,13 +135,14 @@ func TestIntegration_PhalaCloud(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := phalaCloudIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=phalacloud&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=phalacloud&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)

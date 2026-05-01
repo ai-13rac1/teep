@@ -534,11 +534,11 @@ func (h *PinnedHandler) verifySigstore(
 		return nil, nil
 	}
 	sigstoreResults := h.rekorClient.CheckSigstoreDigests(ctx, digests)
-	var rekorResults []attestation.RekorProvenance
+	var okDigests []string
 	for _, sr := range sigstoreResults {
 		if sr.OK {
-			rekorResults = append(rekorResults, h.rekorClient.FetchRekorProvenance(ctx, sr.Digest))
+			okDigests = append(okDigests, sr.Digest)
 		}
 	}
-	return sigstoreResults, rekorResults
+	return sigstoreResults, h.rekorClient.FetchRekorProvenances(ctx, okDigests)
 }

@@ -22,12 +22,31 @@ import (
 
 func nearDirectVLModel() string {
 	if m := os.Getenv("NEARAI_VL_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "Qwen/Qwen3-VL-30B-A3B-Instruct"
+	return "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct"
 }
 
-// testPNG returns a base64-encoded 8x8 solid red PNG image.
+func TestNearDirectVLModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_VL_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearDirectVLModel(), "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearDirectVLModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_VL_MODEL", "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearDirectVLModel(), "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearDirectVLModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the neardirect: prefix must still be prefixed.
+	t.Setenv("NEARAI_VL_MODEL", "hf:org/vl-model")
+	if got, want := nearDirectVLModel(), "neardirect:hf:org/vl-model"; got != want {
+		t.Fatalf("nearDirectVLModel() = %q, want %q", got, want)
+	}
+}
 func testPNG() string {
 	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
 	red := color.RGBA{R: 255, A: 255}
@@ -92,9 +111,12 @@ func TestIntegration_NearDirect_VL(t *testing.T) {
 
 func chutesVLModel() string {
 	if m := os.Getenv("CHUTES_VL_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "chutes:") {
+			return m
+		}
+		return "chutes:" + m
 	}
-	return "Qwen/Qwen3.5-397B-A17B-TEE"
+	return "chutes:Qwen/Qwen3.5-397B-A17B-TEE"
 }
 
 func TestIntegration_Chutes_VL(t *testing.T) {
@@ -168,9 +190,12 @@ func TestIntegration_Chutes_VL_E2EE(t *testing.T) {
 
 func nearDirectImagesModel() string {
 	if m := os.Getenv("NEARAI_IMAGES_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "black-forest-labs/FLUX.2-klein-4B"
+	return "neardirect:black-forest-labs/FLUX.2-klein-4B"
 }
 
 func TestIntegration_NearDirect_Images(t *testing.T) {
@@ -207,9 +232,12 @@ func TestIntegration_NearDirect_Images(t *testing.T) {
 
 func nearDirectAudioModel() string {
 	if m := os.Getenv("NEARAI_AUDIO_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "openai/whisper-large-v3"
+	return "neardirect:openai/whisper-large-v3"
 }
 
 func TestIntegration_NearDirect_Audio(t *testing.T) {
@@ -268,9 +296,12 @@ func TestIntegration_NearDirect_Audio(t *testing.T) {
 
 func nearDirectRerankModel() string {
 	if m := os.Getenv("NEARAI_RERANK_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "Qwen/Qwen3-Reranker-0.6B"
+	return "neardirect:Qwen/Qwen3-Reranker-0.6B"
 }
 
 func TestIntegration_NearDirect_Rerank(t *testing.T) {

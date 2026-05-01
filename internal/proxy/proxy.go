@@ -30,6 +30,8 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,6 +196,101 @@ func extractMultipartField(contentType string, body []byte, fieldName string) (s
 	}
 }
 
+// rewriteModelInBody replaces the model field in the request body with
+// upstreamModel (the provider-stripped model name). For JSON bodies the
+// "model" JSON field is rewritten. For multipart bodies (audio transcription)
+// the "model" form field is replaced while preserving all other parts and the
+// original boundary.
+func rewriteModelInBody(contentType string, body []byte, epContentType, upstreamModel string) ([]byte, error) {
+	if epContentType == "application/json" {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(body, &m); err != nil {
+			return nil, newRequestNormalizationError(fmt.Errorf("unmarshal request body: %w", err))
+		}
+		id, err := json.Marshal(upstreamModel)
+		if err != nil {
+			return nil, fmt.Errorf("marshal upstream model: %w", err)
+		}
+		m["model"] = id
+		return json.Marshal(m)
+	}
+	// Audio multipart/form-data: rebuild with model field replaced.
+	return rewriteMultipartModel(contentType, body, upstreamModel)
+}
+
+type requestNormalizationError struct {
+	statusCode int
+	err        error
+}
+
+func newRequestNormalizationError(err error) error {
+	return requestNormalizationError{statusCode: http.StatusBadRequest, err: err}
+}
+
+func (e requestNormalizationError) Error() string {
+	return e.err.Error()
+}
+
+func (e requestNormalizationError) Unwrap() error {
+	return e.err
+}
+
+func normalizationStatusCode(err error) int {
+	var normalizeErr requestNormalizationError
+	if errors.As(err, &normalizeErr) {
+		return normalizeErr.statusCode
+	}
+	return http.StatusInternalServerError
+}
+
+// rewriteMultipartModel rebuilds a multipart/form-data body, replacing the
+// value of the "model" form field with upstreamModel. All other parts and the
+// original boundary are preserved.
+func rewriteMultipartModel(contentType string, body []byte, upstreamModel string) ([]byte, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, newRequestNormalizationError(fmt.Errorf("parse content-type: %w", err))
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, newRequestNormalizationError(errors.New("missing boundary in content-type"))
+	}
+
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	var out bytes.Buffer
+	mw := multipart.NewWriter(&out)
+	if err := mw.SetBoundary(boundary); err != nil {
+		return nil, newRequestNormalizationError(fmt.Errorf("set boundary: %w", err))
+	}
+	for {
+		p, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, newRequestNormalizationError(fmt.Errorf("read multipart: %w", err))
+		}
+		pw, err := mw.CreatePart(p.Header)
+		if err != nil {
+			_ = p.Close()
+			return nil, newRequestNormalizationError(fmt.Errorf("create part: %w", err))
+		}
+		if p.FormName() == "model" {
+			_, err = pw.Write([]byte(upstreamModel))
+		} else {
+			_, err = io.Copy(pw, p)
+		}
+		_ = p.Close()
+		if err != nil {
+			return nil, newRequestNormalizationError(fmt.Errorf("write part: %w", err))
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
+	}
+	return out.Bytes(), nil
+}
+
 // chutesRetryableError returns true if the upstream error or response status
 // indicates a Chutes instance-level failure that warrants failover to a
 // different instance. Returns false for client-induced cancellations
@@ -337,6 +434,21 @@ func New(cfg *config.Config) (*Server, error) {
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral)
 
 	for name, cp := range cfg.Providers {
+		if cp == nil {
+			return nil, fmt.Errorf("provider %q: config is nil", name)
+		}
+		if strings.Contains(name, ":") {
+			return nil, fmt.Errorf("provider map key %q must not contain ':'", name)
+		}
+		if cp.Name == "" {
+			return nil, fmt.Errorf("provider %q has empty name", name)
+		}
+		if strings.Contains(cp.Name, ":") {
+			return nil, fmt.Errorf("provider %q has invalid name %q: must not contain ':'", name, cp.Name)
+		}
+		if cp.Name != name {
+			return nil, fmt.Errorf("provider map key %q does not match provider name %q", name, cp.Name)
+		}
 		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
 		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)
 		mergedGWPolicy := config.MergedGatewayMeasurementPolicy(name, cfg, gwDefaults)
@@ -539,8 +651,20 @@ func fromConfig(
 		}
 		p.SupplyChainPolicy = nanogpt.SupplyChainPolicy()
 	case "phalacloud":
-		p.ChatPath = "/chat/completions"
-		p.EmbeddingsPath = "/embeddings"
+		u, err := url.Parse(cp.BaseURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("phalacloud base_url %q is invalid: must be an absolute URL", cp.BaseURL)
+		}
+		if path := strings.TrimSuffix(u.EscapedPath(), "/"); path != "" {
+			base := *u
+			base.Path = ""
+			base.RawPath = ""
+			base.RawQuery = ""
+			base.Fragment = ""
+			return nil, fmt.Errorf("phalacloud base_url %q must not include a path suffix; use %q", cp.BaseURL, base.String())
+		}
+		p.ChatPath = "/v1/chat/completions"
+		p.EmbeddingsPath = "/v1/embeddings"
 		p.Attester = phalacloud.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = phalacloud.NewPreparer(cp.APIKey)
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
@@ -579,15 +703,20 @@ func fromConfig(
 	return p, nil
 }
 
-// resolveModel returns the provider for a client model. The model name is
-// passed through to the upstream unchanged. With a single provider (the
-// current production configuration), this is deterministic. Multi-provider
-// routing by model name is not yet implemented; the first provider is returned.
+// resolveModel parses a client model string of the form "provider:model" and
+// returns the matching provider and upstream model name. Both the provider
+// prefix and the model segment must be non-empty. Unknown provider names and
+// missing separators are rejected (returns false).
 func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, bool) {
-	for _, p := range s.providers {
-		return p, clientModel, true
+	provName, upstreamModel, ok := strings.Cut(clientModel, ":")
+	if !ok || provName == "" || upstreamModel == "" {
+		return nil, "", false
 	}
-	return nil, "", false
+	p, found := s.providers[provName]
+	if !found {
+		return nil, "", false
+	}
+	return p, upstreamModel, true
 }
 
 // fetchAndVerify fetches attestation from the provider and runs all
@@ -813,11 +942,13 @@ func (s *Server) verifySupplyChain(
 	}
 
 	if len(sc.Sigstore) > 0 && !s.cfg.Offline {
+		var okDigests []string
 		for _, sr := range sc.Sigstore {
 			if sr.OK {
-				sc.Rekor = append(sc.Rekor, s.rekorClient.FetchRekorProvenance(ctx, sr.Digest))
+				okDigests = append(okDigests, sr.Digest)
 			}
 		}
+		sc.Rekor = s.rekorClient.FetchRekorProvenances(ctx, okDigests)
 	}
 
 	return sc, time.Since(start)
@@ -970,7 +1101,14 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		prov, upstreamModel, ok := s.resolveModel(model)
 		if !ok {
-			http.Error(w, fmt.Sprintf("unknown model %q", model), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("unknown model %q: use provider:model format (e.g. venice:qwen3-5b)", model), http.StatusBadRequest)
+			return
+		}
+
+		body, err = rewriteModelInBody(r.Header.Get("Content-Type"), body, ep.contentType, upstreamModel)
+		if err != nil {
+			slog.ErrorContext(ctx, "rewrite model in body", "provider", prov.Name, "model", upstreamModel, "err", err)
+			http.Error(w, "failed to normalize request body", normalizationStatusCode(err))
 			return
 		}
 
@@ -2231,30 +2369,88 @@ type modelsListResponse struct {
 // modelsTimeout is the context deadline for upstream model listing calls.
 const modelsTimeout = 30 * time.Second
 
-// handleModels returns available models from all configured providers.
-// Each provider's model entries are relayed as raw JSON to preserve all
-// upstream fields (pricing, capabilities, constraints, etc.).
+// handleModels returns available models from all configured providers in
+// deterministic (sorted) provider order. Each model's "id" field is rewritten
+// to "provider:upstreamID" so clients can route requests back to the correct
+// provider. All other upstream model fields are preserved semantically.
+// Partial-success: a provider that fails listing is logged and skipped.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(reqid.WithID(r.Context(), reqid.New()), modelsTimeout)
 	defer cancel()
 
-	all := make([]json.RawMessage, 0)
-	for _, p := range s.providers {
-		if p.ModelLister == nil {
+	provNames := make([]string, 0, len(s.providers))
+	for name := range s.providers {
+		provNames = append(provNames, name)
+	}
+	slices.Sort(provNames)
+
+	// Fan out model listing to all providers concurrently.
+	// Results are collected in provNames order for deterministic output.
+	type provResult struct{ models []json.RawMessage }
+	results := make([]provResult, len(provNames))
+	var wg sync.WaitGroup
+	for i, name := range provNames {
+		prov := s.providers[name]
+		if prov.ModelLister == nil {
 			continue
 		}
-		models, err := p.ModelLister.ListModels(ctx)
-		if err != nil {
-			slog.WarnContext(ctx, "model listing failed", "provider", p.Name, "err", err)
-			continue
-		}
-		all = append(all, models...)
+		wg.Add(1)
+		go func(i int, name string, prov *provider.Provider) {
+			defer wg.Done()
+			models, err := prov.ModelLister.ListModels(ctx)
+			if err != nil {
+				slog.WarnContext(ctx, "model listing failed", "provider", prov.Name, "err", err)
+				return
+			}
+			for _, raw := range models {
+				prefixed, err := prefixModelID(name, raw)
+				if err != nil {
+					slog.WarnContext(ctx, "model ID prefix failed", "provider", name, "err", err)
+					continue
+				}
+				results[i].models = append(results[i].models, prefixed)
+			}
+		}(i, name, prov)
+	}
+	wg.Wait()
+
+	totalCap := 0
+	for _, r := range results {
+		totalCap += len(r.models)
+	}
+	all := make([]json.RawMessage, 0, totalCap)
+	for _, r := range results {
+		all = append(all, r.models...)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: all}); err != nil {
 		slog.ErrorContext(ctx, "encoding models response", "err", err)
 	}
+}
+
+// prefixModelID rewrites the "id" field of a JSON model object to
+// "providerName:originalID", preserving all other fields. Returns an error if
+// the object cannot be parsed or the "id" field is missing or not a string.
+func prefixModelID(providerName string, raw json.RawMessage) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	idRaw, ok := obj["id"]
+	if !ok {
+		return nil, errors.New("model object missing 'id' field")
+	}
+	var id string
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return nil, fmt.Errorf("model 'id' is not a string: %w", err)
+	}
+	prefixed, err := json.Marshal(providerName + ":" + id)
+	if err != nil {
+		return nil, err
+	}
+	obj["id"] = prefixed
+	return json.Marshal(obj)
 }
 
 // handleReport returns the cached VerificationReport for the given provider

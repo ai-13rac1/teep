@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
@@ -256,6 +257,22 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 		return RekorProvenance{Digest: digest, Err: lastErr}
 	}
 	return RekorProvenance{Digest: digest, Err: fmt.Errorf("no usable Rekor entry for sha256:%s", digest)}
+}
+
+// FetchRekorProvenances fetches provenance for each digest concurrently.
+// It is the batch analog of FetchRekorProvenance.
+func (rc *RekorClient) FetchRekorProvenances(ctx context.Context, digests []string) []RekorProvenance {
+	results := make([]RekorProvenance, len(digests))
+	var wg sync.WaitGroup
+	for i, d := range digests {
+		wg.Add(1)
+		go func(i int, d string) {
+			defer wg.Done()
+			results[i] = rc.FetchRekorProvenance(ctx, d)
+		}(i, d)
+	}
+	wg.Wait()
+	return results
 }
 
 // fetchRekorUUIDs calls POST /api/v1/index/retrieve to search for log entries

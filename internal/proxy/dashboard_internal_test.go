@@ -166,24 +166,28 @@ func TestBuildDashboardData_NonZeroModelStats(t *testing.T) {
 	ms.lastTokCount.Store(100)                                       // 100 tokens in 2 seconds = 50 tok/s
 	ms.lastRequestAt.Store(time.Now().Add(-30 * time.Second).Unix()) // "30s ago"
 	s.stats.modelsMu.Lock()
-	s.stats.models["test-model"] = ms
+	s.stats.models["venice/test-model"] = ms
 	s.stats.modelsMu.Unlock()
 
 	data := s.buildDashboardData()
-	t.Logf("buildDashboardData: listen_addr=%s uptime=%s e2ee=%s",
-		data.ListenAddr, data.Uptime, data.Provider.E2EE)
-	t.Logf("provider: name=%s e2ee=%s", data.Provider.Name, data.Provider.E2EE)
+	t.Logf("buildDashboardData: listen_addr=%s uptime=%s", data.ListenAddr, data.Uptime)
 
-	if data.Provider.E2EE != "enabled" {
-		t.Errorf("Provider.E2EE = %q, want 'enabled'", data.Provider.E2EE)
-	}
-	if data.Provider.Name != "venice" {
-		t.Errorf("Provider.Name = %q, want 'venice'", data.Provider.Name)
-	}
-
-	model, ok := data.Models["test-model"]
+	vp, ok := data.Providers["venice"]
 	if !ok {
-		t.Fatal("model 'test-model' not found in dashboard data")
+		t.Fatal("venice provider missing from Providers map")
+	}
+	t.Logf("provider: upstream=%s e2ee=%s", vp.Upstream, vp.E2EE)
+
+	if vp.E2EE != "enabled" {
+		t.Errorf("Providers[venice].E2EE = %q, want 'enabled'", vp.E2EE)
+	}
+	if vp.Upstream != "https://api.venice.ai" {
+		t.Errorf("Providers[venice].Upstream = %q, want 'https://api.venice.ai'", vp.Upstream)
+	}
+
+	model, ok := data.Models["venice/test-model"]
+	if !ok {
+		t.Fatal("model 'venice/test-model' not found in dashboard data")
 	}
 	t.Logf("model: requests=%d errors=%d verifyMs=%s tokPerSec=%s lastRequest=%s",
 		model.Requests, model.Errors, model.VerifyMs, model.TokPerSec, model.LastRequest)
@@ -230,5 +234,54 @@ func TestBuildHTTPStats(t *testing.T) {
 	}
 	if h.Errors != 2 {
 		t.Errorf("errors = %d, want 2", h.Errors)
+	}
+}
+
+func TestBuildDashboardData_MultiProvider(t *testing.T) {
+	s := &Server{
+		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:    attestation.NewCache(0),
+		negCache: attestation.NewNegativeCache(0),
+		stats:    stats{models: make(map[string]*modelStats)},
+		providers: map[string]*provider.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: "https://api.venice.ai",
+				E2EE:    true,
+			},
+			"chutes": {
+				Name:    "chutes",
+				BaseURL: "https://api.chutes.ai",
+				E2EE:    false,
+			},
+		},
+	}
+
+	data := s.buildDashboardData()
+	t.Logf("buildDashboardData: providers=%v", data.Providers)
+
+	if len(data.Providers) != 2 {
+		t.Fatalf("Providers len = %d, want 2", len(data.Providers))
+	}
+
+	vp, ok := data.Providers["venice"]
+	if !ok {
+		t.Fatal("venice missing from Providers")
+	}
+	t.Logf("venice: upstream=%s e2ee=%s", vp.Upstream, vp.E2EE)
+	if vp.E2EE != "enabled" {
+		t.Errorf("venice E2EE = %q, want 'enabled'", vp.E2EE)
+	}
+	if vp.Upstream != "https://api.venice.ai" {
+		t.Errorf("venice Upstream = %q, want 'https://api.venice.ai'", vp.Upstream)
+	}
+
+	cp, ok := data.Providers["chutes"]
+	if !ok {
+		t.Fatal("chutes missing from Providers")
+	}
+	t.Logf("chutes: upstream=%s e2ee=%s", cp.Upstream, cp.E2EE)
+	if cp.E2EE != "disabled" {
+		t.Errorf("chutes E2EE = %q, want 'disabled'", cp.E2EE)
 	}
 }

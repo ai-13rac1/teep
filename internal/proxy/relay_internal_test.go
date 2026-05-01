@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -645,25 +647,70 @@ func (*noopPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequ
 func TestResolveModel_NoProviders(t *testing.T) {
 	s := newMinimalServer()
 	s.providers = map[string]*provider.Provider{}
-	prov, model, ok := s.resolveModel("gpt-4")
+	prov, model, ok := s.resolveModel("venice:qwen3-122b")
 	t.Logf("resolveModel(no providers): prov=%v model=%q ok=%v", prov, model, ok)
 	if ok {
 		t.Error("expected ok=false when no providers configured")
 	}
 }
 
-func TestResolveModel_SingleProvider(t *testing.T) {
+func TestResolveModel_Valid(t *testing.T) {
+	s := newMinimalServer()
+	s.providers = map[string]*provider.Provider{
+		"venice": {Name: "venice"},
+	}
+	prov, model, ok := s.resolveModel("venice:qwen3-122b")
+	t.Logf("resolveModel(valid): prov=%v model=%q ok=%v", prov, model, ok)
+	if !ok {
+		t.Error("expected ok=true for valid provider:model")
+	}
+	if model != "qwen3-122b" {
+		t.Errorf("model = %q, want %q", model, "qwen3-122b")
+	}
+	if prov == nil {
+		t.Fatal("prov = nil, want non-nil provider named 'venice'")
+	}
+	if prov.Name != "venice" {
+		t.Errorf("prov.Name = %q, want 'venice'", prov.Name)
+	}
+}
+
+func TestResolveModel_UnknownProvider(t *testing.T) {
+	s := newMinimalServer()
+	s.providers = map[string]*provider.Provider{
+		"venice": {Name: "venice"},
+	}
+	prov, model, ok := s.resolveModel("bogus:qwen3-122b")
+	t.Logf("resolveModel(unknown provider): prov=%v model=%q ok=%v", prov, model, ok)
+	if ok {
+		t.Error("expected ok=false for unknown provider")
+	}
+}
+
+func TestResolveModel_MissingSeparator(t *testing.T) {
 	s := newMinimalServer()
 	s.providers = map[string]*provider.Provider{
 		"venice": {Name: "venice"},
 	}
 	prov, model, ok := s.resolveModel("qwen3-122b")
-	t.Logf("resolveModel(single): prov=%v model=%q ok=%v", prov, model, ok)
-	if !ok {
-		t.Error("expected ok=true with one provider")
+	t.Logf("resolveModel(no separator): prov=%v model=%q ok=%v", prov, model, ok)
+	if ok {
+		t.Error("expected ok=false for model without provider: prefix")
 	}
-	if model != "qwen3-122b" {
-		t.Errorf("model = %q, want %q", model, "qwen3-122b")
+}
+
+func TestResolveModel_EmptySegments(t *testing.T) {
+	s := newMinimalServer()
+	s.providers = map[string]*provider.Provider{
+		"venice": {Name: "venice"},
+	}
+	cases := []string{":qwen3-122b", "venice:", ":", ""}
+	for _, c := range cases {
+		prov, model, ok := s.resolveModel(c)
+		t.Logf("resolveModel(%q): prov=%v model=%q ok=%v", c, prov, model, ok)
+		if ok {
+			t.Errorf("resolveModel(%q): expected ok=false for empty segment", c)
+		}
 	}
 }
 
@@ -1071,7 +1118,7 @@ func TestFromConfig_Nanogpt(t *testing.T) {
 }
 
 func TestFromConfig_Phalacloud(t *testing.T) {
-	cp := &config.Provider{Name: "phalacloud", BaseURL: "https://phala.network", APIKey: "test-key"}
+	cp := &config.Provider{Name: "phalacloud", BaseURL: "https://api.redpill.ai", APIKey: "test-key"}
 	p, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
 		attestation.MeasurementPolicy{}, attestation.MeasurementPolicy{},
 		nil, nil, nil)
@@ -1079,8 +1126,40 @@ func TestFromConfig_Phalacloud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error for phalacloud: %v", err)
 	}
-	if p.ChatPath != "/chat/completions" {
-		t.Errorf("ChatPath = %q, want /chat/completions", p.ChatPath)
+	if p.ChatPath != "/v1/chat/completions" {
+		t.Errorf("ChatPath = %q, want /v1/chat/completions", p.ChatPath)
+	}
+}
+
+func TestFromConfig_Phalacloud_PathSuffix(t *testing.T) {
+	for _, badURL := range []string{
+		"https://api.redpill.ai/v1",
+		"https://api.redpill.ai/v1/",
+		"https://api.redpill.ai/api",
+		"https://api.redpill.ai/api/",
+	} {
+		cp := &config.Provider{Name: "phalacloud", BaseURL: badURL, APIKey: "test-key"}
+		_, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
+			attestation.MeasurementPolicy{}, attestation.MeasurementPolicy{},
+			nil, nil, nil)
+		t.Logf("fromConfig(phalacloud, base_url=%q): err=%v", badURL, err)
+		if err == nil {
+			t.Errorf("expected error when phalacloud base_url includes /v1 path suffix: %q", badURL)
+		}
+	}
+}
+
+func TestFromConfig_Phalacloud_RootPathAllowed(t *testing.T) {
+	cp := &config.Provider{Name: "phalacloud", BaseURL: "https://api.redpill.ai/", APIKey: "test-key"}
+	p, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
+		attestation.MeasurementPolicy{}, attestation.MeasurementPolicy{},
+		nil, nil, nil)
+	t.Logf("fromConfig(phalacloud, root slash): err=%v ChatPath=%s", err, p.ChatPath)
+	if err != nil {
+		t.Fatalf("unexpected error for phalacloud with root slash: %v", err)
+	}
+	if p.ChatPath != "/v1/chat/completions" {
+		t.Errorf("ChatPath = %q, want /v1/chat/completions", p.ChatPath)
 	}
 }
 
@@ -1587,4 +1666,175 @@ func TestHandleEvents_FlusherNotSupported(t *testing.T) {
 	if got := s.sseConns.Load(); got != 0 {
 		t.Errorf("sseConns after no-flusher return = %d, want 0", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// rewriteModelInBody tests
+// ---------------------------------------------------------------------------
+
+func TestRewriteModelInBody_Chat(t *testing.T) {
+	body := []byte(`{"model":"venice:qwen3-5b","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+
+	got, err := rewriteModelInBody("application/json", body, "application/json", "qwen3-5b")
+	if err != nil {
+		t.Fatalf("rewriteModelInBody: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if m["model"] != "qwen3-5b" {
+		t.Errorf("model = %q, want %q", m["model"], "qwen3-5b")
+	}
+	t.Logf("rewritten body: %s", got)
+}
+
+func TestRewriteModelInBody_PreservesOtherFields(t *testing.T) {
+	body := []byte(`{"model":"venice:qwen3-5b","messages":[{"role":"user","content":"hi"}],"stream":true,"temperature":0.7}`)
+
+	got, err := rewriteModelInBody("application/json", body, "application/json", "qwen3-5b")
+	if err != nil {
+		t.Fatalf("rewriteModelInBody: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if m["model"] != "qwen3-5b" {
+		t.Errorf("model = %q, want qwen3-5b", m["model"])
+	}
+	if m["stream"] != true {
+		t.Errorf("stream = %v, want true", m["stream"])
+	}
+	if m["temperature"] != 0.7 {
+		t.Errorf("temperature = %v, want 0.7", m["temperature"])
+	}
+	msgs, ok := m["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Errorf("messages field not preserved: %v", m["messages"])
+	}
+	t.Logf("rewritten body: %s", got)
+}
+
+func TestRewriteModelInBody_Audio(t *testing.T) {
+	const boundary = "testboundary"
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(boundary); err != nil {
+		t.Fatalf("SetBoundary: %v", err)
+	}
+	if err := mw.WriteField("model", "neardirect:whisper-large-v3"); err != nil {
+		t.Fatalf("WriteField model: %v", err)
+	}
+	if err := mw.WriteField("language", "en"); err != nil {
+		t.Fatalf("WriteField language: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	body := buf.Bytes()
+	contentType := "multipart/form-data; boundary=" + boundary
+	got, err := rewriteModelInBody(contentType, body, "", "whisper-large-v3")
+	if err != nil {
+		t.Fatalf("rewriteModelInBody: %v", err)
+	}
+	t.Logf("rewritten body length: %d", len(got))
+
+	// Extract model field from rebuilt body.
+	model, err := extractMultipartField(contentType, got, "model")
+	if err != nil {
+		t.Fatalf("extractMultipartField model: %v", err)
+	}
+	if model != "whisper-large-v3" {
+		t.Errorf("model = %q, want %q", model, "whisper-large-v3")
+	}
+
+	// Verify other field is preserved.
+	lang, err := extractMultipartField(contentType, got, "language")
+	if err != nil {
+		t.Fatalf("extractMultipartField language: %v", err)
+	}
+	if lang != "en" {
+		t.Errorf("language = %q, want %q", lang, "en")
+	}
+}
+
+func TestRewriteModelInBody_Audio_WithBinaryFile(t *testing.T) {
+	const boundary = "testboundary"
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(boundary); err != nil {
+		t.Fatalf("SetBoundary: %v", err)
+	}
+	if err := mw.WriteField("model", "neardirect:whisper-large-v3"); err != nil {
+		t.Fatalf("WriteField model: %v", err)
+	}
+	fw, err := mw.CreateFormFile("file", "test.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	fileContent := []byte{0x52, 0x49, 0x46, 0x46, 0x00, 0xff, 0x00, 0xfe, 0x57, 0x41, 0x56, 0x45} // fake WAV header
+	if _, err := fw.Write(fileContent); err != nil {
+		t.Fatalf("Write file: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	body := buf.Bytes()
+	contentType := "multipart/form-data; boundary=" + boundary
+	got, err := rewriteModelInBody(contentType, body, "", "whisper-large-v3")
+	if err != nil {
+		t.Fatalf("rewriteModelInBody: %v", err)
+	}
+	t.Logf("rewritten body length: %d", len(got))
+
+	// Verify model was rewritten.
+	model, err := extractMultipartField(contentType, got, "model")
+	if err != nil {
+		t.Fatalf("extractMultipartField model: %v", err)
+	}
+	if model != "whisper-large-v3" {
+		t.Errorf("model = %q, want %q", model, "whisper-large-v3")
+	}
+
+	// Verify binary file part survived intact.
+	mr := multipart.NewReader(bytes.NewReader(got), boundary)
+	for {
+		p, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		if p.FileName() != "test.wav" {
+			_ = p.Close()
+			continue
+		}
+		data, readErr := io.ReadAll(p)
+		_ = p.Close()
+		if readErr != nil {
+			t.Fatalf("ReadAll file part: %v", readErr)
+		}
+		if !bytes.Equal(data, fileContent) {
+			t.Errorf("file content corrupted: got %x, want %x", data, fileContent)
+		}
+		t.Logf("binary file part verified: %d bytes intact", len(data))
+		return
+	}
+	t.Error("file part not found in rewritten body")
+}
+
+func TestRewriteModelInBody_Audio_InvalidBoundaryIsBadRequest(t *testing.T) {
+	body := []byte("--bad\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nfoo\r\n--bad--\r\n")
+	_, err := rewriteModelInBody("multipart/form-data; boundary=bad space", body, "", "whisper-large-v3")
+	if err == nil {
+		t.Fatal("expected error for invalid multipart boundary")
+	}
+	if got := normalizationStatusCode(err); got != http.StatusBadRequest {
+		t.Fatalf("normalizationStatusCode(err) = %d, want %d", got, http.StatusBadRequest)
+	}
+	t.Logf("invalid boundary error: %v", err)
 }

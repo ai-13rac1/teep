@@ -28,12 +28,32 @@ func skipNearCloudIntegration(t *testing.T) {
 // nearCloudIntegrationModel returns the model to use for nearcloud tests.
 func nearCloudIntegrationModel() string {
 	if m := os.Getenv("NEARAI_E2EE_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "nearcloud:") {
+			return m
+		}
+		return "nearcloud:" + m
 	}
-	return "Qwen/Qwen3.5-122B-A10B"
+	return "nearcloud:Qwen/Qwen3.5-122B-A10B"
 }
 
-// integrationNearCloudConfig returns a config pointing at the live cloud-api.near.ai
+func TestNearCloudIntegrationModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_E2EE_MODEL", "Qwen/Qwen3.5-122B-A10B")
+	if got, want := nearCloudIntegrationModel(), "nearcloud:Qwen/Qwen3.5-122B-A10B"; got != want {
+		t.Fatalf("nearCloudIntegrationModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_E2EE_MODEL", "nearcloud:Qwen/Qwen3.5-122B-A10B")
+	if got, want := nearCloudIntegrationModel(), "nearcloud:Qwen/Qwen3.5-122B-A10B"; got != want {
+		t.Fatalf("nearCloudIntegrationModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the nearcloud: prefix must still be prefixed.
+	t.Setenv("NEARAI_E2EE_MODEL", "other-provider/model:v2")
+	if got, want := nearCloudIntegrationModel(), "nearcloud:other-provider/model:v2"; got != want {
+		t.Fatalf("nearCloudIntegrationModel() = %q, want %q", got, want)
+	}
+}
+
 // gateway with Offline true (skips Intel PCS, NRAS, PoC network calls).
 func integrationNearCloudConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -144,13 +164,14 @@ func TestIntegration_NearCloud(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nearCloudIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation + E2EE and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, false)
 		io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nearcloud&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nearcloud&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)
@@ -253,9 +274,30 @@ func TestIntegration_NearCloud(t *testing.T) {
 // Reuses the NEARAI_IMAGES_MODEL env var shared with neardirect tests.
 func nearCloudImagesModel() string {
 	if m := os.Getenv("NEARAI_IMAGES_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "nearcloud:") {
+			return m
+		}
+		return "nearcloud:" + m
 	}
-	return "black-forest-labs/FLUX.2-klein-4B"
+	return "nearcloud:black-forest-labs/FLUX.2-klein-4B"
+}
+
+func TestNearCloudImagesModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_IMAGES_MODEL", "black-forest-labs/FLUX.2-klein-4B")
+	if got, want := nearCloudImagesModel(), "nearcloud:black-forest-labs/FLUX.2-klein-4B"; got != want {
+		t.Fatalf("nearCloudImagesModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_IMAGES_MODEL", "nearcloud:black-forest-labs/FLUX.2-klein-4B")
+	if got, want := nearCloudImagesModel(), "nearcloud:black-forest-labs/FLUX.2-klein-4B"; got != want {
+		t.Fatalf("nearCloudImagesModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the nearcloud: prefix must still be prefixed.
+	t.Setenv("NEARAI_IMAGES_MODEL", "other-provider/model:v2")
+	if got, want := nearCloudImagesModel(), "nearcloud:other-provider/model:v2"; got != want {
+		t.Fatalf("nearCloudImagesModel() = %q, want %q", got, want)
+	}
 }
 
 func TestIntegration_NearCloud_Images(t *testing.T) {
@@ -296,9 +338,30 @@ func TestIntegration_NearCloud_Images(t *testing.T) {
 // Reuses the NEARAI_VL_MODEL env var shared with neardirect tests.
 func nearCloudVLModel() string {
 	if m := os.Getenv("NEARAI_VL_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "nearcloud:") {
+			return m
+		}
+		return "nearcloud:" + m
 	}
-	return "Qwen/Qwen3-VL-30B-A3B-Instruct"
+	return "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"
+}
+
+func TestNearCloudVLModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_VL_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearCloudVLModel(), "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearCloudVLModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_VL_MODEL", "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearCloudVLModel(), "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearCloudVLModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the nearcloud: prefix must still be prefixed.
+	t.Setenv("NEARAI_VL_MODEL", "other-provider/model:v2")
+	if got, want := nearCloudVLModel(), "nearcloud:other-provider/model:v2"; got != want {
+		t.Fatalf("nearCloudVLModel() = %q, want %q", got, want)
+	}
 }
 
 func TestIntegration_NearCloud_VL(t *testing.T) {

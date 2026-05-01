@@ -490,11 +490,13 @@ func (h *PinnedHandler) verifySupplyChain(
 
 	if len(cd.Digests) > 0 && !h.offline && h.rekorClient != nil {
 		sigstore = h.rekorClient.CheckSigstoreDigests(ctx, cd.Digests)
+		var okDigests []string
 		for _, sr := range sigstore {
 			if sr.OK {
-				rekor = append(rekor, h.rekorClient.FetchRekorProvenance(ctx, sr.Digest))
+				okDigests = append(okDigests, sr.Digest)
 			}
 		}
+		rekor = h.rekorClient.FetchRekorProvenances(ctx, okDigests)
 	}
 
 	return compose, imageRepos, digestToRepo, sigstore, rekor

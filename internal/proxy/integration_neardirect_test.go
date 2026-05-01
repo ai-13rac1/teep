@@ -29,12 +29,32 @@ func skipNearDirectIntegration(t *testing.T) {
 // known-good model if NEARAI_E2EE_MODEL is unset.
 func nearDirectIntegrationModel() string {
 	if m := os.Getenv("NEARAI_E2EE_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "Qwen/Qwen3.5-122B-A10B"
+	return "neardirect:Qwen/Qwen3.5-122B-A10B"
 }
 
-// integrationNearDirectConfig returns a config pointing at the live NEAR AI API
+func TestNearDirectIntegrationModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_E2EE_MODEL", "Qwen/Qwen3.5-122B-A10B")
+	if got, want := nearDirectIntegrationModel(), "neardirect:Qwen/Qwen3.5-122B-A10B"; got != want {
+		t.Fatalf("nearDirectIntegrationModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_E2EE_MODEL", "neardirect:Qwen/Qwen3.5-122B-A10B")
+	if got, want := nearDirectIntegrationModel(), "neardirect:Qwen/Qwen3.5-122B-A10B"; got != want {
+		t.Fatalf("nearDirectIntegrationModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the neardirect: prefix must still be prefixed.
+	t.Setenv("NEARAI_E2EE_MODEL", "other-provider/model:v2")
+	if got, want := nearDirectIntegrationModel(), "neardirect:other-provider/model:v2"; got != want {
+		t.Fatalf("nearDirectIntegrationModel() = %q, want %q", got, want)
+	}
+}
+
 // with Offline true (skips Intel PCS, NRAS, PoC network calls).
 func integrationNearDirectConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -115,6 +135,7 @@ func TestIntegration_NearDirect(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nearDirectIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// A chat request populates the report cache. For NEAR AI (a pinned
 		// provider), PinnedHandler.HandlePinned returns a non-nil Report only
@@ -132,7 +153,7 @@ func TestIntegration_NearDirect(t *testing.T) {
 		io.Copy(io.Discard, chatResp.Body) // drain so the proxy's relayStream finishes cleanly
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=neardirect&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=neardirect&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)

@@ -15,9 +15,30 @@ import (
 
 func nearDirectEmbeddingsModel() string {
 	if m := os.Getenv("NEARAI_EMBEDDING_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "neardirect:") {
+			return m
+		}
+		return "neardirect:" + m
 	}
-	return "Qwen/Qwen3-Embedding-0.6B"
+	return "neardirect:Qwen/Qwen3-Embedding-0.6B"
+}
+
+func TestNearDirectEmbeddingsModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+	if got, want := nearDirectEmbeddingsModel(), "neardirect:Qwen/Qwen3-Embedding-0.6B"; got != want {
+		t.Fatalf("nearDirectEmbeddingsModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_EMBEDDING_MODEL", "neardirect:Qwen/Qwen3-Embedding-0.6B")
+	if got, want := nearDirectEmbeddingsModel(), "neardirect:Qwen/Qwen3-Embedding-0.6B"; got != want {
+		t.Fatalf("nearDirectEmbeddingsModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the neardirect: prefix must still be prefixed.
+	t.Setenv("NEARAI_EMBEDDING_MODEL", "hf:org/embedding-model")
+	if got, want := nearDirectEmbeddingsModel(), "neardirect:hf:org/embedding-model"; got != want {
+		t.Fatalf("nearDirectEmbeddingsModel() = %q, want %q", got, want)
+	}
 }
 
 func TestIntegration_NearDirect_Embeddings(t *testing.T) {
@@ -57,7 +78,10 @@ func chutesEmbeddingsModel(t *testing.T) string {
 	if m == "" {
 		t.Skip("CHUTES_EMBEDDING_MODEL not set; Chutes does not currently list embedding models")
 	}
-	return m
+	if strings.HasPrefix(m, "chutes:") {
+		return m
+	}
+	return "chutes:" + m
 }
 
 func TestIntegration_Chutes_Embeddings(t *testing.T) {
@@ -122,9 +146,12 @@ func TestIntegration_Chutes_EmbeddingsE2EE(t *testing.T) {
 // phalaCloudEmbeddingsModel returns the model for phalacloud embedding tests.
 func phalaCloudEmbeddingsModel() string {
 	if m := os.Getenv("PHALA_EMBEDDING_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "phalacloud:") {
+			return m
+		}
+		return "phalacloud:" + m
 	}
-	return "qwen/qwen3-embedding-8b"
+	return "phalacloud:qwen/qwen3-embedding-8b"
 }
 
 func TestIntegration_PhalaCloud_Embeddings(t *testing.T) {

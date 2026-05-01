@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	teep serve      [flags] PROVIDER             Start the proxy server.
+//	teep serve      [flags]                      Start the proxy server.
 //	teep verify     --model M [flags] PROVIDER   Fetch and verify attestation, print report.
 //	teep self-check                              Verify this binary's build provenance.
 //	teep version                                 Print version information.
@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -84,21 +84,16 @@ func main() {
 		Subcommands: []*ff.Command{
 			{
 				Name:      "serve",
-				Usage:     "teep serve [--offline] PROVIDER",
+				Usage:     "teep serve [--offline]",
 				ShortHelp: "Start the proxy server",
 				Flags:     serveFlags,
 				Exec: func(ctx context.Context, args []string) error {
-					if len(args) == 0 {
-						fmt.Fprintf(os.Stderr, "teep serve: provider is required\n\n")
+					if len(args) != 0 {
+						fmt.Fprintf(os.Stderr, "teep serve: unexpected arguments: %v\n\n", args)
 						printServeHelp()
 						return errSilentExit
 					}
-					if len(args) > 1 {
-						fmt.Fprintf(os.Stderr, "teep serve: expected one provider argument, got %d\n\n", len(args))
-						printServeHelp()
-						return errSilentExit
-					}
-					return runServe(ctx, args[0], *serveOffline, forceValue(serveForce))
+					return runServe(ctx, *serveOffline, forceValue(serveForce))
 				},
 			},
 			{
@@ -336,8 +331,8 @@ func normalizeArgs(args []string, rootFS *ff.FlagSet, subcmdFS map[string]*ff.Fl
 	return out
 }
 
-// runServe loads config, creates the proxy, and starts listening.
-func runServe(ctx context.Context, provider string, offline, force bool) error {
+// runServe loads config, activates all providers with resolved API keys, and starts listening.
+func runServe(ctx context.Context, offline, force bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -349,7 +344,7 @@ func runServe(ctx context.Context, provider string, offline, force bool) error {
 		slog.Warn("--force enabled: requests will be forwarded even when enforced attestation factors fail")
 	}
 
-	if err := filterProviders(cfg, provider); err != nil {
+	if err := pruneInactiveProviders(cfg.Providers); err != nil {
 		return err
 	}
 
@@ -369,13 +364,27 @@ func runServe(ctx context.Context, provider string, offline, force bool) error {
 	return nil
 }
 
-// filterProviders narrows cfg.Providers to a single named provider.
-func filterProviders(cfg *config.Config, providerName string) error {
-	cp, ok := cfg.Providers[providerName]
-	if !ok {
-		return providerNotFoundError(providerName, cfg)
+// pruneInactiveProviders removes providers with empty resolved API keys from providers.
+// It modifies the map in place.
+// Returns an error if no providers remain after pruning.
+func pruneInactiveProviders(providers map[string]*config.Provider) error {
+	for name, p := range providers {
+		if p == nil {
+			return fmt.Errorf("provider %q: config is nil", name)
+		}
+		if p.APIKey == "" {
+			delete(providers, name)
+		}
 	}
-	cfg.Providers = map[string]*config.Provider{providerName: cp}
+	if len(providers) == 0 {
+		return errors.New("no providers configured: set at least one provider API key (e.g. VENICE_API_KEY)")
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	slog.Info("serve: active providers", "count", len(providers), "names", strings.Join(names, ", "))
 	return nil
 }
 
@@ -518,6 +527,6 @@ func knownProviders(cfg *config.Config) string {
 	for name := range cfg.Providers {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return strings.Join(names, ", ")
 }

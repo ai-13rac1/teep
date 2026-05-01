@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -28,12 +29,32 @@ func skipNanogptIntegration(t *testing.T) {
 // known-good dstack-backed TEE model if NANOGPT_MODEL is unset.
 func nanogptIntegrationModel() string {
 	if m := os.Getenv("NANOGPT_MODEL"); m != "" {
-		return m
+		if strings.HasPrefix(m, "nanogpt:") {
+			return m
+		}
+		return "nanogpt:" + m
 	}
-	return "TEE/gemma-3-27b-it"
+	return "nanogpt:TEE/gemma-3-27b-it"
 }
 
-// nanogptIntegrationConfig returns a config pointing at the live NanoGPT API
+func TestNanogptIntegrationModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NANOGPT_MODEL", "TEE/gemma-3-27b-it")
+	if got, want := nanogptIntegrationModel(), "nanogpt:TEE/gemma-3-27b-it"; got != want {
+		t.Fatalf("nanogptIntegrationModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NANOGPT_MODEL", "nanogpt:TEE/gemma-3-27b-it")
+	if got, want := nanogptIntegrationModel(), "nanogpt:TEE/gemma-3-27b-it"; got != want {
+		t.Fatalf("nanogptIntegrationModel() = %q, want %q", got, want)
+	}
+
+	// Model ID containing ':' but without the nanogpt: prefix must still be prefixed.
+	t.Setenv("NANOGPT_MODEL", "TEE:model-v2")
+	if got, want := nanogptIntegrationModel(), "nanogpt:TEE:model-v2"; got != want {
+		t.Fatalf("nanogptIntegrationModel() = %q, want %q", got, want)
+	}
+}
+
 // with E2EE disabled and Offline true (skips Intel PCS, NRAS, PoC network
 // calls).
 func nanogptIntegrationConfig(t *testing.T) *config.Config {
@@ -79,13 +100,14 @@ func TestIntegration_NanoGPT(t *testing.T) {
 		defer proxySrv.Close()
 
 		model := nanogptIntegrationModel()
+		_, upstreamModel, _ := strings.Cut(model, ":")
 
 		// First chat request triggers attestation and populates the report cache.
 		chatResp := postChatIntegration(t, proxySrv.URL, model, true)
 		_, _ = io.Copy(io.Discard, chatResp.Body)
 		chatResp.Body.Close()
 
-		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nanogpt&model=%s", proxySrv.URL, model)
+		reportURL := fmt.Sprintf("%s/v1/tee/report?provider=nanogpt&model=%s", proxySrv.URL, upstreamModel)
 		reportResp, err := integrationClient.Get(reportURL)
 		if err != nil {
 			t.Fatalf("GET report: %v", err)
