@@ -46,7 +46,7 @@ func knownJSONKeys(t reflect.Type) map[string]struct{} {
 
 		if field.Anonymous {
 			ft := field.Type
-			if ft.Kind() == reflect.Ptr {
+			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -222,7 +223,7 @@ func (m *mockNearPinnedHandler) decryptImageBody(encBody []byte) (string, error)
 func (m *mockNearPinnedHandler) chatResponse(messages []map[string]json.RawMessage) string {
 	// Extract the last user message content for the echo response.
 	content := "echo"
-	for i := len(messages) - 1; i >= 0; i-- {
+	for i := range slices.Backward(messages) {
 		roleRaw, ok := messages[i]["role"]
 		if !ok {
 			continue
