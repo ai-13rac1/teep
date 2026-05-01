@@ -30,6 +30,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -204,7 +205,7 @@ func rewriteModelInBody(contentType string, body []byte, epContentType, upstream
 	if epContentType == "application/json" {
 		var m map[string]json.RawMessage
 		if err := json.Unmarshal(body, &m); err != nil {
-			return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("unmarshal request body: %w", err))
+			return nil, newRequestNormalizationError(fmt.Errorf("unmarshal request body: %w", err))
 		}
 		id, err := json.Marshal(upstreamModel)
 		if err != nil {
@@ -222,8 +223,8 @@ type requestNormalizationError struct {
 	err        error
 }
 
-func newRequestNormalizationError(statusCode int, err error) error {
-	return requestNormalizationError{statusCode: statusCode, err: err}
+func newRequestNormalizationError(err error) error {
+	return requestNormalizationError{statusCode: http.StatusBadRequest, err: err}
 }
 
 func (e requestNormalizationError) Error() string {
@@ -248,18 +249,18 @@ func normalizationStatusCode(err error) int {
 func rewriteMultipartModel(contentType string, body []byte, upstreamModel string) ([]byte, error) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("parse content-type: %w", err))
+		return nil, newRequestNormalizationError(fmt.Errorf("parse content-type: %w", err))
 	}
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, newRequestNormalizationError(http.StatusBadRequest, errors.New("missing boundary in content-type"))
+		return nil, newRequestNormalizationError(errors.New("missing boundary in content-type"))
 	}
 
 	mr := multipart.NewReader(bytes.NewReader(body), boundary)
 	var out bytes.Buffer
 	mw := multipart.NewWriter(&out)
 	if err := mw.SetBoundary(boundary); err != nil {
-		return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("set boundary: %w", err))
+		return nil, newRequestNormalizationError(fmt.Errorf("set boundary: %w", err))
 	}
 	for {
 		p, err := mr.NextPart()
@@ -267,12 +268,12 @@ func rewriteMultipartModel(contentType string, body []byte, upstreamModel string
 			break
 		}
 		if err != nil {
-			return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("read multipart: %w", err))
+			return nil, newRequestNormalizationError(fmt.Errorf("read multipart: %w", err))
 		}
 		pw, err := mw.CreatePart(p.Header)
 		if err != nil {
 			_ = p.Close()
-			return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("create part: %w", err))
+			return nil, newRequestNormalizationError(fmt.Errorf("create part: %w", err))
 		}
 		if p.FormName() == "model" {
 			_, err = pw.Write([]byte(upstreamModel))
@@ -281,7 +282,7 @@ func rewriteMultipartModel(contentType string, body []byte, upstreamModel string
 		}
 		_ = p.Close()
 		if err != nil {
-			return nil, newRequestNormalizationError(http.StatusBadRequest, fmt.Errorf("write part: %w", err))
+			return nil, newRequestNormalizationError(fmt.Errorf("write part: %w", err))
 		}
 	}
 	if err := mw.Close(); err != nil {
@@ -650,9 +651,17 @@ func fromConfig(
 		}
 		p.SupplyChainPolicy = nanogpt.SupplyChainPolicy()
 	case "phalacloud":
-		if strings.HasSuffix(cp.BaseURL, "/v1") || strings.HasSuffix(cp.BaseURL, "/v1/") {
-			trimmed := strings.TrimSuffix(strings.TrimSuffix(cp.BaseURL, "/"), "/v1")
-			return nil, fmt.Errorf("phalacloud base_url %q must not include a path suffix; use %q", cp.BaseURL, trimmed)
+		u, err := url.Parse(cp.BaseURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("phalacloud base_url %q is invalid: must be an absolute URL", cp.BaseURL)
+		}
+		if path := strings.TrimSuffix(u.EscapedPath(), "/"); path != "" {
+			base := *u
+			base.Path = ""
+			base.RawPath = ""
+			base.RawQuery = ""
+			base.Fragment = ""
+			return nil, fmt.Errorf("phalacloud base_url %q must not include a path suffix; use %q", cp.BaseURL, base.String())
 		}
 		p.ChatPath = "/v1/chat/completions"
 		p.EmbeddingsPath = "/v1/embeddings"

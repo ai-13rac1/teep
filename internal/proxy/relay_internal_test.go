@@ -1135,6 +1135,8 @@ func TestFromConfig_Phalacloud_PathSuffix(t *testing.T) {
 	for _, badURL := range []string{
 		"https://api.redpill.ai/v1",
 		"https://api.redpill.ai/v1/",
+		"https://api.redpill.ai/api",
+		"https://api.redpill.ai/api/",
 	} {
 		cp := &config.Provider{Name: "phalacloud", BaseURL: badURL, APIKey: "test-key"}
 		_, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
@@ -1144,6 +1146,20 @@ func TestFromConfig_Phalacloud_PathSuffix(t *testing.T) {
 		if err == nil {
 			t.Errorf("expected error when phalacloud base_url includes /v1 path suffix: %q", badURL)
 		}
+	}
+}
+
+func TestFromConfig_Phalacloud_RootPathAllowed(t *testing.T) {
+	cp := &config.Provider{Name: "phalacloud", BaseURL: "https://api.redpill.ai/", APIKey: "test-key"}
+	p, err := fromConfig(cp, attestation.NewSPKICache(), false, nil,
+		attestation.MeasurementPolicy{}, attestation.MeasurementPolicy{},
+		nil, nil, nil)
+	t.Logf("fromConfig(phalacloud, root slash): err=%v ChatPath=%s", err, p.ChatPath)
+	if err != nil {
+		t.Fatalf("unexpected error for phalacloud with root slash: %v", err)
+	}
+	if p.ChatPath != "/v1/chat/completions" {
+		t.Errorf("ChatPath = %q, want /v1/chat/completions", p.ChatPath)
 	}
 }
 
