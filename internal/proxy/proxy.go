@@ -2338,7 +2338,7 @@ const modelsTimeout = 30 * time.Second
 // handleModels returns available models from all configured providers in
 // deterministic (sorted) provider order. Each model's "id" field is rewritten
 // to "provider:upstreamID" so clients can route requests back to the correct
-// provider. All other upstream model fields are preserved verbatim.
+// provider. All other upstream model fields are preserved semantically.
 // Partial-success: a provider that fails listing is logged and skipped.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(reqid.WithID(r.Context(), reqid.New()), modelsTimeout)

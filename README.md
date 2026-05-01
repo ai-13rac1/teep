@@ -28,7 +28,7 @@ Teep works with any OpenAI-compatible app. Change the base URL to `http://127.0.
 
 ## Quick Start
 
-Binary releases coming soon. For now, requires Go 1.23+.
+Binary releases coming soon. For now, requires Go 1.25+.
 
 ```bash
 # Install

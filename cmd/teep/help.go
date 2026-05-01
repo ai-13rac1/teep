@@ -555,7 +555,7 @@ func printOverview() {
 
 Usage:
   teep serve      [flags]                          Start the HTTP proxy server.
-  teep verify     PROVIDER [flags]                 Fetch and print attestation report.
+  teep verify     PROVIDER --model MODEL [flags]   Fetch and print attestation report.
   teep self-check                                  Verify this binary's build provenance.
   teep version                                     Print version information.
   teep help       [topic]                          Show detailed help for a topic.

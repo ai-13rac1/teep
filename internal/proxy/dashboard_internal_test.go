@@ -166,7 +166,7 @@ func TestBuildDashboardData_NonZeroModelStats(t *testing.T) {
 	ms.lastTokCount.Store(100)                                       // 100 tokens in 2 seconds = 50 tok/s
 	ms.lastRequestAt.Store(time.Now().Add(-30 * time.Second).Unix()) // "30s ago"
 	s.stats.modelsMu.Lock()
-	s.stats.models["test-model"] = ms
+	s.stats.models["venice/test-model"] = ms
 	s.stats.modelsMu.Unlock()
 
 	data := s.buildDashboardData()
@@ -185,9 +185,9 @@ func TestBuildDashboardData_NonZeroModelStats(t *testing.T) {
 		t.Errorf("Providers[venice].Upstream = %q, want 'https://api.venice.ai'", vp.Upstream)
 	}
 
-	model, ok := data.Models["test-model"]
+	model, ok := data.Models["venice/test-model"]
 	if !ok {
-		t.Fatal("model 'test-model' not found in dashboard data")
+		t.Fatal("model 'venice/test-model' not found in dashboard data")
 	}
 	t.Logf("model: requests=%d errors=%d verifyMs=%s tokPerSec=%s lastRequest=%s",
 		model.Requests, model.Errors, model.VerifyMs, model.TokPerSec, model.LastRequest)
