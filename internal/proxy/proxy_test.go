@@ -4367,3 +4367,39 @@ func TestNew_ProviderNameWithColon(t *testing.T) {
 		t.Error("expected error for provider name containing ':', got nil")
 	}
 }
+
+func TestNew_ProviderStructNameWithColon(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {
+				Name:    "evil:venice",
+				BaseURL: "https://example.com",
+				APIKey:  "test-key",
+			},
+		},
+	}
+	_, err := proxy.New(cfg)
+	t.Logf("proxy.New with provider struct name containing colon: %v", err)
+	if err == nil {
+		t.Error("expected error for provider struct name containing ':', got nil")
+	}
+}
+
+func TestNew_ProviderKeyNameMismatch(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"venice": {
+				Name:    "nearcloud",
+				BaseURL: "https://example.com",
+				APIKey:  "test-key",
+			},
+		},
+	}
+	_, err := proxy.New(cfg)
+	t.Logf("proxy.New with mismatched provider key/name: %v", err)
+	if err == nil {
+		t.Error("expected error for mismatched provider map key and name, got nil")
+	}
+}

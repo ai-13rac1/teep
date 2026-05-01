@@ -408,8 +408,20 @@ func New(cfg *config.Config) (*Server, error) {
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral)
 
 	for name, cp := range cfg.Providers {
+		if cp == nil {
+			return nil, fmt.Errorf("provider %q: config is nil", name)
+		}
 		if strings.Contains(name, ":") {
-			return nil, fmt.Errorf("provider name %q must not contain ':'", name)
+			return nil, fmt.Errorf("provider map key %q must not contain ':'", name)
+		}
+		if cp.Name == "" {
+			return nil, fmt.Errorf("provider %q has empty name", name)
+		}
+		if strings.Contains(cp.Name, ":") {
+			return nil, fmt.Errorf("provider %q has invalid name %q: must not contain ':'", name, cp.Name)
+		}
+		if cp.Name != name {
+			return nil, fmt.Errorf("provider map key %q does not match provider name %q", name, cp.Name)
 		}
 		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
 		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)

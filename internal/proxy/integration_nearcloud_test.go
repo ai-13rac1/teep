@@ -257,9 +257,24 @@ func TestIntegration_NearCloud(t *testing.T) {
 // Reuses the NEARAI_IMAGES_MODEL env var shared with neardirect tests.
 func nearCloudImagesModel() string {
 	if m := os.Getenv("NEARAI_IMAGES_MODEL"); m != "" {
+		if strings.Contains(m, ":") {
+			return m
+		}
 		return "nearcloud:" + m
 	}
 	return "nearcloud:black-forest-labs/FLUX.2-klein-4B"
+}
+
+func TestNearCloudImagesModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_IMAGES_MODEL", "black-forest-labs/FLUX.2-klein-4B")
+	if got, want := nearCloudImagesModel(), "nearcloud:black-forest-labs/FLUX.2-klein-4B"; got != want {
+		t.Fatalf("nearCloudImagesModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_IMAGES_MODEL", "nearcloud:black-forest-labs/FLUX.2-klein-4B")
+	if got, want := nearCloudImagesModel(), "nearcloud:black-forest-labs/FLUX.2-klein-4B"; got != want {
+		t.Fatalf("nearCloudImagesModel() = %q, want %q", got, want)
+	}
 }
 
 func TestIntegration_NearCloud_Images(t *testing.T) {
@@ -300,9 +315,24 @@ func TestIntegration_NearCloud_Images(t *testing.T) {
 // Reuses the NEARAI_VL_MODEL env var shared with neardirect tests.
 func nearCloudVLModel() string {
 	if m := os.Getenv("NEARAI_VL_MODEL"); m != "" {
+		if strings.Contains(m, ":") {
+			return m
+		}
 		return "nearcloud:" + m
 	}
 	return "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"
+}
+
+func TestNearCloudVLModel_PrefixHandling(t *testing.T) {
+	t.Setenv("NEARAI_VL_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearCloudVLModel(), "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearCloudVLModel() = %q, want %q", got, want)
+	}
+
+	t.Setenv("NEARAI_VL_MODEL", "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct")
+	if got, want := nearCloudVLModel(), "nearcloud:Qwen/Qwen3-VL-30B-A3B-Instruct"; got != want {
+		t.Fatalf("nearCloudVLModel() = %q, want %q", got, want)
+	}
 }
 
 func TestIntegration_NearCloud_VL(t *testing.T) {
