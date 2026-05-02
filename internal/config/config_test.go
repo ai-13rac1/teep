@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1591,5 +1592,103 @@ gateway_mrtd_allow = ["%s"]
 	}
 	if _, ok := cfg.ProviderGatewayPolicies["venice"]; !ok {
 		t.Error("expected per-provider gateway policy to be stored")
+	}
+}
+
+// --- allow_fail startup WARN logging ---
+
+// captureSlogWarn redirects the default slog logger to a buffer for the
+// duration of the test, returning a function that reads the captured output.
+func captureSlogWarn(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return buf.String
+}
+
+// TestLoad_AllowFailWarnLogging_GlobalTOML verifies that loading a TOML with a
+// global [policy] allow_fail list emits a WARN for each configured factor.
+func TestLoad_AllowFailWarnLogging_GlobalTOML(t *testing.T) {
+	getLogs := captureSlogWarn(t)
+
+	tomlCfg := `
+[policy]
+allow_fail = ["nonce_match", "tls_key_binding"]
+`
+	path := writeConfigFile(t, tomlCfg, 0o600)
+	setenv(t, "TEEP_CONFIG", path)
+	unsetenv(t, "TEEP_LISTEN_ADDR")
+	clearProviderEnv(t)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	logs := getLogs()
+	for _, factor := range []string{"nonce_match", "tls_key_binding"} {
+		if !strings.Contains(logs, factor) {
+			t.Errorf("expected WARN log containing factor %q; output:\n%s", factor, logs)
+		}
+	}
+	if !strings.Contains(logs, "global allow_fail") {
+		t.Errorf("expected 'global allow_fail' in WARN log; output:\n%s", logs)
+	}
+}
+
+// TestLoad_AllowFailWarnLogging_PerProviderTOML verifies that loading a TOML
+// with a per-provider allow_fail list emits a WARN that includes the provider
+// name and the configured factor.
+func TestLoad_AllowFailWarnLogging_PerProviderTOML(t *testing.T) {
+	getLogs := captureSlogWarn(t)
+
+	tomlCfg := `
+[providers.venice]
+api_key = "k"
+base_url = "https://api.venice.ai"
+allow_fail = ["cpu_gpu_chain"]
+`
+	path := writeConfigFile(t, tomlCfg, 0o600)
+	setenv(t, "TEEP_CONFIG", path)
+	unsetenv(t, "TEEP_LISTEN_ADDR")
+	clearProviderEnv(t)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	logs := getLogs()
+	if !strings.Contains(logs, "cpu_gpu_chain") {
+		t.Errorf("expected WARN log containing factor %q; output:\n%s", "cpu_gpu_chain", logs)
+	}
+	if !strings.Contains(logs, "venice") {
+		t.Errorf("expected provider name %q in WARN log; output:\n%s", "venice", logs)
+	}
+	if !strings.Contains(logs, "provider allow_fail") {
+		t.Errorf("expected 'provider allow_fail' in WARN log; output:\n%s", logs)
+	}
+}
+
+// TestLoad_AllowFailWarnLogging_NoTOML verifies that loading with no TOML
+// (Go defaults only, GlobalAllowFailDefined=false) emits no allow_fail WARNs.
+func TestLoad_AllowFailWarnLogging_NoTOML(t *testing.T) {
+	getLogs := captureSlogWarn(t)
+
+	unsetenv(t, "TEEP_CONFIG")
+	unsetenv(t, "TEEP_LISTEN_ADDR")
+	clearProviderEnv(t)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	logs := getLogs()
+	if strings.Contains(logs, "allow_fail") {
+		t.Errorf("expected no allow_fail WARN when no TOML loaded; output:\n%s", logs)
 	}
 }
