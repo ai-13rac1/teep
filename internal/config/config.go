@@ -193,14 +193,14 @@ func defaultMaxConns() int {
 	soft, unlimited, err := nofileRlimit()
 	if err != nil {
 		slog.Warn("cannot read RLIMIT_NOFILE; using built-in default",
-			"default", 100, "err", err)
-		return 100
+			"default", 1000, "err", err)
+		return 1000
 	}
 	if unlimited {
-		slog.Info("RLIMIT_NOFILE is unlimited; connection limit defaults to 100; "+
+		slog.Info("RLIMIT_NOFILE is unlimited; connection limit defaults to 1000; "+
 			"set TEEP_MAX_CONNS to configure explicitly",
-			"default", 100)
-		return 100
+			"default", 1000)
+		return 1000
 	}
 	warnIfRlimitLow(soft)
 	return max(1, min(soft-rlimitHeadroom, MaxConnections))
