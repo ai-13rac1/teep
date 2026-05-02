@@ -258,8 +258,11 @@ Within the verify package:
 ### Proxy Path
 
 The proxy path wires the policy through [internal/proxy/proxy.go](../../internal/proxy/proxy.go):
-- `teep serve` initializes one proxy instance with all active providers
-   (non-empty resolved API keys), not a single selected provider.
+- `teep serve` startup in [cmd/teep/main.go](../../cmd/teep/main.go)
+   activates all providers with non-empty resolved API keys before calling
+   `proxy.New(...)`.
+- `proxy.New(...)` initializes one server instance with the resulting provider
+   set, not a single selected provider.
 - Inference routing resolves the client model as `provider:model`, selects the
    provider by exact prefix match, and rewrites request bodies so upstreams
    receive only the provider-local upstream model.
