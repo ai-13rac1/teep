@@ -307,7 +307,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMetrics serves Prometheus-format counters at /metrics.
-// Access control relies on the proxy binding to loopback by default; see ListenAndServe.
+// Access control relies on the proxy binding to loopback by default; see config.Load/warnNonLoopback.
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	fmt.Fprintf(w, "# HELP teep_requests_total Total proxy requests received\n")

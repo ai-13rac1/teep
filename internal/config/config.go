@@ -129,7 +129,8 @@ type Config struct {
 	ListenAddr string
 
 	// MaxConns is the maximum number of concurrent inbound connections.
-	// Defaults to DefaultMaxConns. Override with TEEP_MAX_CONNS.
+	// By default this is computed by defaultMaxConns() from RLIMIT_NOFILE
+	// and can be overridden with TEEP_MAX_CONNS.
 	MaxConns int
 
 	// Providers is the map of provider name → resolved provider config.

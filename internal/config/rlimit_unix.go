@@ -11,11 +11,20 @@ func nofileRlimit() (soft int, unlimited bool, err error) {
 	if err = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
 		return
 	}
-	// RLIM_INFINITY is MaxUint64 on Linux and MaxInt64 on macOS — both exceed
-	// 1_000_000. Guard first so the int() conversion is always safe.
-	const maxReasonable = 1_000_000
-	if rlim.Cur > maxReasonable {
-		return 0, true, nil
+	soft, unlimited = rlimitCurToSoft(rlim.Cur)
+	return soft, unlimited, nil
+}
+
+func rlimitCurToSoft(cur uint64) (soft int, unlimited bool) {
+	if cur == syscall.RLIM_INFINITY {
+		return 0, true
 	}
-	return int(rlim.Cur), false, nil
+
+	// Clamp large but finite values so conversion to int is always safe.
+	maxInt := int(^uint(0) >> 1)
+	if cur > uint64(maxInt) {
+		return maxInt, false
+	}
+
+	return int(cur), false
 }

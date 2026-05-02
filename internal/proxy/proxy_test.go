@@ -4296,8 +4296,8 @@ func TestRespStatusCode_NonNil(t *testing.T) {
 // Dashboard routes: GET / and GET /events
 // --------------------------------------------------------------------------
 
-func TestNew_ProviderAllowFail(t *testing.T) {
-	// Exercises the per-provider allow_fail warn loop in New().
+func TestNew_WithProviderAllowFailConfig(t *testing.T) {
+	// Ensure proxy.New accepts a config containing provider-specific allow_fail entries.
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		MaxConns:   10,
