@@ -30,15 +30,16 @@ import (
 // RecordedEntry holds metadata for one HTTP request/response pair.
 // Body is saved separately as a .body file (not JSON-encoded).
 type RecordedEntry struct {
-	Method     string      `json:"method"`
-	URL        string      `json:"url"`
-	Status     int         `json:"status"`
-	Proto      string      `json:"proto,omitempty"`
-	TLSVersion string      `json:"tls_version,omitempty"`
-	TLSCipher  string      `json:"tls_cipher,omitempty"`
-	Headers    http.Header `json:"headers"`
-	ReqBody    []byte      `json:"req_body_base64,omitempty"`
-	Body       []byte      `json:"-"`
+	Method     string        `json:"method"`
+	URL        string        `json:"url"`
+	Status     int           `json:"status"`
+	Proto      string        `json:"proto,omitempty"`
+	TLSVersion string        `json:"tls_version,omitempty"`
+	TLSCipher  string        `json:"tls_cipher,omitempty"`
+	Headers    http.Header   `json:"headers"`
+	ReqBody    []byte        `json:"req_body_base64,omitempty"`
+	Body       []byte        `json:"-"`
+	Duration   time.Duration `json:"-"`
 }
 
 // E2EEOutcome records the result of a live E2EE test for capture/replay.
@@ -60,6 +61,7 @@ type Manifest struct {
 	Model      string       `json:"model"`
 	NonceHex   string       `json:"nonce_hex"`
 	CapturedAt time.Time    `json:"captured_at"`
+	DurationMS int64        `json:"duration_ms,omitempty"`
 	E2EE       *E2EEOutcome `json:"e2ee,omitempty"`
 	// Error is set when verification failed. May contain provider HTTP response
 	// fragments; treat capture directories as potentially sensitive.
@@ -97,7 +99,9 @@ func (t *RecordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 	}
 
+	start := time.Now()
 	resp, err := t.Base.RoundTrip(req)
+	elapsed := time.Since(start)
 	if err != nil {
 		return nil, err
 	}
@@ -112,13 +116,14 @@ func (t *RecordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	resp.ContentLength = int64(len(body))
 
 	entry := RecordedEntry{
-		Method:  req.Method,
-		URL:     req.URL.String(),
-		Status:  resp.StatusCode,
-		Proto:   resp.Proto,
-		Headers: resp.Header.Clone(),
-		ReqBody: reqBody,
-		Body:    body,
+		Method:   req.Method,
+		URL:      req.URL.String(),
+		Status:   resp.StatusCode,
+		Proto:    resp.Proto,
+		Headers:  resp.Header.Clone(),
+		ReqBody:  reqBody,
+		Body:     body,
+		Duration: elapsed,
 	}
 	if resp.TLS != nil {
 		entry.TLSVersion = tlsVersionName(resp.TLS.Version)
@@ -257,6 +262,7 @@ func Save(dir string, m *Manifest, reportText string, entries []RecordedEntry) (
 			TLSCipher:  e.TLSCipher,
 			Headers:    e.Headers,
 			ReqBody:    base64Encode(e.ReqBody),
+			DurationMS: e.Duration.Milliseconds(),
 		}, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("marshal entry %d: %w", i, err)
@@ -284,6 +290,7 @@ type entryMeta struct {
 	TLSCipher  string      `json:"tls_cipher,omitempty"`
 	Headers    http.Header `json:"headers"`
 	ReqBody    string      `json:"req_body_base64,omitempty"`
+	DurationMS int64       `json:"duration_ms,omitempty"`
 }
 
 func base64Encode(b []byte) string {
@@ -374,6 +381,7 @@ func Load(dir string) (Manifest, []RecordedEntry, error) {
 			Headers:    meta.Headers,
 			ReqBody:    reqBody,
 			Body:       body,
+			Duration:   time.Duration(meta.DurationMS) * time.Millisecond,
 		})
 	}
 

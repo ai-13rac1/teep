@@ -237,11 +237,16 @@ func saveCapture(
 	if runErr != nil {
 		errMsg = runErr.Error()
 	}
+	var totalDuration time.Duration
+	for i := range recorder.Entries {
+		totalDuration += recorder.Entries[i].Duration
+	}
 	subdir, saveErr := capture.Save(opts.CaptureDir, &capture.Manifest{
 		Provider:   opts.ProviderName,
 		Model:      opts.ModelName,
 		NonceHex:   nonce.Hex(),
 		CapturedAt: time.Now().UTC(),
+		DurationMS: totalDuration.Milliseconds(),
 		E2EE:       outcomeFromE2EEResult(e2eeResult),
 		Error:      errMsg,
 	}, reportText, recorder.Entries)
