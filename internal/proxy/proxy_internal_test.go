@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+func dialAndClose(addr string) <-chan error {
+	errCh := make(chan error, 1)
+	go func() {
+		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- c.Close()
+	}()
+	return errCh
+}
+
+func waitDialResult(t *testing.T, errCh <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("dial helper: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dial helper timed out")
+	}
+}
+
 func TestMonitoredConn_CloseIdempotent(t *testing.T) {
 	base, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -14,17 +39,14 @@ func TestMonitoredConn_CloseIdempotent(t *testing.T) {
 	}
 	defer base.Close()
 
-	go func() {
-		c, err := net.Dial("tcp", base.Addr().String())
-		if err == nil {
-			c.Close()
-		}
-	}()
+	errCh := dialAndClose(base.Addr().String())
+	_ = base.(*net.TCPListener).SetDeadline(time.Now().Add(3 * time.Second))
 
 	raw, err := base.Accept()
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
+	waitDialResult(t, errCh)
 
 	var active atomic.Int64
 	active.Store(1)
@@ -64,17 +86,14 @@ func TestMonitoredListener_ThrottleLog(t *testing.T) {
 
 	// First Accept is inside the 60-second throttle window, so lastWarn should
 	// not be updated.
-	go func() {
-		c, err := net.Dial("tcp", base.Addr().String())
-		if err == nil {
-			c.Close()
-		}
-	}()
+	errCh := dialAndClose(base.Addr().String())
+	_ = base.(*net.TCPListener).SetDeadline(time.Now().Add(3 * time.Second))
 
 	conn, err := ml.Accept()
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
+	waitDialResult(t, errCh)
 	if got := ml.lastWarn.Load(); got != now {
 		t.Errorf("lastWarn updated within throttle window: got %d, want %d", got, now)
 	}
@@ -85,17 +104,14 @@ func TestMonitoredListener_ThrottleLog(t *testing.T) {
 
 	// Move lastWarn outside the throttle window; next Accept should update it.
 	ml.lastWarn.Store(now - 61)
-	go func() {
-		c, err := net.Dial("tcp", base.Addr().String())
-		if err == nil {
-			c.Close()
-		}
-	}()
+	errCh2 := dialAndClose(base.Addr().String())
+	_ = base.(*net.TCPListener).SetDeadline(time.Now().Add(3 * time.Second))
 
 	conn2, err := ml.Accept()
 	if err != nil {
 		t.Fatalf("second Accept: %v", err)
 	}
+	waitDialResult(t, errCh2)
 	if got := ml.lastWarn.Load(); got < now {
 		t.Errorf("lastWarn was not updated after throttle window: got %d, want >= %d", got, now)
 	}
