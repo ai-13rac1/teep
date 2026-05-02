@@ -134,6 +134,11 @@ type Config struct {
 	// and can be overridden by TOML max_conns or TEEP_MAX_CONNS.
 	MaxConns int
 
+	// maxConnsDefined tracks whether max_conns was explicitly configured via
+	// TOML or TEEP_MAX_CONNS. When true, RLIMIT-derived default diagnostics are
+	// suppressed because the default value is not selected.
+	maxConnsDefined bool
+
 	// Providers is the map of provider name → resolved provider config.
 	Providers map[string]*Provider
 
@@ -188,23 +193,35 @@ func warnIfRlimitLow(soft int) {
 }
 
 // defaultMaxConns computes the default connection limit from RLIMIT_NOFILE,
-// reserving rlimitHeadroom FDs for non-connection use and emitting startup
-// warnings when the system FD limit is very low or explicitly unlimited.
+// reserving rlimitHeadroom FDs for non-connection use.
+//
+// It intentionally does not log: callers should emit RLIMIT diagnostics only
+// when this computed default is actually selected after TOML/env overrides.
 func defaultMaxConns() int {
+	soft, unlimited, err := nofileRlimit()
+	if err != nil {
+		return 1000
+	}
+	if unlimited {
+		return 1000
+	}
+	return max(1, min(soft-rlimitHeadroom, MaxConnections))
+}
+
+func logDefaultMaxConnsDiagnostics() {
 	soft, unlimited, err := nofileRlimit()
 	if err != nil {
 		slog.Warn("cannot read RLIMIT_NOFILE; using built-in default",
 			"default", 1000, "err", err)
-		return 1000
+		return
 	}
 	if unlimited {
 		slog.Info("RLIMIT_NOFILE is unlimited; connection limit defaults to 1000; "+
 			"set TEEP_MAX_CONNS to configure explicitly",
 			"default", 1000)
-		return 1000
+		return
 	}
 	warnIfRlimitLow(soft)
-	return max(1, min(soft-rlimitHeadroom, MaxConnections))
 }
 
 // Load reads configuration from the optional TOML file (path from $TEEP_CONFIG)
@@ -229,6 +246,9 @@ func Load() (*Config, error) {
 	}
 
 	applyEnvOverrides(cfg)
+	if !cfg.maxConnsDefined {
+		logDefaultMaxConnsDiagnostics()
+	}
 	warnNonLoopback(cfg.ListenAddr)
 	if cfg.GlobalAllowFailDefined {
 		for _, factor := range cfg.AllowFail {
@@ -268,6 +288,7 @@ func loadTOML(cfg *Config, path string) error {
 			return fmt.Errorf("max_conns exceeds maximum %d: got %d", MaxConnections, f.MaxConns)
 		}
 		cfg.MaxConns = f.MaxConns
+		cfg.maxConnsDefined = true
 	}
 
 	for name := range f.Providers {
@@ -546,6 +567,7 @@ func applyEnvOverrides(cfg *Config) {
 		case n > MaxConnections:
 			slog.Warn("TEEP_MAX_CONNS exceeds maximum; clamping", "value", n, "max", MaxConnections)
 			cfg.MaxConns = MaxConnections
+			cfg.maxConnsDefined = true
 		default:
 			if soft, unlimited, rerr := nofileRlimit(); rerr == nil && !unlimited {
 				warnIfRlimitLow(soft)
@@ -555,6 +577,7 @@ func applyEnvOverrides(cfg *Config) {
 				}
 			}
 			cfg.MaxConns = n
+			cfg.maxConnsDefined = true
 		}
 	}
 
