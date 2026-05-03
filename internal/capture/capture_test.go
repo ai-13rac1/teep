@@ -46,7 +46,10 @@ func TestRecordingTransport(t *testing.T) {
 		t.Fatalf("entries = %d, want 1", len(rec.Entries))
 	}
 	e := rec.Entries[0]
-	t.Logf("entry: method=%s url=%s status=%d proto=%s", e.Method, e.URL, e.Status, e.Proto)
+	t.Logf("entry: method=%s url=%s status=%d proto=%s duration=%s", e.Method, e.URL, e.Status, e.Proto, e.Duration)
+	if e.Duration < 0 {
+		t.Error("Duration should be >= 0")
+	}
 	if e.Method != http.MethodPost {
 		t.Errorf("method = %q, want POST", e.Method)
 	}
@@ -220,6 +223,7 @@ func TestSaveAndLoad(t *testing.T) {
 		Model:      "deepseek-r1-0528",
 		NonceHex:   "abcdef0123456789",
 		CapturedAt: time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC),
+		DurationMS: 665,
 		E2EE: &E2EEOutcome{
 			Attempted: true,
 			Detail:    "E2EE venice: 733 encrypted fields decrypted across 736 chunks",
@@ -237,14 +241,16 @@ func TestSaveAndLoad(t *testing.T) {
 			Headers:    http.Header{"Content-Type": {"application/json"}},
 			ReqBody:    []byte(`{"nonce":"abcdef0123456789"}`),
 			Body:       []byte(`{"attestation":"raw-evidence-data","quote":"base64..."}`),
+			Duration:   542 * time.Millisecond,
 		},
 		{
-			Method:  http.MethodGet,
-			URL:     "https://api.trustedservices.intel.com/tcb",
-			Status:  200,
-			Proto:   "HTTP/1.1",
-			Headers: http.Header{"Content-Type": {"application/json"}},
-			Body:    []byte(`{"tcbInfo":"collateral-data"}`),
+			Method:   http.MethodGet,
+			URL:      "https://api.trustedservices.intel.com/tcb",
+			Status:   200,
+			Proto:    "HTTP/1.1",
+			Headers:  http.Header{"Content-Type": {"application/json"}},
+			Body:     []byte(`{"tcbInfo":"collateral-data"}`),
+			Duration: 123 * time.Millisecond,
 		},
 	}
 
@@ -286,6 +292,10 @@ func TestSaveAndLoad(t *testing.T) {
 	if loadedM.E2EE.Detail != m.E2EE.Detail {
 		t.Errorf("E2EE.Detail = %q, want %q", loadedM.E2EE.Detail, m.E2EE.Detail)
 	}
+	t.Logf("loaded DurationMS: %d", loadedM.DurationMS)
+	if loadedM.DurationMS != m.DurationMS {
+		t.Errorf("DurationMS = %d, want %d", loadedM.DurationMS, m.DurationMS)
+	}
 
 	// Verify entries.
 	if len(loadedEntries) != len(entries) {
@@ -293,7 +303,7 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	for i, got := range loadedEntries {
 		want := entries[i]
-		t.Logf("entry %d: method=%s url=%s status=%d bodyLen=%d", i, got.Method, got.URL, got.Status, len(got.Body))
+		t.Logf("entry %d: method=%s url=%s status=%d bodyLen=%d duration=%s", i, got.Method, got.URL, got.Status, len(got.Body), got.Duration)
 		if got.Method != want.Method {
 			t.Errorf("entry %d method = %q, want %q", i, got.Method, want.Method)
 		}
@@ -311,6 +321,9 @@ func TestSaveAndLoad(t *testing.T) {
 		}
 		if got.TLSVersion != want.TLSVersion {
 			t.Errorf("entry %d TLS version = %q, want %q", i, got.TLSVersion, want.TLSVersion)
+		}
+		if got.Duration != want.Duration {
+			t.Errorf("entry %d duration = %s, want %s", i, got.Duration, want.Duration)
 		}
 	}
 }
@@ -529,12 +542,15 @@ func TestRecordingTransport_TLS(t *testing.T) {
 		t.Fatalf("entries = %d, want 1", len(rec.Entries))
 	}
 	e := rec.Entries[0]
-	t.Logf("TLS version: %q, cipher: %q", e.TLSVersion, e.TLSCipher)
+	t.Logf("TLS version: %q, cipher: %q, duration: %s", e.TLSVersion, e.TLSCipher, e.Duration)
 	if e.TLSVersion == "" {
 		t.Error("TLSVersion should be set for TLS connection")
 	}
 	if e.TLSCipher == "" {
 		t.Error("TLSCipher should be set for TLS connection")
+	}
+	if e.Duration < 0 {
+		t.Error("Duration should be >= 0")
 	}
 }
 
@@ -590,6 +606,75 @@ func TestLoad_MissingManifest(t *testing.T) {
 		t.Fatal("expected error for missing manifest")
 	}
 	t.Logf("missing manifest error: %v", err)
+}
+
+func TestLoad_UnknownManifestFields(t *testing.T) {
+	dir := t.TempDir()
+	respDir := filepath.Join(dir, "responses")
+	if err := os.MkdirAll(respDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"provider":"test","model":"m","nonce_hex":"aabb","captured_at":"2026-01-01T00:00:00Z","future_field":"x"}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, entries, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Logf("loaded manifest with unknown field: provider=%s entries=%d", m.Provider, len(entries))
+	if m.Provider != "test" {
+		t.Errorf("provider = %q, want %q", m.Provider, "test")
+	}
+}
+
+func TestLoad_UnknownEntryFields(t *testing.T) {
+	dir := t.TempDir()
+	respDir := filepath.Join(dir, "responses")
+	if err := os.MkdirAll(respDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"provider":"test","model":"m","nonce_hex":"aabb","captured_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entryJSON := `{"method":"GET","url":"https://example.com","status":200,"headers":{},"future_field":"x"}`
+	if err := os.WriteFile(filepath.Join(respDir, "0001_example.com.json"), []byte(entryJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(respDir, "0001_example.com.body"), []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, entries, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Logf("loaded %d entries with unknown field", len(entries))
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want 1", len(entries))
+	}
+}
+
+func TestLoad_MissingBodyFile(t *testing.T) {
+	dir := t.TempDir()
+	respDir := filepath.Join(dir, "responses")
+	if err := os.MkdirAll(respDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"provider":"test","model":"m","nonce_hex":"aabb","captured_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entryJSON := `{"method":"GET","url":"https://example.com","status":200,"headers":{}}`
+	if err := os.WriteFile(filepath.Join(respDir, "0001_example.com.json"), []byte(entryJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No .body file written — Load should fail.
+	_, _, err := Load(dir)
+	t.Logf("missing body file error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing body file")
+	}
 }
 
 func TestLoad_BadEntryJSON(t *testing.T) {
