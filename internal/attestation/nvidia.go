@@ -356,6 +356,7 @@ func (v *NVIDIAVerifier) verifyNVIDIAJWT(ctx context.Context, jwtPayload, jwksUR
 	parserOpts := append([]jwt.ParserOption{
 		jwt.WithValidMethods([]string{"ES256", "ES384", "ES512"}),
 		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(30 * time.Second),
 	}, opts...)
 	token, err := jwt.ParseWithClaims(jwtPayload, claims, kf.Keyfunc, parserOpts...)
 
