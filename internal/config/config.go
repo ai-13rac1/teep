@@ -42,9 +42,9 @@ const (
 	rlimitHeadroom = 50
 
 	// AttestationTimeout is the HTTP client timeout for attestation fetches.
-	// 45 seconds accommodates Chutes' multi-GPU evidence endpoint which
-	// consistently takes ~30 seconds for large TEE deployments.
-	AttestationTimeout = 45 * time.Second
+	// 120 seconds accommodates slow provider endpoints (e.g. Venice, Chutes)
+	// that can take over a minute for large TEE deployments.
+	AttestationTimeout = 120 * time.Second
 )
 
 // DefaultAllowFail lists the factor names that are allowed to fail without
