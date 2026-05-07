@@ -2,6 +2,7 @@ package httpclient_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -87,6 +88,28 @@ func TestLoggingTransport_Error(t *testing.T) {
 	}
 }
 
+func TestLoggingTransport_ErrorWithResponse(t *testing.T) {
+	// Some transports return both a response and an error (e.g., redirect errors).
+	// WrapLogging must close the body to avoid leaking.
+	wantErr := errors.New("redirect error")
+	mock := &mockRT{fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusMovedPermanently,
+			Body:       io.NopCloser(strings.NewReader("redirected")),
+		}, wantErr
+	}}
+	lt := httpclient.WrapLogging(mock)
+	resp, err := lt.RoundTrip(makeReq("https://example.com/redir"))
+	closeBody(t, resp)
+	t.Logf("err=%v resp=%v", err, resp)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+	if resp != nil {
+		t.Error("expected nil response when error is returned")
+	}
+}
+
 func TestLoggingTransport_ErrorPassthrough(t *testing.T) {
 	wantErr := errors.New("context deadline exceeded")
 	mock := &mockRT{fn: func(*http.Request) (*http.Response, error) {
@@ -133,6 +156,31 @@ func TestCountingTransport_NilCallbacksOnError(t *testing.T) {
 	t.Logf("err=%v (nil callbacks did not panic)", err)
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestCountingTransport_ErrorWithResponse(t *testing.T) {
+	// Transport returns both a response and an error — body must be closed.
+	wantErr := errors.New("redirect error")
+	mock := &mockRT{fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusMovedPermanently,
+			Body:       io.NopCloser(strings.NewReader("redirected")),
+		}, wantErr
+	}}
+	var errCount int
+	ct := httpclient.WrapCounting(mock, nil, func() { errCount++ })
+	resp, err := ct.RoundTrip(makeReq("https://example.com/redir"))
+	closeBody(t, resp)
+	t.Logf("err=%v resp=%v errCount=%d", err, resp, errCount)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+	if resp != nil {
+		t.Error("expected nil response when error is returned")
+	}
+	if errCount != 1 {
+		t.Errorf("errCount = %d, want 1", errCount)
 	}
 }
 
@@ -231,6 +279,177 @@ func TestRetryTransport_RetriesOn5xx(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	t.Logf("calls: %d, body: %s", calls, body)
+	if calls != 2 {
+		t.Errorf("expected 2 calls, got %d", calls)
+	}
+}
+
+func TestRetryTransport_ExhaustsMaxAttempts(t *testing.T) {
+	calls := 0
+	rt := &httpclient.RetryTransport{
+		Base: rtFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+			}, nil
+		}),
+		// Zero MaxAttempts exercises the default (3).
+		MaxDelay: time.Millisecond,
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/", http.NoBody)
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	t.Logf("calls=%d err=%v", calls, err)
+	if err == nil {
+		t.Fatal("expected error after exhausting all attempts")
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 calls (default MaxAttempts), got %d", calls)
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error = %q, should mention 503", err)
+	}
+}
+
+func TestRetryTransport_BodyCannotReset(t *testing.T) {
+	attempts := 0
+	rt := &httpclient.RetryTransport{
+		Base: &mockRT{fn: func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+			}, nil
+		}},
+		MaxAttempts: 3,
+		MaxDelay:    time.Millisecond,
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/attest", http.NoBody)
+	req.Body = io.NopCloser(bytes.NewReader([]byte(`{"nonce":"abc"}`)))
+	req.GetBody = nil
+
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	t.Logf("BodyCannotReset: err=%v attempts=%d", err, attempts)
+	if attempts != 1 {
+		t.Errorf("expected 1 attempt (body cannot be reset), got %d", attempts)
+	}
+	if err == nil {
+		t.Error("expected non-nil error when body cannot be reset")
+	}
+}
+
+func TestRetryTransport_ContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rt := &httpclient.RetryTransport{
+		Base: &mockRT{fn: func(req *http.Request) (*http.Response, error) {
+			cancel() // cancel after first attempt
+			return nil, errors.New("connection refused")
+		}},
+		MaxAttempts: 3,
+		MaxDelay:    time.Millisecond,
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", http.NoBody)
+	resp, err := rt.RoundTrip(req)
+	closeBody(t, resp)
+	t.Logf("err=%v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+}
+
+func TestRetryTransport_NetworkError(t *testing.T) {
+	calls := 0
+	rt := &httpclient.RetryTransport{
+		Base: &mockRT{fn: func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls < 3 {
+				return nil, errors.New("connection refused")
+			}
+			return okResponse(), nil
+		}},
+		MaxAttempts: 3,
+		MaxDelay:    time.Millisecond,
+	}
+
+	req := makeReq("https://example.com/")
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer closeBody(t, resp)
+	t.Logf("calls: %d, status: %d", calls, resp.StatusCode)
+	if calls != 3 {
+		t.Errorf("expected 3 calls, got %d", calls)
+	}
+}
+
+func TestRetryTransport_GetBodyError(t *testing.T) {
+	calls := 0
+	rt := &httpclient.RetryTransport{
+		Base: &mockRT{fn: func(req *http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("connection refused")
+		}},
+		MaxAttempts: 3,
+		MaxDelay:    time.Millisecond,
+	}
+
+	body := []byte(`{"nonce":"abc"}`)
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/attest", bytes.NewReader(body))
+	getBodyErr := errors.New("body stream closed")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, getBodyErr
+	}
+
+	resp, err := rt.RoundTrip(req)
+	closeBody(t, resp)
+	t.Logf("calls=%d err=%v", calls, err)
+	if !errors.Is(err, getBodyErr) {
+		t.Errorf("expected GetBody error, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call before GetBody error, got %d", calls)
+	}
+}
+
+func TestRetryTransport_RetriesWithGetBody(t *testing.T) {
+	calls := 0
+	rt := &httpclient.RetryTransport{
+		Base: &mockRT{fn: func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls < 2 {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			}
+			return okResponse(), nil
+		}},
+		MaxAttempts: 3,
+		MaxDelay:    time.Millisecond,
+	}
+
+	body := []byte(`{"nonce":"abc"}`)
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/attest", bytes.NewReader(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer closeBody(t, resp)
+	t.Logf("calls: %d, status: %d", calls, resp.StatusCode)
 	if calls != 2 {
 		t.Errorf("expected 2 calls, got %d", calls)
 	}
