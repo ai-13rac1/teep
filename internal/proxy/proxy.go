@@ -419,7 +419,7 @@ func New(cfg *config.Config) (*Server, error) {
 	onErr := func() { s.stats.httpErrors.Add(1) }
 
 	attestClient.Transport = tlsct.WrapCounting(
-		tlsct.WrapLogging(attestClient.Transport),
+		tlsct.WrapLogging(attestClient.Transport, config.AttestationTimeout),
 		onReq, onErr)
 
 	upstreamClient := tlsct.NewHTTPClientWithTransport(0, &http.Transport{

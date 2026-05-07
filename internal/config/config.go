@@ -750,7 +750,7 @@ func NewAttestationClient(offline bool) *http.Client {
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	}, !offline)
-	client.Transport = tlsct.WrapLogging(client.Transport)
+	client.Transport = tlsct.WrapLogging(client.Transport, AttestationTimeout)
 	client.Transport = &RetryTransport{Base: client.Transport}
 	return client
 }

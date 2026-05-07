@@ -1,19 +1,29 @@
 package tlsct
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 )
 
 // loggingTransport logs every outgoing HTTP request at DEBUG level.
-type loggingTransport struct{ base http.RoundTripper }
+// When timeout is set, it is included in error messages so operators can see
+// the configured limit without reading source code.
+type loggingTransport struct {
+	base    http.RoundTripper
+	timeout time.Duration
+}
 
 // WrapLogging wraps a transport with DEBUG-level request/response logging.
 // Logs method, host, path, status, content-type, content-length, and elapsed
 // time. Query parameters are omitted for nonce safety.
-func WrapLogging(base http.RoundTripper) http.RoundTripper {
-	return &loggingTransport{base: base}
+func WrapLogging(base http.RoundTripper, timeout ...time.Duration) http.RoundTripper {
+	var t time.Duration
+	if len(timeout) > 0 {
+		t = timeout[0]
+	}
+	return &loggingTransport{base: base, timeout: t}
 }
 
 func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -28,13 +38,20 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		slog.DebugContext(req.Context(), "http request failed",
+		attrs := []any{
 			"method", req.Method,
 			"host", host,
 			"path", path,
 			"elapsed", elapsed,
 			"err", err,
-		)
+		}
+		if t.timeout > 0 {
+			attrs = append(attrs, "timeout", t.timeout)
+		}
+		slog.DebugContext(req.Context(), "http request failed", attrs...)
+		if t.timeout > 0 {
+			return nil, fmt.Errorf("%s %s%s (timeout %v): %w", req.Method, host, path, t.timeout, err)
+		}
 		return nil, err
 	}
 

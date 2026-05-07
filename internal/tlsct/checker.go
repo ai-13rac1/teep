@@ -66,7 +66,7 @@ func NewChecker() *Checker {
 		entries: make(map[string]certCacheEntry),
 		logListHTTP: &http.Client{
 			Timeout:   20 * time.Second,
-			Transport: WrapLogging(base),
+			Transport: WrapLogging(base, 20*time.Second),
 		},
 	}
 	c.enabled.Store(ctEnabledDefault)
@@ -92,7 +92,7 @@ func NewHTTPClient(timeout time.Duration, ctEnabled ...bool) *http.Client {
 		panic("http.DefaultTransport is not *http.Transport")
 	}
 	client := NewHTTPClientWithTransport(timeout, dt.Clone(), ctEnabled...)
-	client.Transport = WrapLogging(client.Transport)
+	client.Transport = WrapLogging(client.Transport, timeout)
 	return client
 }
 

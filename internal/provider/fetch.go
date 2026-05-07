@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // FetchAttestationJSON performs a GET to url with a Bearer token, reads up to
@@ -20,12 +19,7 @@ func FetchAttestationJSON(ctx context.Context, client *http.Client, url, apiKey 
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Host+Path only — never include query parameters (may contain nonce).
-		msg := fmt.Sprintf("GET %s%s", req.URL.Host, req.URL.Path)
-		if client.Timeout > 0 && strings.Contains(err.Error(), "context deadline exceeded") {
-			return nil, fmt.Errorf("%s: timed out after %v: %w", msg, client.Timeout, err)
-		}
-		return nil, fmt.Errorf("%s: %w", msg, err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
