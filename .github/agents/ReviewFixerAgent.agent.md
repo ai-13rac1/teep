@@ -30,7 +30,7 @@ For each finding:
    - It must not weaken fail-closed behavior, cryptographic safety, or attestation guarantees.
    - It must be in scope and not introduce unrelated behavior changes.
 4. If the finding is a **false positive** (the code is already correct), mark the todo as `skip (false positive)` and move on.
-5. If the finding is invalid or the requested change is invalid for this code path, do **not** implement behavioral changes for that finding. At most, add clarifying code comments when they materially reduce future false positives.
+5. If the finding itself is invalid for this code path, do **not** implement behavioral changes for that finding. At most, add clarifying code comments when they materially reduce future false positives. If the finding is valid but the requested change is invalid, reject only the requested change and continue to Phase 3 with an alternative safe remediation.
 6. If the finding is **valid**, proceed to Phase 3 using a valid remediation strategy (the review suggestion if valid; otherwise an alternative safe fix).
 
 ### Phase 3 — Implement Fixes
