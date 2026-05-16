@@ -32,9 +32,8 @@ Produce a structured review with:
   - Severity: `Critical` / `High` / `Medium` / `Low`
   - Description of the risk
   - Suggested fix (if clear)
-- **Verdict**: `APPROVE` / `REQUEST CHANGES` / `BLOCK`
-  - Use `BLOCK` for any Critical finding (fail-open, cryptographic, attestation bypass).
-  - Use `REQUEST CHANGES` for High or Medium findings.
+- **Verdict**: `APPROVE` / `REQUEST CHANGES`
+  - Use `REQUEST CHANGES` for any actionable finding, including Critical findings (fail-open, cryptographic, attestation bypass).
   - Use `APPROVE` only when no actionable findings remain.
 
 ## Constraints

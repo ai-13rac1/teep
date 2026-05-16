@@ -11,7 +11,7 @@ Teep is *fail-closed* security software. Never weaken security checks, bypass va
 ## Inputs
 
 You receive:
-- The **full text of a code review report** (APPROVE / REQUEST CHANGES / BLOCK verdict, with findings).
+- The **full text of a code review report** (APPROVE / REQUEST CHANGES verdict, with findings).
 - The **round number** N (for the commit message).
 
 ## Workflow
