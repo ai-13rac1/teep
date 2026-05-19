@@ -49,7 +49,7 @@ func TestIntegration_NearDirect_Embeddings(t *testing.T) {
 
 	model := nearDirectEmbeddingsModel()
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
-	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", body)
 	if err != nil {
 		t.Fatalf("POST embeddings: %v", err)
 	}
@@ -66,6 +66,102 @@ func TestIntegration_NearDirect_Embeddings(t *testing.T) {
 	}
 
 	assertEmbeddingsResponse(t, respBody)
+}
+
+func TestIntegration_NearDirect_Embeddings_E2EE(t *testing.T) {
+	skipNearDirectIntegration(t)
+
+	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearDirectEmbeddingsModel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "StringInput",
+			body: `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`,
+		},
+		{
+			name: "ArrayInput",
+			body: `{"model":"` + model + `","input":["alpha text","beta text"]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", tc.body)
+			if err != nil {
+				t.Fatalf("POST embeddings (%s): %v", tc.name, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				respBody, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
+			}
+
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			assertEmbeddingsResponse(t, respBody)
+		})
+	}
+}
+
+func nearCloudEmbeddingsModel() string {
+	if m := os.Getenv("NEARAI_EMBEDDING_MODEL"); m != "" {
+		if strings.HasPrefix(m, "nearcloud:") {
+			return m
+		}
+		return "nearcloud:" + m
+	}
+	return "nearcloud:Qwen/Qwen3-Embedding-0.6B"
+}
+
+func TestIntegration_NearCloud_Embeddings_E2EE(t *testing.T) {
+	skipNearCloudIntegration(t)
+
+	proxySrv := newProxyServer(t, integrationNearCloudE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearCloudEmbeddingsModel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "StringInput",
+			body: `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`,
+		},
+		{
+			name: "ArrayInput",
+			body: `{"model":"` + model + `","input":["alpha text","beta text"]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", tc.body)
+			if err != nil {
+				t.Fatalf("POST embeddings (%s): %v", tc.name, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				respBody, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, respBody)
+			}
+
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			assertEmbeddingsResponse(t, respBody)
+		})
+	}
 }
 
 // --------------------------------------------------------------------------
@@ -93,7 +189,7 @@ func TestIntegration_Chutes_Embeddings(t *testing.T) {
 
 	model := chutesEmbeddingsModel(t)
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
-	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", body)
 	if err != nil {
 		t.Fatalf("POST embeddings: %v", err)
 	}
@@ -120,7 +216,7 @@ func TestIntegration_Chutes_EmbeddingsE2EE(t *testing.T) {
 
 	model := chutesEmbeddingsModel(t)
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
-	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", body)
 	if err != nil {
 		t.Fatalf("POST embeddings: %v", err)
 	}
@@ -162,7 +258,7 @@ func TestIntegration_PhalaCloud_Embeddings(t *testing.T) {
 
 	model := phalaCloudEmbeddingsModel()
 	body := `{"model":"` + model + `","input":"The quick brown fox jumps over the lazy dog"}`
-	resp, err := integrationClient.Post(proxySrv.URL+"/v1/embeddings", "application/json", strings.NewReader(body))
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/embeddings", body)
 	if err != nil {
 		t.Fatalf("POST embeddings: %v", err)
 	}
