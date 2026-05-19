@@ -136,11 +136,12 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -206,11 +207,12 @@ func TestHandlePinned_CacheHit(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -279,11 +281,12 @@ func TestHandlePinned_MissingGatewayTLSFingerprint(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 
 	t.Logf("error: %v", err)
@@ -328,11 +331,12 @@ func TestHandlePinned_MismatchedGatewayFingerprint(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 
 	t.Logf("error: %v", err)
@@ -382,11 +386,12 @@ func TestHandlePinned_BlockedReport(t *testing.T) {
 
 	for i := range 2 {
 		resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-			Method:  "POST",
-			Path:    "/v1/chat/completions",
-			Headers: http.Header{"Content-Type": {"application/json"}},
-			Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-			Model:   "test-model",
+			Method:   "POST",
+			Path:     "/v1/chat/completions",
+			Endpoint: e2ee.EndpointChat,
+			Headers:  http.Header{"Content-Type": {"application/json"}},
+			Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+			Model:    "test-model",
 		})
 		if err != nil {
 			t.Fatalf("HandlePinned call %d: %v", i+1, err)
@@ -458,11 +463,12 @@ func TestHandlePinned_AttestationQueryParams(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -563,11 +569,12 @@ func TestHandlePinned_AttestationHTTPError(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[]}`),
+		Model:    "test-model",
 	})
 
 	t.Logf("error: %v", err)
@@ -610,11 +617,12 @@ func TestHandlePinned_InvalidAttestationJSON(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[]}`),
+		Model:    "test-model",
 	})
 
 	t.Logf("error: %v", err)
@@ -639,11 +647,12 @@ func TestHandlePinned_DialError(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	_, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[]}`),
+		Model:    "test-model",
 	})
 
 	t.Logf("error: %v", err)
@@ -724,11 +733,12 @@ func TestHandlePinned_ModelHasDifferentFingerprint(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -933,11 +943,12 @@ func TestHandlePinned_WithGatewayComposeAndModelFingerprint(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -1018,11 +1029,12 @@ func TestHandlePinned_WithNonEmptyQuotesAndPayload(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -1229,7 +1241,8 @@ func TestEncryptBody_NoE2EE(t *testing.T) {
 func TestEncryptBody_NoSigningKey(t *testing.T) {
 	h := &PinnedHandler{}
 	_, _, _, err := h.encryptBody(
-		&provider.PinnedRequest{E2EE: true, Path: "/v1/chat/completions", Body: []byte(`{}`)},
+		&provider.PinnedRequest{E2EE: true, Path: "/v1/chat/completions",
+			Endpoint: e2ee.EndpointChat, Body: []byte(`{}`)},
 		nil, "",
 	)
 	t.Logf("error: %v", err)
@@ -1253,6 +1266,7 @@ func TestEncryptBody_UsesRequestSigningKey(t *testing.T) {
 			E2EE:       true,
 			SigningKey: sigKey,
 			Path:       "/v1/chat/completions",
+			Endpoint:   e2ee.EndpointChat,
 			Body:       []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
 		},
 		nil, "", // no report, no attestation signing key — uses req.SigningKey
@@ -1282,6 +1296,9 @@ func TestEncryptBody_UsesRequestSigningKey(t *testing.T) {
 	}
 	if headers.Get("X-Encryption-Version") != "2" {
 		t.Errorf("X-Encryption-Version = %q, want 2", headers.Get("X-Encryption-Version"))
+	}
+	if headers.Get("X-Encrypt-All-Fields") != "true" {
+		t.Errorf("X-Encrypt-All-Fields = %q, want true", headers.Get("X-Encrypt-All-Fields"))
 	}
 }
 
@@ -1340,11 +1357,12 @@ func TestHandlePinned_GatewayBlockedModelPasses(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -1419,11 +1437,12 @@ func TestHandlePinned_GatewayPassesModelBlocked(t *testing.T) {
 	handler.SetCTChecker(nil)
 
 	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("HandlePinned: %v", err)
@@ -1487,11 +1506,12 @@ func TestHandlePinned_SigningKeyCachedOnSuccess(t *testing.T) {
 
 	// First request — triggers attestation, should return signing key.
 	resp1, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-		Method:  "POST",
-		Path:    "/v1/chat/completions",
-		Headers: http.Header{"Content-Type": {"application/json"}},
-		Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-		Model:   "test-model",
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
 	})
 	if err != nil {
 		t.Fatalf("first HandlePinned: %v", err)
@@ -1518,6 +1538,7 @@ func TestHandlePinned_SigningKeyCachedOnSuccess(t *testing.T) {
 	resp2, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
 		Method:     "POST",
 		Path:       "/v1/chat/completions",
+		Endpoint:   e2ee.EndpointChat,
 		Headers:    http.Header{"Content-Type": {"application/json"}},
 		Body:       []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
 		Model:      "test-model",
@@ -1590,11 +1611,12 @@ func TestHandlePinned_ConcurrentRequests_SingleflightDedup(t *testing.T) {
 			ready.Done()
 			ready.Wait()
 			resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
-				Method:  "POST",
-				Path:    "/v1/chat/completions",
-				Headers: http.Header{"Content-Type": {"application/json"}},
-				Body:    []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
-				Model:   "test-model",
+				Method:   "POST",
+				Path:     "/v1/chat/completions",
+				Endpoint: e2ee.EndpointChat,
+				Headers:  http.Header{"Content-Type": {"application/json"}},
+				Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+				Model:    "test-model",
 			})
 			if err != nil {
 				errs <- err

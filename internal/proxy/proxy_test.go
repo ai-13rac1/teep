@@ -497,12 +497,14 @@ type sessionPinnedHandler struct{}
 // fakeDecryptor satisfies e2ee.Decryptor for testing.
 type fakeDecryptor struct{}
 
-func (fakeDecryptor) IsEncryptedChunk(string) bool   { return false }
-func (fakeDecryptor) Decrypt(string) ([]byte, error) { return nil, errors.New("fake") }
-func (fakeDecryptor) Zero()                          {}
+func (fakeDecryptor) IsEncryptedChunk(string) bool                            { return false }
+func (fakeDecryptor) Decrypt(string) ([]byte, error)                          { return nil, errors.New("fake") }
+func (fakeDecryptor) IsRequestFieldEncrypted(string) bool                     { return false }
+func (fakeDecryptor) IsResponseFieldEncrypted(string, e2ee.EndpointType) bool { return false }
+func (fakeDecryptor) Zero()                                                   {}
 
 func (sessionPinnedHandler) HandlePinned(_ context.Context, _ *provider.PinnedRequest) (*provider.PinnedResponse, error) {
-	body := io.NopCloser(strings.NewReader(`{"data":"encrypted"}`))
+	body := io.NopCloser(strings.NewReader(`{"created":1234567890,"data":[{"b64_json":"encrypted","revised_prompt":"prompt"}]}`))
 	return &provider.PinnedResponse{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -744,6 +746,7 @@ func TestNonChat_PinnedOK_ForwardsUpstreamHeaders(t *testing.T) {
 	}{
 		{"/v1/embeddings", `{"model":"neardirect:test-model","input":"hello"}`},
 		{"/v1/images/generations", `{"model":"neardirect:test-model","prompt":"a cat","n":1}`},
+		{"/v1/score", `{"model":"neardirect:test-model","text_1":"hello","text_2":"world"}`},
 	}
 	for _, ep := range endpoints {
 		t.Run(ep.path, func(t *testing.T) {
@@ -1009,6 +1012,88 @@ func TestRerank_ProviderDoesNotSupport400(t *testing.T) {
 		strings.NewReader(`{"model":"test-model","query":"hello","documents":["a","b"]}`))
 	if err != nil {
 		t.Fatalf("POST rerank: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Score endpoint tests
+// --------------------------------------------------------------------------
+
+func TestScore_MissingModel400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/score", "application/json",
+		strings.NewReader(`{"text_1":"hello","text_2":"world"}`))
+	if err != nil {
+		t.Fatalf("POST score: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestScore_InvalidJSON400(t *testing.T) {
+	proxySrv := newNeardirectProxyServer(t, stubPinnedHandler{})
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/score", "application/json",
+		strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatalf("POST score: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestScore_PinnedOK(t *testing.T) {
+	handler := &pathCapturingPinnedHandler{}
+	proxySrv := newNeardirectProxyServer(t, handler)
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/score", "application/json",
+		strings.NewReader(`{"model":"neardirect:test-model","text_1":"hello","text_2":"world"}`))
+	if err != nil {
+		t.Fatalf("POST score: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	handler.mu.Lock()
+	gotPath := handler.path
+	handler.mu.Unlock()
+	if gotPath != "/v1/score" {
+		t.Errorf("PinnedRequest.Path = %q, want /v1/score", gotPath)
+	}
+}
+
+func TestScore_ProviderDoesNotSupport400(t *testing.T) {
+	// Venice has no ScorePath set.
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Post(proxySrv.URL+"/v1/score", "application/json",
+		strings.NewReader(`{"model":"test-model","text_1":"hello","text_2":"world"}`))
+	if err != nil {
+		t.Fatalf("POST score: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -2268,7 +2353,7 @@ func TestReassembleNonStream(t *testing.T) {
 	))
 	fmt.Fprintf(&sse, "data: [DONE]\n\n")
 
-	result, ss, err := e2ee.ReassembleNonStream(strings.NewReader(sse.String()), session)
+	result, ss, err := e2ee.ReassembleNonStream(strings.NewReader(sse.String()), session, e2ee.EndpointChat)
 	if err != nil {
 		t.Fatalf("ReassembleNonStream: %v", err)
 	}
@@ -2351,7 +2436,7 @@ func TestReassembleNonStream_WithReasoning(t *testing.T) {
 	))
 	fmt.Fprintf(&sse, "data: [DONE]\n\n")
 
-	result, ss, err := e2ee.ReassembleNonStream(strings.NewReader(sse.String()), session)
+	result, ss, err := e2ee.ReassembleNonStream(strings.NewReader(sse.String()), session, e2ee.EndpointChat)
 	if err != nil {
 		t.Fatalf("ReassembleNonStream: %v", err)
 	}
@@ -2630,7 +2715,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 
 	t.Run("decrypt_success", func(t *testing.T) {
 		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"content":%q},"index":0}]}`, enc)
-		got, err := e2ee.DecryptSSEChunk(chunk, session)
+		got, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptSSEChunk: %v", err)
 		}
@@ -2643,7 +2728,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 
 	t.Run("empty_delta_passthrough", func(t *testing.T) {
 		chunk := `{"id":"c1","choices":[{"delta":{"role":"assistant"},"index":0}]}`
-		got, err := e2ee.DecryptSSEChunk(chunk, session)
+		got, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptSSEChunk: %v", err)
 		}
@@ -2654,7 +2739,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 
 	t.Run("no_choices_passthrough", func(t *testing.T) {
 		chunk := `{"id":"c1","usage":{"prompt_tokens":5}}`
-		got, err := e2ee.DecryptSSEChunk(chunk, session)
+		got, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptSSEChunk: %v", err)
 		}
@@ -2665,7 +2750,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 
 	t.Run("non_encrypted_content_errors", func(t *testing.T) {
 		chunk := `{"id":"c1","choices":[{"delta":{"content":"plain text"},"index":0}]}`
-		_, err := e2ee.DecryptSSEChunk(chunk, session)
+		_, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err == nil {
 			t.Fatal("expected error for non-encrypted content")
 		}
@@ -2673,7 +2758,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 	})
 
 	t.Run("invalid_json_errors", func(t *testing.T) {
-		_, err := e2ee.DecryptSSEChunk("not json", session)
+		_, err := e2ee.DecryptSSEChunk("not json", session, e2ee.EndpointChat)
 		if err == nil {
 			t.Fatal("expected error for invalid JSON")
 		}
@@ -2687,7 +2772,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 		}
 
 		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"reasoning":%q},"index":0}]}`, encReasoning)
-		got, err := e2ee.DecryptSSEChunk(chunk, session)
+		got, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptSSEChunk: %v", err)
 		}
@@ -2724,7 +2809,7 @@ func TestDecryptSSEChunk(t *testing.T) {
 		}
 
 		chunk := fmt.Sprintf(`{"id":"c1","choices":[{"delta":{"content":%q,"reasoning":%q},"index":0}]}`, encContent, encReasoning)
-		got, err := e2ee.DecryptSSEChunk(chunk, session)
+		got, err := e2ee.DecryptSSEChunk(chunk, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptSSEChunk: %v", err)
 		}
@@ -2770,7 +2855,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 
 	t.Run("decrypt_success", func(t *testing.T) {
 		body := []byte(nonStreamResponse(enc))
-		got, err := e2ee.DecryptNonStreamResponse(body, session)
+		got, err := e2ee.DecryptNonStreamResponseForEndpoint(body, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptNonStreamResponse: %v", err)
 		}
@@ -2783,7 +2868,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 
 	t.Run("no_choices_passthrough", func(t *testing.T) {
 		body := []byte(`{"id":"c1","usage":{"prompt_tokens":5}}`)
-		got, err := e2ee.DecryptNonStreamResponse(body, session)
+		got, err := e2ee.DecryptNonStreamResponseForEndpoint(body, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptNonStreamResponse: %v", err)
 		}
@@ -2794,7 +2879,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 
 	t.Run("empty_content_passthrough", func(t *testing.T) {
 		body := []byte(nonStreamResponse(""))
-		got, err := e2ee.DecryptNonStreamResponse(body, session)
+		got, err := e2ee.DecryptNonStreamResponseForEndpoint(body, session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptNonStreamResponse: %v", err)
 		}
@@ -2806,7 +2891,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 
 	t.Run("non_encrypted_content_errors", func(t *testing.T) {
 		body := []byte(nonStreamResponse("plain text"))
-		_, err := e2ee.DecryptNonStreamResponse(body, session)
+		_, err := e2ee.DecryptNonStreamResponseForEndpoint(body, session, e2ee.EndpointChat)
 		if err == nil {
 			t.Fatal("expected error for non-encrypted content")
 		}
@@ -2814,7 +2899,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 	})
 
 	t.Run("invalid_json_errors", func(t *testing.T) {
-		_, err := e2ee.DecryptNonStreamResponse([]byte("not json"), session)
+		_, err := e2ee.DecryptNonStreamResponseForEndpoint([]byte("not json"), session, e2ee.EndpointChat)
 		if err == nil {
 			t.Fatal("expected error for invalid JSON")
 		}
@@ -2834,7 +2919,7 @@ func TestDecryptNonStreamResponse(t *testing.T) {
 			"model": "test-model",
 			"choices": [{"index":0,"message":{"role":"assistant","content":%q,"reasoning":%q},"finish_reason":"stop"}]
 		}`, enc, encReasoning)
-		got, err := e2ee.DecryptNonStreamResponse([]byte(body), session)
+		got, err := e2ee.DecryptNonStreamResponseForEndpoint([]byte(body), session, e2ee.EndpointChat)
 		if err != nil {
 			t.Fatalf("DecryptNonStreamResponse: %v", err)
 		}
@@ -3018,7 +3103,7 @@ func TestPrepareUpstreamHeaders_NearCloudSession(t *testing.T) {
 func TestRelayStream_EmptyBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(""), nil)
+	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(""), nil, e2ee.EndpointChat)
 
 	t.Logf("status: %d, body: %q", rec.Code, rec.Body.String())
 	if rec.Code != http.StatusBadGateway {
@@ -3034,7 +3119,7 @@ func TestRelayStream_NonDataLines(t *testing.T) {
 
 	// SSE with a comment line, a non-data event, then a data chunk and DONE.
 	body := ": this is a comment\nevent: heartbeat\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(body), nil)
+	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(body), nil, e2ee.EndpointChat)
 
 	t.Logf("status: %d", rec.Code)
 	if rec.Code != http.StatusOK {
@@ -3066,7 +3151,7 @@ func TestRelayStream_PlaintextPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	body := streamSSE("hello world")
-	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(body), nil)
+	_, _ = e2ee.RelayStream(context.Background(), rec, strings.NewReader(body), nil, e2ee.EndpointChat)
 
 	t.Logf("status: %d", rec.Code)
 	if rec.Code != http.StatusOK {
@@ -3092,7 +3177,7 @@ func TestRelayNonStream_NilSession(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	body := nonStreamResponse("hello from upstream")
-	_, _ = e2ee.RelayNonStream(context.Background(), rec, strings.NewReader(body), nil)
+	_, _ = e2ee.RelayNonStreamForEndpoint(context.Background(), rec, strings.NewReader(body), nil, e2ee.EndpointChat)
 
 	t.Logf("status: %d", rec.Code)
 	if rec.Code != http.StatusOK {
@@ -3115,7 +3200,7 @@ func TestRelayReassembledNonStream_MalformedSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	// No valid SSE data lines — should fail during reassembly.
-	_, _ = e2ee.RelayReassembledNonStream(context.Background(), rec, strings.NewReader("not valid sse"), nil)
+	_, _ = e2ee.RelayReassembledNonStream(context.Background(), rec, strings.NewReader("not valid sse"), nil, e2ee.EndpointChat)
 
 	t.Logf("status: %d, body: %q", rec.Code, rec.Body.String())
 	if rec.Code != http.StatusBadGateway {
@@ -3644,7 +3729,7 @@ func (m *mockE2EEFetcher) Invalidate(chuteID string) {
 // from meta.
 type passthroughEncryptor struct{}
 
-func (passthroughEncryptor) EncryptRequest(body []byte, _ *attestation.RawAttestation, _ string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+func (passthroughEncryptor) EncryptRequest(body []byte, _ *attestation.RawAttestation, _ e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
 	return body, nil, nil, nil
 }
 
