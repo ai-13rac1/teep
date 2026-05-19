@@ -1,7 +1,9 @@
 package e2ee
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,61 +66,533 @@ type usageInfo struct {
 	} `json:"usage"`
 }
 
-// NonEncryptedFields is the set of known string-valued fields in OpenAI chat
-// delta/message objects that are never encrypted by the E2EE layer. Expanding
-// this allowlist prevents false-positive IsEncryptedChunk matches on
-// non-content hex-like fields (e.g. trace IDs).
+// IsNonEncryptedField reports whether key is known plaintext metadata in
+// OpenAI chat delta/message objects.
 //
-// The upstream NEAR AI inference-proxy encrypts only: content,
-// reasoning_content, reasoning, and audio.data. All other string fields
-// pass through unencrypted.
+// Note: "refusal", "name", and "function_call" are intentionally absent —
+// they are encrypted by NearCloud/NearDirect when X-Encrypt-All-Fields is
+// active. Only structural metadata that the inference-proxy never encrypts
+// belongs here.
+func IsNonEncryptedField(key string) bool {
+	switch key {
+	case "role", "tool_call_id", "type", "finish_reason", "id":
+		return true
+	default:
+		return false
+	}
+}
+
+// RequiresEncryptedField reports whether a string-valued field must be
+// encrypted for the active protocol mode and endpoint.
 //
-// Source: https://github.com/nearai/inference-proxy/blob/main/src/encryption.rs
-//   - encrypt_chat_response_choices (server → client encryption)
-//   - decrypt_chat_message_fields   (client → server decryption)
-//
-// Protocol docs: https://github.com/nearai/docs/blob/main/docs/cloud/guides/e2ee-chat-completions.mdx
-var NonEncryptedFields = map[string]bool{
-	"role":          true,
-	"refusal":       true,
-	"name":          true,
-	"tool_call_id":  true,
-	"type":          true,
-	"finish_reason": true,
-	"function_call": true,
-	"id":            true,
+// In full-field mode (NearCloud/NearDirect/Chutes), every non-metadata string
+// field must be encrypted. In content-only mode (Venice), only content is
+// strictly required to be encrypted; other string fields may be plaintext.
+func RequiresEncryptedField(key string, session Decryptor, endpoint EndpointType) bool {
+	if IsNonEncryptedField(key) {
+		return false
+	}
+	return session.IsResponseFieldEncrypted(key, endpoint)
 }
 
 // decryptDeltaFields iterates all string-valued fields in a delta (or message)
 // map, decrypts any that pass the session's IsEncryptedChunk check,
 // and returns true if any field was decrypted.
-func decryptDeltaFields(fields map[string]json.RawMessage, session Decryptor, ctx string) (bool, error) {
+func decryptDeltaFields(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
 	changed := false
-	for key, raw := range fields {
-		var s string
-		if json.Unmarshal(raw, &s) != nil || s == "" {
+	for key := range fields {
+		if IsNonEncryptedField(key) {
 			continue
 		}
-		if NonEncryptedFields[key] {
+		if key == "content" {
+			c, err := decryptContentField(fields, session, ctx, endpoint)
+			if err != nil {
+				return false, err
+			}
+			if c {
+				changed = true
+			}
 			continue
 		}
-		if !session.IsEncryptedChunk(s) {
-			return false, fmt.Errorf("%s.%s: expected encrypted but not recognised (len=%d prefix=%q)", ctx, key, len(s), SafePrefix(s, 8))
+		// audio, tool_calls, and function_call are structured object/array fields
+		// handled by dedicated helpers in decryptChatObject. Skip them here to
+		// avoid treating the container object or array as an encrypted string.
+		if key == "audio" || key == "tool_calls" || key == "function_call" {
+			continue
 		}
-		plaintext, err := session.Decrypt(s)
+		c, err := decryptMaybeEncryptedStringField(fields, key, session, ctx, key, endpoint)
 		if err != nil {
-			return false, fmt.Errorf("decrypt %s.%s: %w", ctx, key, err)
+			return false, err
 		}
-		plaintextJSON, _ := json.Marshal(string(plaintext)) //nolint:errchkjson // strings always marshal
-		fields[key] = plaintextJSON
-		changed = true
+		if c {
+			changed = true
+		}
 	}
 	return changed, nil
 }
 
+func decryptContentField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	raw, ok := fields["content"]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	// Chat completions endpoint path documented here: /v1/chat/completions or /api/v1/chat/completions
+	requiresEncrypted := session.IsResponseFieldEncrypted(EncFieldContent, endpoint)
+
+	if jsonRawStartsWithToken(raw, '"') {
+		plaintext, err := DecryptFieldOrSkip(raw, session, requiresEncrypted, ctx+".content")
+		if err != nil {
+			return false, err
+		}
+		if plaintext == nil {
+			return false, nil
+		}
+		plaintextJSON, _ := json.Marshal(string(plaintext)) //nolint:errchkjson // strings always marshal
+		fields["content"] = plaintextJSON
+		return true, nil
+	}
+
+	if !jsonRawStartsWithToken(raw, '[') {
+		if requiresEncrypted {
+			return false, fmt.Errorf("%s.content: expected encrypted string or content-part array, got %s", ctx, rawTypeDescription(raw))
+		}
+		return false, nil
+	}
+
+	// Multimodal content array encryption: /v1/chat/completions
+	if !session.IsResponseFieldEncrypted(EncFieldContentText, endpoint) {
+		if requiresEncrypted {
+			return false, fmt.Errorf("%s.content: expected encrypted string but got array", ctx)
+		}
+		return false, nil
+	}
+
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return false, fmt.Errorf("%s.content: parse array: %w", ctx, err)
+	}
+
+	changed := false
+	for i, partRaw := range parts {
+		if IsJSONNull(partRaw) {
+			continue
+		}
+		if !jsonRawStartsWithToken(partRaw, '{') {
+			return false, fmt.Errorf("%s.content[%d]: expected object, got %s", ctx, i, rawTypeDescription(partRaw))
+		}
+		var part map[string]json.RawMessage
+		if err := json.Unmarshal(partRaw, &part); err != nil {
+			return false, fmt.Errorf("%s.content[%d]: parse object: %w", ctx, i, err)
+		}
+		c, err := decryptMaybeEncryptedStringField(part, "text", session, fmt.Sprintf("%s.content[%d]", ctx, i), EncFieldContentText, endpoint)
+		if err != nil {
+			return false, err
+		}
+		if !c {
+			continue
+		}
+		partOut, _ := json.Marshal(part) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+		parts[i] = partOut
+		changed = true
+	}
+
+	if !changed {
+		return false, nil
+	}
+	partsOut, _ := json.Marshal(parts) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	fields["content"] = partsOut
+	return true, nil
+}
+
+func decryptAudioDataField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	audioRaw, ok := fields["audio"]
+	if !ok || IsJSONNull(audioRaw) {
+		return false, nil
+	}
+	var audio map[string]json.RawMessage
+	if err := json.Unmarshal(audioRaw, &audio); err != nil {
+		return false, fmt.Errorf("%s.audio: parse object: %w", ctx, err)
+	}
+	c, err := decryptMaybeEncryptedStringField(audio, "data", session, ctx+".audio", EncFieldAudioData, endpoint)
+	if err != nil {
+		return false, err
+	}
+	if !c {
+		return false, nil
+	}
+	audioOut, _ := json.Marshal(audio) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	fields["audio"] = audioOut
+	return true, nil
+}
+
+func decryptFunctionObject(obj map[string]json.RawMessage, session Decryptor, ctx, policyBase string, endpoint EndpointType) (bool, error) {
+	changed := false
+	for _, key := range functionObjectFields {
+		c, err := decryptMaybeEncryptedStringField(obj, key, session, ctx, policyBase+"."+key, endpoint)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func decryptToolCallsField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	raw, ok := fields["tool_calls"]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	var calls []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		return false, fmt.Errorf("%s.tool_calls: parse array: %w", ctx, err)
+	}
+	changed := false
+	for i := range calls {
+		fnRaw, ok := calls[i]["function"]
+		if !ok || IsJSONNull(fnRaw) {
+			continue
+		}
+		var fn map[string]json.RawMessage
+		if err := json.Unmarshal(fnRaw, &fn); err != nil {
+			return false, fmt.Errorf("%s.tool_calls[%d].function: parse object: %w", ctx, i, err)
+		}
+		c, err := decryptFunctionObject(fn, session, fmt.Sprintf("%s.tool_calls[%d].function", ctx, i), "tool_calls[].function", endpoint)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			fnOut, _ := json.Marshal(fn) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+			calls[i]["function"] = fnOut
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	callsOut, _ := json.Marshal(calls) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	fields["tool_calls"] = callsOut
+	return true, nil
+}
+
+func decryptFunctionCallField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	raw, ok := fields["function_call"]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	if !jsonRawStartsWithToken(raw, '{') {
+		// Deprecated function_call can be a string; keep unchanged.
+		return false, nil
+	}
+	var fc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fc); err != nil {
+		return false, fmt.Errorf("%s.function_call: parse object: %w", ctx, err)
+	}
+	changed, err := decryptFunctionObject(fc, session, ctx+".function_call", "function_call", endpoint)
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	fcOut, _ := json.Marshal(fc) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	fields["function_call"] = fcOut
+	return true, nil
+}
+
+func decryptChoiceLogprobs(choice map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	raw, ok := choice["logprobs"]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	if !jsonRawStartsWithToken(raw, '{') {
+		return false, nil
+	}
+	var logprobs map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &logprobs); err != nil {
+		return false, fmt.Errorf("%s.logprobs: parse object: %w", ctx, err)
+	}
+	changed := false
+	for _, key := range []string{"content", "refusal"} {
+		policyBase := "logprobs." + key + "[]"
+		keyChanged := false
+		entriesRaw, ok := logprobs[key]
+		if !ok || IsJSONNull(entriesRaw) {
+			continue
+		}
+		var entries []map[string]json.RawMessage
+		if err := json.Unmarshal(entriesRaw, &entries); err != nil {
+			return false, fmt.Errorf("%s.logprobs.%s: parse array: %w", ctx, key, err)
+		}
+		for i := range entries {
+			entryChanged, err := decryptLogprobsTokenEntry(entries[i], session, fmt.Sprintf("%s.logprobs.%s[%d]", ctx, key, i), policyBase, endpoint)
+			if err != nil {
+				return false, err
+			}
+			if entryChanged {
+				changed = true
+				keyChanged = true
+			}
+		}
+		if keyChanged {
+			entriesOut, _ := json.Marshal(entries) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+			logprobs[key] = entriesOut
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	logprobsOut, _ := json.Marshal(logprobs) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	choice["logprobs"] = logprobsOut
+	return true, nil
+}
+
+func decryptLogprobsTokenEntry(entry map[string]json.RawMessage, session Decryptor, ctx, policyBase string, endpoint EndpointType) (bool, error) {
+	changed := false
+	if c, err := decryptMaybeEncryptedStringField(entry, "token", session, ctx, policyBase+".token", endpoint); err != nil {
+		return false, err
+	} else if c {
+		changed = true
+	}
+	if c, err := decryptJSONValueField(entry, "bytes", session, ctx+".bytes", policyBase+".bytes", endpoint); err != nil {
+		return false, err
+	} else if c {
+		changed = true
+	}
+	topRaw, ok := entry["top_logprobs"]
+	if !ok || IsJSONNull(topRaw) {
+		return changed, nil
+	}
+	var top []map[string]json.RawMessage
+	if err := json.Unmarshal(topRaw, &top); err != nil {
+		return false, fmt.Errorf("%s.top_logprobs: parse array: %w", ctx, err)
+	}
+	topChanged := false
+	for i := range top {
+		c, err := decryptLogprobsTokenEntry(top[i], session, fmt.Sprintf("%s.top_logprobs[%d]", ctx, i), policyBase+".top_logprobs[]", endpoint)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			topChanged = true
+		}
+	}
+	if topChanged {
+		changed = true
+		topOut, _ := json.Marshal(top) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+		entry["top_logprobs"] = topOut
+	}
+	return changed, nil
+}
+
+func decryptMaybeEncryptedStringField(obj map[string]json.RawMessage, key string, session Decryptor, ctx, policyPath string, endpoint EndpointType) (bool, error) {
+	raw, ok := obj[key]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	requiresEncrypted := session.IsResponseFieldEncrypted(policyPath, endpoint)
+	plaintext, err := DecryptFieldOrSkip(raw, session, requiresEncrypted, ctx+"."+key)
+	if err != nil {
+		return false, err
+	}
+	if plaintext == nil {
+		return false, nil
+	}
+	plaintextJSON, _ := json.Marshal(string(plaintext)) //nolint:errchkjson // strings always marshal
+	obj[key] = plaintextJSON
+	return true, nil
+}
+
+// decryptJSONValueField decrypts an encrypted-JSON field in obj[key] and
+// stores the result back as a raw JSON value (number, array, or object).
+// Unlike decryptMaybeEncryptedStringField the plaintext is not re-wrapped as a
+// JSON string. fieldCtx is the full dot-path used in error messages.
+func decryptJSONValueField(obj map[string]json.RawMessage, key string, session Decryptor, fieldCtx, policyPath string, endpoint EndpointType) (bool, error) {
+	raw, ok := obj[key]
+	if !ok || IsJSONNull(raw) {
+		return false, nil
+	}
+	requiresEncrypted := session.IsResponseFieldEncrypted(policyPath, endpoint)
+	plaintext, err := DecryptFieldOrSkip(raw, session, requiresEncrypted, fieldCtx)
+	if err != nil {
+		return false, err
+	}
+	if plaintext == nil {
+		return false, nil
+	}
+	obj[key] = applyDecryptedJSON(plaintext)
+	return true, nil
+}
+
+func decryptChatObject(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
+	changed := false
+	if c, err := decryptDeltaFields(fields, session, ctx, endpoint); err != nil {
+		return false, err
+	} else if c {
+		changed = true
+	}
+	// Each nested field group is gated by its own canonical encrypted leaf path rather
+	// than a shared proxy (audio.data). This ensures a future provider that encrypts
+	// tool_calls but not audio, or function_call but not tool_calls, is handled correctly.
+	if session.IsResponseFieldEncrypted(EncFieldAudioData, endpoint) {
+		if c, err := decryptAudioDataField(fields, session, ctx, endpoint); err != nil {
+			return false, err
+		} else if c {
+			changed = true
+		}
+	}
+	if session.IsResponseFieldEncrypted(EncFieldToolCallsFuncName, endpoint) {
+		if c, err := decryptToolCallsField(fields, session, ctx, endpoint); err != nil {
+			return false, err
+		} else if c {
+			changed = true
+		}
+	}
+	if session.IsResponseFieldEncrypted(EncFieldFuncCallName, endpoint) {
+		if c, err := decryptFunctionCallField(fields, session, ctx, endpoint); err != nil {
+			return false, err
+		} else if c {
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func jsonRawStartsWithToken(raw json.RawMessage, token byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == token
+}
+
+// logprobLeafEncFields lists all logprobs leaf field enc paths that may be
+// encrypted. anyLogprobsLeafEncrypted and decryptLogprobsTokenEntry both depend
+// on these paths; keeping them in a shared slice ensures coverage stays in sync
+// when new logprob leaves are added.
+var logprobLeafEncFields = []string{
+	EncFieldLogprobsContentToken, EncFieldLogprobsContentBytes,
+	EncFieldLogprobsRefusalToken, EncFieldLogprobsRefusalBytes,
+}
+
+// anyLogprobsLeafEncrypted reports whether any logprobs leaf field (content or
+// refusal token/bytes) requires encryption for the given endpoint. Used to gate
+// decryptChoiceLogprobs in both streaming and non-streaming paths so that
+// mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
+func anyLogprobsLeafEncrypted(session Decryptor, endpoint EndpointType) bool {
+	for _, path := range logprobLeafEncFields {
+		if session.IsResponseFieldEncrypted(path, endpoint) {
+			return true
+		}
+	}
+	return false
+}
+
+// rawTypeDescription returns a human-readable description of the JSON type
+// represented by a json.RawMessage (e.g. "array", "object", "number").
+// Used in error messages to clarify what was found when an encrypted string was expected.
+func rawTypeDescription(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "empty"
+	}
+	switch trimmed[0] {
+	case '[':
+		return "array"
+	case '{':
+		return "object"
+	case '"':
+		return "string"
+	case 't', 'f':
+		return "boolean"
+	case 'n':
+		return "null"
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return "number"
+	default:
+		return "unknown"
+	}
+}
+
+// DecryptFieldOrSkip attempts to decrypt raw as an encrypted JSON string ciphertext.
+// Returns:
+//   - (plaintext, nil) if decryption succeeded (AEAD MAC validated).
+//   - (nil, nil) if the value is empty, non-string, or not recognised as a ciphertext,
+//     and requiresEncrypted is false (policy allows plaintext passthrough).
+//   - (nil, err) if requiresEncrypted is true and the value is not encrypted, or if
+//     Decrypt fails.
+//
+// Callers must handle null/absent checks before calling; raw must not be null.
+func DecryptFieldOrSkip(raw json.RawMessage, session Decryptor, requiresEncrypted bool, ctx string) ([]byte, error) {
+	if !jsonRawStartsWithToken(raw, '"') {
+		if !requiresEncrypted {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: expected encrypted string, got %s", ctx, rawTypeDescription(raw))
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("parse %s as string: %w", ctx, err)
+	}
+	if s == "" {
+		return nil, nil
+	}
+	if !session.IsEncryptedChunk(s) {
+		if !requiresEncrypted {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: expected encrypted string but not recognised (len=%d prefix=%q)", ctx, len(s), SafePrefix(s, 8))
+	}
+	plaintext, err := session.Decrypt(s)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt %s: %w", ctx, err)
+	}
+	return plaintext, nil
+}
+
+// decryptJSONArrayObjects parses an array of JSON objects, lets visit mutate each
+// object, and re-marshals the array if any item changed. If strict is false and raw
+// is not an array of objects, the helper returns (nil, false, nil).
+func decryptJSONArrayObjects(raw json.RawMessage, strict bool, parseContext string, visit func(i int, item map[string]json.RawMessage) (bool, error)) (json.RawMessage, bool, error) {
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		if strict {
+			return nil, false, fmt.Errorf("%s: %w", parseContext, err)
+		}
+		return nil, false, nil
+	}
+
+	changed := false
+	for i := range items {
+		itemChanged, err := visit(i, items[i])
+		if err != nil {
+			return nil, false, err
+		}
+		if itemChanged {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil, false, nil
+	}
+	out, _ := json.Marshal(items) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	return out, true, nil
+}
+
+// applyDecryptedJSON stores a successfully decrypted payload as a json.RawMessage.
+// If plaintext is valid JSON it is used directly; otherwise it is wrapped as a JSON string.
+func applyDecryptedJSON(plaintext []byte) json.RawMessage {
+	if json.Valid(plaintext) {
+		return json.RawMessage(plaintext)
+	}
+	b, _ := json.Marshal(string(plaintext)) //nolint:errchkjson // strings always marshal
+	return b
+}
+
 // DecryptSSEChunk parses one SSE data JSON payload, decrypts all encrypted
 // fields in the delta object, and returns the JSON with plaintext substituted.
-func DecryptSSEChunk(data string, session Decryptor) (string, error) {
+// The endpoint parameter identifies the proxy route kind; currently only EndpointChat is supported.
+// Actual provider paths: /v1/chat/completions (NearCloud) or /api/v1/chat/completions (Venice).
+func DecryptSSEChunk(data string, session Decryptor, endpoint EndpointType) (string, error) {
 	var full map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(data), &full); err != nil {
 		return "", fmt.Errorf("parse SSE chunk JSON: %w", err)
@@ -147,9 +621,19 @@ func DecryptSSEChunk(data string, session Decryptor) (string, error) {
 		return "", fmt.Errorf("parse delta object: %w", err)
 	}
 
-	changed, err := decryptDeltaFields(delta, session, "delta")
+	changed, err := decryptChatObject(delta, session, "delta", endpoint)
 	if err != nil {
 		return "", err
+	}
+	// Gate on any encrypted logprobs leaf rather than only content[].token so that
+	// mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
+	// NearCloud/NearDirect report "logprobs" container as false but encrypt leaves.
+	if anyLogprobsLeafEncrypted(session, endpoint) {
+		if c, err := decryptChoiceLogprobs(choices[0], session, "choice[0]", endpoint); err != nil {
+			return "", err
+		} else if c {
+			changed = true
+		}
 	}
 	if !changed {
 		return data, nil
@@ -166,10 +650,31 @@ func DecryptSSEChunk(data string, session Decryptor) (string, error) {
 	return string(out), nil
 }
 
+// collectOriginalStringFields snapshots all non-metadata, non-empty string
+// fields from delta before decryption. The snapshot is used after
+// decryptChatObject to classify fields as originally-encrypted vs plaintext
+// (via constant-time compare) and to verify that expected ciphertexts were
+// actually decrypted.
+func collectOriginalStringFields(delta map[string]json.RawMessage) map[string]string {
+	result := make(map[string]string, len(delta))
+	for key, raw := range delta {
+		if IsNonEncryptedField(key) {
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) != nil || s == "" {
+			continue
+		}
+		result[key] = s
+	}
+	return result
+}
+
 // decryptSSEChunkContent decrypts all encrypted fields from the first choice's
 // delta in one SSE JSON chunk and returns them as a map of field name to
 // plaintext string.
-func decryptSSEChunkContent(data string, session Decryptor) (map[string]string, error) {
+// The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
+func decryptSSEChunkContent(data string, session Decryptor, endpoint EndpointType) (map[string]string, error) {
 	var full map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(data), &full); err != nil {
 		return nil, fmt.Errorf("parse SSE chunk JSON: %w", err)
@@ -198,23 +703,33 @@ func decryptSSEChunkContent(data string, session Decryptor) (map[string]string, 
 		return nil, fmt.Errorf("parse delta object: %w", err)
 	}
 
+	originalStringFields := collectOriginalStringFields(delta)
+
+	if _, err := decryptChatObject(delta, session, "delta", endpoint); err != nil {
+		return nil, err
+	}
+
 	result := make(map[string]string)
-	for key, raw := range delta {
+	for key, original := range originalStringFields {
+		if IsNonEncryptedField(key) {
+			continue
+		}
+		raw := delta[key]
 		var s string
 		if json.Unmarshal(raw, &s) != nil || s == "" {
 			continue
 		}
-		if NonEncryptedFields[key] {
+		if !session.IsEncryptedChunk(original) {
+			if RequiresEncryptedField(key, session, endpoint) {
+				return nil, fmt.Errorf("delta.%s: expected encrypted string before decryption", key)
+			}
+			result[key] = s
 			continue
 		}
-		if !session.IsEncryptedChunk(s) {
-			return nil, fmt.Errorf("delta.%s: expected encrypted but not recognised (len=%d prefix=%q)", key, len(s), SafePrefix(s, 8))
+		if subtle.ConstantTimeCompare([]byte(original), []byte(s)) == 1 {
+			return nil, fmt.Errorf("delta.%s: expected decrypted plaintext, got unchanged ciphertext", key)
 		}
-		plaintext, err := session.Decrypt(s)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt delta.%s: %w", key, err)
-		}
-		result[key] = string(plaintext)
+		result[key] = s
 	}
 
 	if len(result) == 0 {
@@ -223,9 +738,13 @@ func decryptSSEChunkContent(data string, session Decryptor) (map[string]string, 
 	return result, nil
 }
 
-// DecryptNonStreamResponse decrypts all encrypted string fields in each
-// choice's message of an OpenAI-format non-streaming response body.
-func DecryptNonStreamResponse(body []byte, session Decryptor) ([]byte, error) {
+// DecryptNonStreamResponseForEndpoint decrypts all encrypted string fields in
+// an OpenAI-format non-streaming response body for a specific endpoint path.
+func DecryptNonStreamResponseForEndpoint(body []byte, session Decryptor, endpoint EndpointType) ([]byte, error) {
+	if endpoint == "" {
+		return nil, errors.New("decrypt non-stream response: endpoint type is required")
+	}
+
 	var full map[string]json.RawMessage
 	if err := json.Unmarshal(body, &full); err != nil {
 		return nil, fmt.Errorf("parse response JSON: %w", err)
@@ -235,7 +754,7 @@ func DecryptNonStreamResponse(body []byte, session Decryptor) ([]byte, error) {
 
 	// Chat completions: decrypt choices[].message content fields.
 	if choicesRaw, ok := full["choices"]; ok {
-		c, err := decryptResponseChoices(choicesRaw, session)
+		c, err := decryptResponseChoices(choicesRaw, session, endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -245,16 +764,72 @@ func DecryptNonStreamResponse(body []byte, session Decryptor) ([]byte, error) {
 		}
 	}
 
-	// Images: decrypt data[].b64_json and data[].revised_prompt fields.
-	if dataRaw, ok := full["data"]; ok {
-		d, err := decryptResponseImageData(dataRaw, session)
-		if err != nil {
-			return nil, err
+	// Per-endpoint data[] decryption. Unknown endpoints are rejected here so
+	// the allowlist and dispatch are co-located rather than split across two
+	// separate guards.
+	switch endpoint {
+	case EndpointChat:
+		// choices[] already handled above; no data[] to decrypt.
+	case EndpointImages:
+		// Image generation endpoint path: /v1/images/generations.
+		if dataRaw, ok := full["data"]; ok {
+			d, err := decryptResponseImageData(dataRaw, session, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if d != nil {
+				full["data"] = d
+				changed = true
+			}
 		}
-		if d != nil {
-			full["data"] = d
-			changed = true
+	case EndpointEmbeddings:
+		// Embeddings endpoint path: /v1/embeddings.
+		if dataRaw, ok := full["data"]; ok {
+			d, err := decryptResponseEmbeddingsData(dataRaw, session, true, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if d != nil {
+				full["data"] = d
+				changed = true
+			}
 		}
+	case EndpointScore:
+		// Score endpoint path: /v1/score.
+		if dataRaw, ok := full["data"]; ok {
+			d, err := decryptResponseScoreData(dataRaw, session, true, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if d != nil {
+				full["data"] = d
+				changed = true
+			}
+		}
+	case EndpointRerank:
+		// Reranking: decrypt results[] document text fields.
+		// Reranking endpoint path: /v1/rerank.
+		if resultsRaw, ok := full["results"]; ok {
+			r, err := decryptResponseRerankResults(resultsRaw, session, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if r != nil {
+				full["results"] = r
+				changed = true
+			}
+		}
+	default:
+		return nil, fmt.Errorf("decrypt non-stream response: unsupported endpoint type %q", endpoint)
+	}
+
+	// Top-level score field: decrypt or fail-closed for any endpoint. For full-
+	// field sessions (e.g. NearCloud), the policy returns true for unknown leaves
+	// on non-score endpoints, so a stray plaintext score field is rejected.
+	if c, err := decryptJSONValueField(full, EncFieldScore, session, EncFieldScore, EncFieldScore, endpoint); err != nil {
+		return nil, err
+	} else if c {
+		changed = true
 	}
 
 	if !changed {
@@ -265,7 +840,7 @@ func DecryptNonStreamResponse(body []byte, session Decryptor) ([]byte, error) {
 
 // decryptResponseChoices decrypts content fields in choices[].message objects.
 // Returns the rewritten choices JSON, or nil if nothing was decrypted.
-func decryptResponseChoices(choicesRaw json.RawMessage, session Decryptor) (json.RawMessage, error) {
+func decryptResponseChoices(choicesRaw json.RawMessage, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
 	var choices []map[string]json.RawMessage
 	if err := json.Unmarshal(choicesRaw, &choices); err != nil {
 		return nil, fmt.Errorf("parse choices: %w", err)
@@ -282,9 +857,19 @@ func decryptResponseChoices(choicesRaw json.RawMessage, session Decryptor) (json
 			return nil, fmt.Errorf("parse choice[%d].message: %w", i, err)
 		}
 
-		c, err := decryptDeltaFields(msg, session, fmt.Sprintf("choice[%d].message", i))
+		c, err := decryptChatObject(msg, session, fmt.Sprintf("choice[%d].message", i), endpoint)
 		if err != nil {
 			return nil, err
+		}
+		// Gate on any encrypted logprobs leaf rather than only content[].token.
+		// Providers can encrypt only a subset of logprobs leaves.
+		// Chat completions endpoint path: /v1/chat/completions or /api/v1/chat/completions
+		if anyLogprobsLeafEncrypted(session, endpoint) {
+			if lc, err := decryptChoiceLogprobs(choices[i], session, fmt.Sprintf("choice[%d]", i), endpoint); err != nil {
+				return nil, err
+			} else if lc {
+				c = true
+			}
 		}
 		if !c {
 			continue
@@ -302,56 +887,163 @@ func decryptResponseChoices(choicesRaw json.RawMessage, session Decryptor) (json
 	return out, nil
 }
 
-// imageEncryptedFields lists the fields in an images response data item that
-// the NearCloud inference-proxy encrypts with the E2EE session key.
-var imageEncryptedFields = []string{"b64_json", "revised_prompt"}
+// imageEncryptedFields lists the policy-path constants for fields in an images
+// response data item that the NearCloud inference-proxy encrypts with the E2EE
+// session key. The values double as both JSON field names and policy paths.
+var imageEncryptedFields = []string{EncFieldB64JSON, EncFieldRevisedPrompt}
+
+// functionObjectFields lists the string-valued fields of an OpenAI function
+// call object (tool_calls[].function and function_call) that are encrypted
+// end-to-end. Both the encryption (nearcloud.go) and decryption (relay.go)
+// paths iterate this slice so that field coverage stays in sync.
+var functionObjectFields = []string{"name", "arguments"}
 
 // decryptResponseImageData decrypts encrypted fields in data[] items of an
 // images generation response. Returns the rewritten data JSON, or nil if
 // nothing was decrypted.
-func decryptResponseImageData(dataRaw json.RawMessage, session Decryptor) (json.RawMessage, error) {
-	var data []map[string]json.RawMessage
-	if err := json.Unmarshal(dataRaw, &data); err != nil {
-		// Not an array of objects (e.g. embeddings float array) -- skip.
-		return nil, nil //nolint:nilerr // unmarshal error means data is not image objects
-	}
-
-	changed := false
-	for i, item := range data {
+// Image generation endpoint path: /v1/images/generations.
+func decryptResponseImageData(dataRaw json.RawMessage, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
+	out, changed, err := decryptJSONArrayObjects(dataRaw, true, "parse data as image array", func(i int, item map[string]json.RawMessage) (bool, error) {
+		itemChanged := false
 		for _, field := range imageEncryptedFields {
-			raw, ok := item[field]
-			if !ok || IsJSONNull(raw) {
-				continue
-			}
-			var val string
-			if err := json.Unmarshal(raw, &val); err != nil {
-				continue // not a string field
-			}
-			if !session.IsEncryptedChunk(val) {
-				continue
-			}
-			plaintext, err := session.Decrypt(val)
+			c, err := decryptMaybeEncryptedStringField(item, field, session, fmt.Sprintf("data[%d]", i), field, endpoint)
 			if err != nil {
-				return nil, fmt.Errorf("decrypt data[%d].%s: %w", i, field, err)
+				return false, err
 			}
-			rewritten, _ := json.Marshal(string(plaintext)) //nolint:errchkjson // strings always marshal
-			data[i][field] = rewritten
-			changed = true
+			if c {
+				itemChanged = true
+			}
 		}
+		return itemChanged, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
 	if !changed {
 		return nil, nil
 	}
-	out, _ := json.Marshal(data) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
 	return out, nil
+}
+
+// decryptResponseDataArrayField decrypts a single named JSON-value field in
+// each data[] item of an OpenAI endpoint response. Requires the field to be
+// present when strictDataShape is true. Returns nil when no items contain the
+// field or nothing changes. parseContext is used in error messages when the
+// data array cannot be parsed (e.g. "parse data as embeddings array").
+func decryptResponseDataArrayField(dataRaw json.RawMessage, fieldName, parseContext, policyPath string, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
+	// Pre-compute once; policyPath, session, and endpoint are fixed across all items.
+	requiresEncrypted := session.IsResponseFieldEncrypted(policyPath, endpoint)
+	sawField := false
+	out, changed, err := decryptJSONArrayObjects(dataRaw, strictDataShape, parseContext, func(i int, item map[string]json.RawMessage) (bool, error) {
+		raw, ok := item[fieldName]
+		if !ok {
+			if strictDataShape {
+				return false, fmt.Errorf("data[%d].%s: missing", i, fieldName)
+			}
+			return false, nil
+		}
+		sawField = true
+		if IsJSONNull(raw) {
+			// NearAI skips null values during encryption. Treat null as absent.
+			return false, nil
+		}
+		plaintext, err := DecryptFieldOrSkip(raw, session, requiresEncrypted, fmt.Sprintf("data[%d].%s", i, fieldName))
+		if err != nil {
+			return false, err
+		}
+		if plaintext == nil {
+			return false, nil
+		}
+		item[fieldName] = applyDecryptedJSON(plaintext)
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !sawField || !changed {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// decryptResponseEmbeddingsData decrypts encrypted embedding vectors in data[] items.
+// Each embedding is stored as an encrypted JSON string that deserialises to a float array.
+// Returns the rewritten data JSON, or nil if nothing was decrypted.
+// Embeddings endpoint path: /v1/embeddings.
+func decryptResponseEmbeddingsData(dataRaw json.RawMessage, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
+	return decryptResponseDataArrayField(dataRaw, EncFieldEmbedding, "parse data as embeddings array", EncFieldEmbedding, session, strictDataShape, endpoint)
+}
+
+// decryptResponseRerankResults decrypts document text fields in results[] items of a reranking response.
+// Returns the rewritten results JSON, or nil if nothing was decrypted.
+// Reranking endpoint path: /v1/rerank.
+func decryptResponseRerankResults(resultsRaw json.RawMessage, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
+	// Pre-compute once; policy, session, and endpoint are fixed across all items.
+	requiresEncrypted := session.IsResponseFieldEncrypted(EncFieldRerankDocumentText, endpoint)
+	out, changed, err := decryptJSONArrayObjects(resultsRaw, true, "parse results", func(i int, item map[string]json.RawMessage) (bool, error) {
+		docRaw, ok := item["document"]
+		if !ok {
+			return false, fmt.Errorf("results[%d].document: missing", i)
+		}
+		if IsJSONNull(docRaw) {
+			// NearAI only encrypts document.text when document is an object.
+			// Null document is treated as absent and passed through.
+			return false, nil
+		}
+		if !jsonRawStartsWithToken(docRaw, '{') {
+			if requiresEncrypted {
+				return false, fmt.Errorf("results[%d].document: expected object", i)
+			}
+			return false, nil
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(docRaw, &doc); err != nil {
+			return false, fmt.Errorf("parse results[%d].document: %w", i, err)
+		}
+		if _, ok := doc["text"]; !ok {
+			if requiresEncrypted {
+				return false, fmt.Errorf("results[%d].document.text: missing", i)
+			}
+			return false, nil
+		}
+		// decryptMaybeEncryptedStringField handles null text (returns false, nil) and
+		// updates doc["text"] in place on success.
+		c, err := decryptMaybeEncryptedStringField(doc, "text", session, fmt.Sprintf("results[%d].document", i), EncFieldRerankDocumentText, endpoint)
+		if err != nil {
+			return false, err
+		}
+		if !c {
+			return false, nil
+		}
+		docOut, _ := json.Marshal(doc) // map[string]json.RawMessage always marshals without error
+		item["document"] = docOut
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// decryptResponseScoreData processes score fields in data[] items of a score response.
+// It decrypts encrypted score strings when present; if the score is plaintext,
+// the session policy determines whether plaintext is allowed.
+// Returns the rewritten data JSON, or nil if nothing was decrypted.
+// Score endpoint path: /v1/score.
+func decryptResponseScoreData(dataRaw json.RawMessage, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
+	return decryptResponseDataArrayField(dataRaw, EncFieldScore, "parse data as score array", EncFieldScore, session, strictDataShape, endpoint)
 }
 
 // ReassembleNonStream reads an SSE stream (forced by E2EE), decrypts each
 // chunk, and reassembles the result into a single non-streaming OpenAI response.
 // Handles tool_calls and finish_reason from delta chunks. Returns the assembled
 // JSON and token throughput stats.
-func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats, error) {
+// The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
+// Actual provider paths: /v1/chat/completions (NearCloud) or /api/v1/chat/completions (Venice).
+func ReassembleNonStream(body io.Reader, session Decryptor, endpoint EndpointType) ([]byte, StreamStats, error) {
 	scanner, cleanup := newSSEScanner(body)
 	defer cleanup()
 
@@ -374,7 +1066,7 @@ func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats
 
 		stats.recordChunk(data, &firstChunk)
 
-		decrypted, err := decryptSSEChunkContent(data, session)
+		decrypted, err := decryptSSEChunkContent(data, session, endpoint)
 		if err != nil {
 			return nil, stats, fmt.Errorf("reassemble: %w", err)
 		}
@@ -387,7 +1079,7 @@ func ReassembleNonStream(body io.Reader, session Decryptor) ([]byte, StreamStats
 			b.WriteString(v)
 		}
 
-		meta, err := extractChunkMeta(data)
+		meta, err := extractChunkMeta(data, session, endpoint)
 		if err != nil {
 			return nil, stats, fmt.Errorf("reassemble: %w", err)
 		}
@@ -470,7 +1162,7 @@ type chunkMeta struct {
 
 // extractChunkMeta extracts tool_calls and finish_reason from the first
 // choice's delta in an SSE chunk.
-func extractChunkMeta(data string) (chunkMeta, error) {
+func extractChunkMeta(data string, session Decryptor, endpoint EndpointType) (chunkMeta, error) {
 	var parsed struct {
 		Choices []struct {
 			Delta struct {
@@ -485,11 +1177,49 @@ func extractChunkMeta(data string) (chunkMeta, error) {
 	var m chunkMeta
 	if len(parsed.Choices) > 0 {
 		m.ToolCalls = parsed.Choices[0].Delta.ToolCalls
+		// Gate on a leaf path to detect if tool_calls function fields are encrypted.
+		// NearCloud/NearDirect report "tool_calls" container as false but encrypt leaves
+		// like "tool_calls[].function.name". Check a concrete leaf instead of the container.
+		if session != nil && session.IsResponseFieldEncrypted(EncFieldToolCallsFuncName, endpoint) {
+			for i := range m.ToolCalls {
+				decrypted, err := decryptToolCallMetaRaw(m.ToolCalls[i], session, fmt.Sprintf("delta.tool_calls[%d]", i), endpoint)
+				if err != nil {
+					return chunkMeta{}, err
+				}
+				m.ToolCalls[i] = decrypted
+			}
+		}
 		if parsed.Choices[0].FinishReason != nil {
 			m.FinishReason = *parsed.Choices[0].FinishReason
 		}
 	}
 	return m, nil
+}
+
+func decryptToolCallMetaRaw(raw json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (json.RawMessage, error) {
+	var tc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		return nil, fmt.Errorf("%s: parse object: %w", ctx, err)
+	}
+	fnRaw, ok := tc["function"]
+	if !ok || IsJSONNull(fnRaw) {
+		return raw, nil
+	}
+	var fn map[string]json.RawMessage
+	if err := json.Unmarshal(fnRaw, &fn); err != nil {
+		return nil, fmt.Errorf("%s.function: parse object: %w", ctx, err)
+	}
+	changed, err := decryptFunctionObject(fn, session, ctx+".function", "tool_calls[].function", endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return raw, nil
+	}
+	fnOut, _ := json.Marshal(fn) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	tc["function"] = fnOut
+	tcOut, _ := json.Marshal(tc) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+	return tcOut, nil
 }
 
 // toolCallDelta is the streaming delta format for a single tool call entry.
@@ -554,7 +1284,8 @@ func sortedToolCalls(calls map[int]*reassembledToolCall) []reassembledToolCall {
 // non-nil, and writes the decrypted SSE lines to w. Returns token throughput
 // stats and a non-nil error: ErrDecryptionFailed on decryption failure,
 // ErrRelayFailed on other terminal failures.
-func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor) (StreamStats, error) {
+// The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
+func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor, endpoint EndpointType) (StreamStats, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -583,7 +1314,7 @@ func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, ses
 	var decryptErr error
 
 	process := func(line string) bool {
-		done, derr := relaySSELine(ctx, w, flusher, line, session)
+		done, derr := relaySSELine(ctx, w, flusher, line, session, endpoint)
 		if derr != nil {
 			decryptErr = derr
 		}
@@ -614,7 +1345,8 @@ func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, ses
 // relaySSELine processes a single SSE line, writing it to w. Returns
 // (done, error) where done=true means the stream should end. error is non-nil
 // only on decryption failure (wraps ErrDecryptionFailed).
-func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, line string, session Decryptor) (bool, error) {
+// The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
+func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, line string, session Decryptor, endpoint EndpointType) (bool, error) {
 	if !strings.HasPrefix(line, "data: ") {
 		fmt.Fprintf(w, "%s\n", line)
 		flusher.Flush()
@@ -634,7 +1366,7 @@ func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flush
 		return false, nil
 	}
 
-	decrypted, err := DecryptSSEChunk(data, session)
+	decrypted, err := DecryptSSEChunk(data, session, endpoint)
 	if err != nil {
 		slog.ErrorContext(ctx, "stream decryption failed", "err", err)
 		fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
@@ -651,8 +1383,9 @@ func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flush
 // decrypts each chunk, and writes a single non-streaming JSON response.
 // Returns token throughput stats and a non-nil error wrapping
 // ErrDecryptionFailed on decryption failure.
-func RelayReassembledNonStream(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor) (StreamStats, error) {
-	result, stats, err := ReassembleNonStream(body, session)
+// The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
+func RelayReassembledNonStream(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor, endpoint EndpointType) (StreamStats, error) {
+	result, stats, err := ReassembleNonStream(body, session, endpoint)
 	if err != nil {
 		slog.ErrorContext(ctx, "E2EE non-stream reassembly failed", "err", err)
 		http.Error(w, "response decryption failed", http.StatusBadGateway)
@@ -665,11 +1398,12 @@ func RelayReassembledNonStream(ctx context.Context, w http.ResponseWriter, body 
 	return stats, nil
 }
 
-// RelayNonStream reads a non-streaming JSON response from body, decrypts the
-// content fields if session is non-nil, and writes the result to w. Returns a
-// non-nil error: ErrDecryptionFailed on decryption failure, ErrRelayFailed on
-// other terminal failures.
-func RelayNonStream(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor) (StreamStats, error) {
+// RelayNonStreamForEndpoint reads a non-streaming JSON response from body,
+// decrypts endpoint-specific content fields if session is non-nil, and writes
+// the result to w. The endpoint parameter identifies the proxy route kind
+// (chat, embeddings, images, etc.); actual provider paths are documented
+// in DecryptNonStreamResponseForEndpoint.
+func RelayNonStreamForEndpoint(ctx context.Context, w http.ResponseWriter, body io.Reader, session Decryptor, endpoint EndpointType) (StreamStats, error) {
 	responseBody, err := io.ReadAll(io.LimitReader(body, 10<<20))
 	if err != nil {
 		http.Error(w, "failed to read upstream response", http.StatusBadGateway)
@@ -683,7 +1417,7 @@ func RelayNonStream(ctx context.Context, w http.ResponseWriter, body io.Reader, 
 		return StreamStats{}, nil
 	}
 
-	decrypted, err := DecryptNonStreamResponse(responseBody, session)
+	decrypted, err := DecryptNonStreamResponseForEndpoint(responseBody, session, endpoint)
 	if err != nil {
 		slog.ErrorContext(ctx, "non-stream decryption failed", "err", err)
 		http.Error(w, "response decryption failed", http.StatusBadGateway)

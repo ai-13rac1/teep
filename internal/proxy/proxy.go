@@ -479,6 +479,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/audio/transcriptions", s.handleEndpoint(&audioEndpoint))
 	s.mux.HandleFunc("POST /v1/images/generations", s.handleEndpoint(&imagesEndpoint))
 	s.mux.HandleFunc("POST /v1/rerank", s.handleEndpoint(&rerankEndpoint))
+	s.mux.HandleFunc("POST /v1/score", s.handleEndpoint(&scoreEndpoint))
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
 
@@ -637,6 +638,7 @@ func fromConfig(
 		p.AudioPath = "/v1/audio/transcriptions"
 		p.ImagesPath = "/v1/images/generations"
 		p.RerankPath = "/v1/rerank"
+		p.ScorePath = "/v1/score"
 		rdVerifier := neardirect.ReportDataVerifier{}
 		p.Attester = neardirect.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = neardirect.NewPreparer(cp.APIKey)
@@ -669,11 +671,9 @@ func fromConfig(
 	case "nearcloud":
 		p.ChatPath = "/v1/chat/completions"
 		p.ImagesPath = "/v1/images/generations"
-		// nearcloud non-chat E2EE: the gateway only forwards E2EE headers for
-		// chat completions and image generations. Embeddings (input), audio,
-		// and rerank fields would be sent in plaintext through a channel the
-		// user believes is E2EE. Non-chat paths (other than images) are not
-		// wired until the gateway is fixed to forward E2EE headers.
+		p.EmbeddingsPath = "/v1/embeddings"
+		p.RerankPath = "/v1/rerank"
+		p.ScorePath = "/v1/score"
 		p.Encryptor = neardirect.NewE2EE()
 		rdVerifier := neardirect.ReportDataVerifier{}
 		p.Attester = nearcloud.NewAttester(cp.APIKey, offline)
@@ -1021,6 +1021,10 @@ type endpointConfig struct {
 	// name is the endpoint name for logging (e.g. "chat", "embeddings").
 	name string
 
+	// endpointType is the canonical proxy route kind (EndpointChat, EndpointEmbeddings, etc.).
+	// This canonicalizes endpoint identification across E2EE relay code.
+	endpointType e2ee.EndpointType
+
 	// endpointPath returns the upstream API path for this endpoint type from
 	// the given provider. Returns "" if the provider doesn't support this endpoint.
 	endpointPath func(*provider.Provider) string
@@ -1060,7 +1064,7 @@ func parseChatRequest(_ *http.Request, body []byte) (model string, stream bool, 
 }
 
 // parseJSONModelRequest extracts only the model field from a JSON body.
-// Used for embeddings, images, and rerank endpoints that don't support streaming.
+// Used for embeddings, images, rerank, and score endpoints that don't support streaming.
 func parseJSONModelRequest(_ *http.Request, body []byte) (model string, stream bool, err error) {
 	var req struct {
 		Model string `json:"model"`
@@ -1087,6 +1091,7 @@ func parseAudioModelRequest(r *http.Request, body []byte) (model string, stream 
 var (
 	chatEndpoint = endpointConfig{
 		name:         "chat",
+		endpointType: e2ee.EndpointChat,
 		endpointPath: func(p *provider.Provider) string { return p.ChatPath },
 		parseRequest: parseChatRequest,
 		contentType:  "application/json",
@@ -1094,6 +1099,7 @@ var (
 	}
 	embeddingsEndpoint = endpointConfig{
 		name:         "embeddings",
+		endpointType: e2ee.EndpointEmbeddings,
 		endpointPath: func(p *provider.Provider) string { return p.EmbeddingsPath },
 		unsupported:  "embeddings",
 		parseRequest: parseJSONModelRequest,
@@ -1101,6 +1107,7 @@ var (
 	}
 	imagesEndpoint = endpointConfig{
 		name:         "images",
+		endpointType: e2ee.EndpointImages,
 		endpointPath: func(p *provider.Provider) string { return p.ImagesPath },
 		unsupported:  "image generation",
 		parseRequest: parseJSONModelRequest,
@@ -1108,13 +1115,23 @@ var (
 	}
 	rerankEndpoint = endpointConfig{
 		name:         "rerank",
+		endpointType: e2ee.EndpointRerank,
 		endpointPath: func(p *provider.Provider) string { return p.RerankPath },
 		unsupported:  "reranking",
 		parseRequest: parseJSONModelRequest,
 		contentType:  "application/json",
 	}
+	scoreEndpoint = endpointConfig{
+		name:         "score",
+		endpointType: e2ee.EndpointScore,
+		endpointPath: func(p *provider.Provider) string { return p.ScorePath },
+		unsupported:  "score",
+		parseRequest: parseJSONModelRequest,
+		contentType:  "application/json",
+	}
 	audioEndpoint = endpointConfig{
 		name:         "audio",
+		endpointType: e2ee.EndpointAudio,
 		endpointPath: func(p *provider.Provider) string { return p.AudioPath },
 		unsupported:  "audio transcription",
 		parseRequest: parseAudioModelRequest,
@@ -1229,9 +1246,9 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		if prov.PinnedHandler != nil {
 			status = "pinned"
 			if ep.canStream {
-				s.handlePinnedChat(ctx, w, r, prov, upstreamModel, body, stream, endpointPath, ep.contentType)
+				s.handlePinnedChat(ctx, w, r, prov, upstreamModel, body, stream, endpointPath, ep.endpointType, ep.contentType)
 			} else {
-				s.handlePinnedNonChat(ctx, w, r, prov, upstreamModel, body, endpointPath)
+				s.handlePinnedNonChat(ctx, w, r, prov, upstreamModel, body, endpointPath, ep.endpointType)
 			}
 			return
 		}
@@ -1255,7 +1272,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		if ct == "" {
 			ct = r.Header.Get("Content-Type")
 		}
-		rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, stream, endpointPath, ct)
+		rr := s.relayWithRetry(ctx, w, prov, upstreamModel, body, ar, ms, stream, endpointPath, ep.endpointType, ct)
 		e2eeDur += rr.e2eeDur
 		upstreamDur += rr.upstreamDur
 		if rr.status != "" {
@@ -1283,6 +1300,8 @@ type relayResult struct {
 // relayWithRetry performs the upstream roundtrip and E2EE relay, retrying on
 // Chutes instance-level decryption failures. For non-Chutes providers the
 // loop executes exactly once.
+// The endpoint parameter identifies the proxy route kind (for E2EE relay).
+// The endpointPath parameter is the actual upstream provider path.
 func (s *Server) relayWithRetry(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1293,6 +1312,7 @@ func (s *Server) relayWithRetry(
 	ms *modelStats,
 	stream bool,
 	endpointPath string,
+	endpoint e2ee.EndpointType,
 	contentType string,
 ) relayResult {
 	chutesE2EE := isChutesE2EE(prov, ar.E2EEActive)
@@ -1315,7 +1335,7 @@ func (s *Server) relayWithRetry(
 			attemptRaw = nil
 		}
 
-		ur, err := s.doUpstreamRoundtrip(ctx, prov, body, upstreamModel, ar.E2EEActive, attemptRaw, stream, endpointPath, contentType)
+		ur, err := s.doUpstreamRoundtrip(ctx, prov, body, upstreamModel, ar.E2EEActive, attemptRaw, stream, endpointPath, contentType, endpoint)
 		result.e2eeDur += ur.E2EEDur
 		result.upstreamDur += ur.UpstreamDur
 		if err != nil {
@@ -1391,7 +1411,7 @@ func (s *Server) relayWithRetry(
 		}
 
 		upstreamRelayStart := time.Now()
-		ss, relayErr = relayResponse(ctx, riWriter, resp.Body, session, meta, stream)
+		ss, relayErr = relayResponse(ctx, riWriter, resp.Body, session, meta, stream, endpoint)
 		result.upstreamDur += time.Since(upstreamRelayStart)
 		recordTokPerSec(ms, ss)
 
@@ -1634,7 +1654,7 @@ func (s *Server) handlePinnedChat(
 	ctx context.Context,
 	w http.ResponseWriter, r *http.Request,
 	prov *provider.Provider, upstreamModel string,
-	body []byte, stream bool, endpointPath string, contentType string,
+	body []byte, stream bool, endpointPath string, endpoint e2ee.EndpointType, contentType string,
 ) {
 	// Build forwarded headers.
 	headers := make(http.Header)
@@ -1656,12 +1676,13 @@ func (s *Server) handlePinnedChat(
 	}
 
 	pinnedReq := provider.PinnedRequest{
-		Method:  http.MethodPost,
-		Path:    endpointPath,
-		Headers: headers,
-		Body:    body,
-		Model:   upstreamModel,
-		E2EE:    prov.E2EE,
+		Method:   http.MethodPost,
+		Path:     endpointPath,
+		Headers:  headers,
+		Body:     body,
+		Model:    upstreamModel,
+		E2EE:     prov.E2EE,
+		Endpoint: endpoint,
 	}
 	// Supply the cached signing key for E2EE on SPKI cache hits.
 	if prov.E2EE {
@@ -1734,7 +1755,7 @@ func (s *Server) handlePinnedChat(
 	} else {
 		s.stats.plaintext.Add(1)
 	}
-	ss, relayErr := relayResponse(ctx, w, pinnedResp.Body, session, nil, stream)
+	ss, relayErr := relayResponse(ctx, w, pinnedResp.Body, session, nil, stream, endpoint)
 	recordTokPerSec(ms, ss)
 
 	s.handlePinnedPostRelay(ctx, prov, upstreamModel, report, session, ms, relayErr)
@@ -1885,8 +1906,9 @@ func (s *Server) enforceReport(ctx context.Context, w http.ResponseWriter,
 // relayResponse dispatches the upstream response to the correct relay function
 // based on E2EE session type (Chutes meta, Venice/NearCloud session, or
 // plaintext) and streaming mode. Returns StreamStats and any decryption error.
+// The endpoint parameter identifies the proxy route kind.
 func relayResponse(ctx context.Context, w http.ResponseWriter, body io.Reader,
-	session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool,
+	session e2ee.Decryptor, meta *e2ee.ChutesE2EE, stream bool, endpoint e2ee.EndpointType,
 ) (e2ee.StreamStats, error) {
 	switch {
 	case meta != nil && meta.Session != nil && stream:
@@ -1894,13 +1916,13 @@ func relayResponse(ctx context.Context, w http.ResponseWriter, body io.Reader,
 	case meta != nil && meta.Session != nil:
 		return e2ee.RelayNonStreamChutes(ctx, w, body, meta.Session)
 	case session != nil && stream:
-		return e2ee.RelayStream(ctx, w, body, session)
+		return e2ee.RelayStream(ctx, w, body, session, endpoint)
 	case session != nil:
-		return e2ee.RelayReassembledNonStream(ctx, w, body, session)
+		return e2ee.RelayReassembledNonStream(ctx, w, body, session, endpoint)
 	case stream:
-		return e2ee.RelayStream(ctx, w, body, nil)
+		return e2ee.RelayStream(ctx, w, body, nil, endpoint)
 	default:
-		return e2ee.RelayNonStream(ctx, w, body, nil)
+		return e2ee.RelayNonStreamForEndpoint(ctx, w, body, nil, endpoint)
 	}
 }
 
@@ -2003,6 +2025,7 @@ func (s *Server) doUpstreamRoundtrip(
 	stream bool,
 	endpointPath string,
 	contentType string,
+	endpoint e2ee.EndpointType,
 ) (*upstreamResult, error) {
 	upstreamURL := prov.BaseURL + endpointPath
 	upstreamTimeout := upstreamStreamTimeout
@@ -2035,7 +2058,7 @@ func (s *Server) doUpstreamRoundtrip(
 		}
 
 		e2eeStart := time.Now()
-		ub, buildErr := s.buildUpstreamBody(ctx, body, upstreamModel, e2eeActive, prov, freshRaw, endpointPath)
+		ub, buildErr := s.buildUpstreamBody(ctx, body, upstreamModel, e2eeActive, prov, freshRaw, endpoint)
 		e2eeDur += time.Since(e2eeStart)
 
 		if buildErr != nil {
@@ -2138,7 +2161,7 @@ func (s *Server) buildUpstreamBody(
 	e2eeActive bool,
 	prov *provider.Provider,
 	freshRaw *attestation.RawAttestation,
-	endpointPath string,
+	endpoint e2ee.EndpointType,
 ) (*upstreamBody, error) {
 	if !e2eeActive {
 		if prov.E2EE {
@@ -2239,7 +2262,7 @@ func (s *Server) buildUpstreamBody(
 		return nil, errors.New("attestation response missing signing_key")
 	}
 
-	encrypted, session, meta, err := prov.Encryptor.EncryptRequest(rawBody, raw, endpointPath)
+	encrypted, session, meta, err := prov.Encryptor.EncryptRequest(rawBody, raw, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -2289,7 +2312,7 @@ func (s *Server) handlePinnedNonChat(
 	ctx context.Context,
 	w http.ResponseWriter, r *http.Request,
 	prov *provider.Provider, upstreamModel string,
-	body []byte, endpointPath string,
+	body []byte, endpointPath string, endpoint e2ee.EndpointType,
 ) {
 	headers := make(http.Header)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -2306,12 +2329,13 @@ func (s *Server) handlePinnedNonChat(
 	}
 
 	pinnedReq := provider.PinnedRequest{
-		Method:  http.MethodPost,
-		Path:    endpointPath,
-		Headers: headers,
-		Body:    body,
-		Model:   upstreamModel,
-		E2EE:    prov.E2EE,
+		Method:   http.MethodPost,
+		Path:     endpointPath,
+		Headers:  headers,
+		Body:     body,
+		Model:    upstreamModel,
+		E2EE:     prov.E2EE,
+		Endpoint: endpoint,
 	}
 	if prov.E2EE {
 		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
@@ -2379,9 +2403,9 @@ func (s *Server) handlePinnedNonChat(
 		s.stats.plaintext.Add(1)
 	}
 
-	// RelayNonStream reads the full body, decrypts if session is non-nil
-	// (handling both chat choices and image data fields), and writes to w.
-	_, relayErr := e2ee.RelayNonStream(ctx, w, pinnedResp.Body, session)
+	// RelayNonStreamForEndpoint reads the full body, decrypts endpoint-specific
+	// fields if session is non-nil, and writes to w.
+	_, relayErr := e2ee.RelayNonStreamForEndpoint(ctx, w, pinnedResp.Body, session, endpoint)
 
 	s.handlePinnedPostRelay(ctx, prov, upstreamModel, report, session, ms, relayErr)
 }

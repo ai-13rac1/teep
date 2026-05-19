@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/provider/chutes"
 )
 
@@ -48,7 +49,7 @@ func TestChutesE2EE_EncryptRequest(t *testing.T) {
 	raw := chutesRaw(t, pubB64, "inst-1", "nonce-1")
 
 	enc := chutes.NewE2EE()
-	encPayload, decryptor, meta, err := enc.EncryptRequest(chutesChatBody(t), raw, "/v1/chat/completions")
+	encPayload, decryptor, meta, err := enc.EncryptRequest(chutesChatBody(t), raw, e2ee.EndpointChat)
 	if err != nil {
 		t.Fatalf("EncryptRequest: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestChutesE2EE_EncryptRequest_MissingInstanceID(t *testing.T) {
 	pubB64 := mlkemModelPubB64(t)
 	raw := chutesRaw(t, pubB64, "", "nonce-1")
 	enc := chutes.NewE2EE()
-	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, "/v1/chat/completions")
+	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, e2ee.EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for missing InstanceID")
 	}
@@ -106,7 +107,7 @@ func TestChutesE2EE_EncryptRequest_MissingE2ENonce(t *testing.T) {
 	pubB64 := mlkemModelPubB64(t)
 	raw := chutesRaw(t, pubB64, "inst-1", "")
 	enc := chutes.NewE2EE()
-	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, "/v1/chat/completions")
+	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, e2ee.EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for missing E2ENonce")
 	}
@@ -122,7 +123,7 @@ func TestChutesE2EE_EncryptRequest_MissingChuteID(t *testing.T) {
 		ChuteID:    "",
 	}
 	enc := chutes.NewE2EE()
-	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, "/v1/chat/completions")
+	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, e2ee.EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for missing ChuteID")
 	}
@@ -132,7 +133,7 @@ func TestChutesE2EE_EncryptRequest_MissingChuteID(t *testing.T) {
 func TestChutesE2EE_EncryptRequest_InvalidSigningKey(t *testing.T) {
 	raw := chutesRaw(t, "not-base64!", "inst-1", "nonce-1")
 	enc := chutes.NewE2EE()
-	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, "/v1/chat/completions")
+	_, _, _, err := enc.EncryptRequest(chutesChatBody(t), raw, e2ee.EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for invalid signing key")
 	}
@@ -145,7 +146,7 @@ func TestChutesE2EE_EncryptRequest_NonJSONBody(t *testing.T) {
 	enc := chutes.NewE2EE()
 	// EncryptChatRequestChutes needs valid JSON to inject e2e_response_pk,
 	// so a non-JSON body must fail.
-	_, _, _, err := enc.EncryptRequest([]byte("not json"), raw, "/v1/chat/completions")
+	_, _, _, err := enc.EncryptRequest([]byte("not json"), raw, e2ee.EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for non-JSON body")
 	}

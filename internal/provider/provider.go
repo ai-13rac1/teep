@@ -53,15 +53,20 @@ type RequestPreparer interface {
 }
 
 // RequestEncryptor encrypts an outgoing request body for a provider's E2EE
-// protocol. The endpointPath (e.g. "/v1/chat/completions", "/v1/images/generations")
-// tells the encryptor which fields to encrypt. Returns the encrypted body, a
-// Decryptor for response decryption, optional Chutes metadata, and any error.
+// protocol. The endpoint identifies the canonical route kind (chat,
+// embeddings, images, etc.) used to select field-encryption policy. Returns
+// the encrypted body, a Decryptor for response decryption, optional Chutes
+// metadata, and any error.
 //
 // For Chutes, Decryptor is nil; crypto state is carried in *e2ee.ChutesE2EE
 // instead (the Chutes protocol uses a different relay path).
 // For Venice and NearCloud, *e2ee.ChutesE2EE is nil.
 type RequestEncryptor interface {
-	EncryptRequest(body []byte, raw *attestation.RawAttestation, endpointPath string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)
+	// EncryptRequest encrypts the request body for the given endpoint type
+	// and provider attestation. The endpoint parameter identifies the proxy route kind
+	// (chat, embeddings, images, etc.); actual provider paths are documented
+	// in each provider's EncryptRequest implementation.
+	EncryptRequest(body []byte, raw *attestation.RawAttestation, endpoint e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)
 }
 
 // PinnedHandler handles chat requests on a connection-pinned TLS connection
@@ -80,6 +85,10 @@ type PinnedRequest struct {
 	Body    []byte      // raw request body
 	Model   string      // upstream model name (for endpoint resolution)
 	E2EE    bool        // encrypt message contents for the model backend
+
+	// Endpoint is the canonical proxy route kind (e.g. EndpointChat, EndpointEmbeddings).
+	// Used by E2EE handlers for field-level encryption routing.
+	Endpoint e2ee.EndpointType
 
 	// SigningKey is the model's attested public key, provided by the caller
 	// from its signing key cache. Used on SPKI cache hits when E2EE is
@@ -153,6 +162,10 @@ type Provider struct {
 	// RerankPath is the upstream API path for reranking
 	// (e.g. "/v1/rerank"). Empty means unsupported.
 	RerankPath string
+
+	// ScorePath is the upstream API path for score requests
+	// (e.g. "/v1/score"). Empty means unsupported.
+	ScorePath string
 
 	// E2EE indicates whether this provider supports end-to-end encryption.
 	E2EE bool

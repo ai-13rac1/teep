@@ -15,10 +15,17 @@ type E2EE struct{}
 // NewE2EE returns a Venice RequestEncryptor.
 func NewE2EE() *E2EE { return &E2EE{} }
 
-// EncryptRequest encrypts each message content with Venice E2EE and forces
-// stream=true. The raw.SigningKey must be a 130-char hex secp256k1 public key.
-// The endpointPath is unused — Venice only supports chat completions.
-func (v *E2EE) EncryptRequest(body []byte, raw *attestation.RawAttestation, _ string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+// EncryptRequest encrypts the request body for Venice E2EE
+// (secp256k1 ECDH + AES-256-GCM), encrypting each message content and forcing
+// stream=true.
+// The raw.SigningKey must be a 130-char hex secp256k1 public key.
+// The endpoint must be EndpointChat; Venice E2EE is only defined for
+// /api/v1/chat/completions.
+func (v *E2EE) EncryptRequest(body []byte, raw *attestation.RawAttestation, endpoint e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+	if endpoint != e2ee.EndpointChat {
+		return nil, nil, nil, fmt.Errorf("venice E2EE unsupported endpoint %q", endpoint)
+	}
+
 	session, err := e2ee.NewVeniceSession()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create venice E2EE session: %w", err)
