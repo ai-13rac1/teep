@@ -174,35 +174,27 @@ func TestModelLister_HTTPError(t *testing.T) {
 	}
 }
 
-// staticFilter is a test helper implementing provider.ModelFilter.
-type staticFilter struct {
-	models map[string]struct{}
-	err    error
-}
+func TestOwnedByModelLister_FiltersModels(t *testing.T) {
+	const modelsJSON = `{
+		"object": "list",
+		"data": [
+			{"id": "near-model", "object": "model", "owned_by": "nearai", "context_length": 8192},
+			{"id": "third-party", "object": "model", "owned_by": "openai", "context_length": 4096},
+			{"id": "legacy-near", "object": "model", "owned_by": "near-ai", "context_length": 2048}
+		]
+	}`
 
-func (f *staticFilter) Models(_ context.Context) (map[string]struct{}, error) {
-	return f.models, f.err
-}
-
-func TestFilteredModelLister_FiltersModels(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(testModelsJSON))
+		_, _ = w.Write([]byte(modelsJSON))
 	}))
 	defer srv.Close()
 
-	filter := &staticFilter{
-		models: map[string]struct{}{
-			"qwen2p5-72b-instruct": {},
-			// llama-3.3-70b-instruct is NOT included
-		},
-	}
-
-	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
+	lister := provider.NewOwnedByModelLister(srv.URL, "test-key", srv.Client(), "nearai")
 	models, err := lister.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
@@ -210,97 +202,34 @@ func TestFilteredModelLister_FiltersModels(t *testing.T) {
 	if len(models) != 1 {
 		t.Fatalf("got %d models, want 1", len(models))
 	}
+
 	var entry struct {
 		ID            string `json:"id"`
+		OwnedBy       string `json:"owned_by"`
 		ContextLength int    `json:"context_length"`
 	}
 	if err := json.Unmarshal(models[0], &entry); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if entry.ID != "qwen2p5-72b-instruct" {
-		t.Errorf("id = %q, want %q", entry.ID, "qwen2p5-72b-instruct")
+	if entry.ID != "near-model" {
+		t.Errorf("id = %q, want %q", entry.ID, "near-model")
 	}
-	// Verify upstream metadata is preserved.
-	if entry.ContextLength != 32768 {
-		t.Errorf("context_length = %d, want 32768", entry.ContextLength)
+	if entry.OwnedBy != "nearai" {
+		t.Errorf("owned_by = %q, want %q", entry.OwnedBy, "nearai")
 	}
-}
-
-func TestFilteredModelLister_FilterError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(testModelsJSON))
-	}))
-	defer srv.Close()
-
-	filter := &staticFilter{
-		err: http.ErrServerClosed,
-	}
-
-	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
-	_, err := lister.ListModels(context.Background())
-	if err == nil {
-		t.Fatal("expected error when filter fails")
-	}
-	if !strings.Contains(err.Error(), "endpoint filter") {
-		t.Errorf("error %q does not mention endpoint filter", err)
+	if entry.ContextLength != 8192 {
+		t.Errorf("context_length = %d, want 8192", entry.ContextLength)
 	}
 }
 
-func TestFilteredModelLister_EmptyFilterReturnsNone(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(testModelsJSON))
-	}))
-	defer srv.Close()
-
-	filter := &staticFilter{
-		models: map[string]struct{}{},
-	}
-
-	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
-	models, err := lister.ListModels(context.Background())
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
-	if len(models) != 0 {
-		t.Fatalf("got %d models, want 0", len(models))
-	}
-}
-
-func TestFilteredModelLister_InnerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"oops"}`))
-	}))
-	defer srv.Close()
-
-	filter := &staticFilter{
-		models: map[string]struct{}{"anything": {}},
-	}
-
-	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
-	_, err := lister.ListModels(context.Background())
-	if err == nil {
-		t.Fatal("expected error when inner lister fails")
-	}
-}
-
-func TestFilteredModelLister_EmptyID(t *testing.T) {
+func TestOwnedByModelLister_EmptyID(t *testing.T) {
 	const modelsWithEmptyID = `{
 		"object": "list",
 		"data": [
-			{"id": "", "object": "model", "created": 0, "owned_by": "test"}
+			{"id": "", "object": "model", "owned_by": "nearai"}
 		]
 	}`
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
@@ -311,11 +240,7 @@ func TestFilteredModelLister_EmptyID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	filter := &staticFilter{
-		models: map[string]struct{}{"": {}},
-	}
-
-	lister := provider.NewFilteredModelLister(srv.URL, "test-key", srv.Client(), filter)
+	lister := provider.NewOwnedByModelLister(srv.URL, "test-key", srv.Client(), "nearai")
 	_, err := lister.ListModels(context.Background())
 	if err == nil {
 		t.Fatal("expected error for model entry with empty id")
