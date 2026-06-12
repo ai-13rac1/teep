@@ -95,42 +95,6 @@ func RequiresEncryptedField(key string, session Decryptor, endpoint EndpointType
 	return session.IsResponseFieldEncrypted(key, endpoint)
 }
 
-// decryptDeltaFields iterates all string-valued fields in a delta (or message)
-// map, decrypts any that pass the session's IsEncryptedChunk check,
-// and returns true if any field was decrypted.
-func decryptDeltaFields(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
-	changed := false
-	for key := range fields {
-		if IsNonEncryptedField(key) {
-			continue
-		}
-		if key == "content" {
-			c, err := decryptContentField(fields, session, ctx, endpoint)
-			if err != nil {
-				return false, err
-			}
-			if c {
-				changed = true
-			}
-			continue
-		}
-		// audio, tool_calls, and function_call are structured object/array fields
-		// handled by dedicated helpers in decryptChatObject. Skip them here to
-		// avoid treating the container object or array as an encrypted string.
-		if key == "audio" || key == "tool_calls" || key == "function_call" {
-			continue
-		}
-		c, err := decryptMaybeEncryptedStringField(fields, key, session, ctx, key, endpoint)
-		if err != nil {
-			return false, err
-		}
-		if c {
-			changed = true
-		}
-	}
-	return changed, nil
-}
-
 func decryptContentField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
 	raw, ok := fields["content"]
 	if !ok || IsJSONNull(raw) {
@@ -427,10 +391,32 @@ func decryptJSONValueField(obj map[string]json.RawMessage, key string, session D
 
 func decryptChatObject(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
 	changed := false
-	if c, err := decryptDeltaFields(fields, session, ctx, endpoint); err != nil {
-		return false, err
-	} else if c {
-		changed = true
+	for key := range fields {
+		if IsNonEncryptedField(key) {
+			continue
+		}
+		if key == "content" {
+			c, err := decryptContentField(fields, session, ctx, endpoint)
+			if err != nil {
+				return false, err
+			}
+			if c {
+				changed = true
+			}
+			continue
+		}
+		// audio, tool_calls, and function_call are structured object/array fields
+		// handled by dedicated helpers below.
+		if key == "audio" || key == "tool_calls" || key == "function_call" {
+			continue
+		}
+		c, err := decryptMaybeEncryptedStringField(fields, key, session, ctx, key, endpoint)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			changed = true
+		}
 	}
 	// Each nested field group is gated by its own canonical encrypted leaf path rather
 	// than a shared proxy (audio.data). This ensures a future provider that encrypts

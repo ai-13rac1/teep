@@ -1180,7 +1180,7 @@ func TestDecryptDeltaFields_PlaintextRefusalRejected(t *testing.T) {
 		"refusal": json.RawMessage(`"none"`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for plaintext refusal")
 	}
@@ -1201,7 +1201,7 @@ func TestDecryptDeltaFields_PlaintextNameRejected(t *testing.T) {
 		"name": json.RawMessage(`"bot"`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for plaintext name")
 	}
@@ -1223,7 +1223,7 @@ func TestDecryptDeltaFields_VeniceAllowsPlaintextRefusalAndName(t *testing.T) {
 		"refusal": json.RawMessage(`"none"`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err != nil {
 		t.Fatalf("unexpected error for Venice plaintext fields: %v", err)
 	}
@@ -1254,7 +1254,7 @@ func TestDecryptDeltaFields_RequiredNonStringRejectedInFullFieldMode(t *testing.
 				"content": tc.raw,
 			}
 
-			changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+			changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 			if err == nil {
 				t.Fatal("expected error for non-string required field")
 			}
@@ -1281,7 +1281,7 @@ func TestDecryptDeltaFields_VeniceContentStillRejectsNonString(t *testing.T) {
 		"content": json.RawMessage(`123`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for non-string Venice content")
 	}
@@ -1302,7 +1302,7 @@ func TestDecryptDeltaFields_FullFieldContentArrayRejectsNonObjectPart(t *testing
 		"content": json.RawMessage(`["value"]`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for invalid content-part array")
 	}
@@ -1323,7 +1323,7 @@ func TestDecryptDeltaFields_VeniceRejectsContentArray(t *testing.T) {
 		"content": json.RawMessage(`[{"type":"output_text","text":"plaintext"}]`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err == nil {
 		t.Fatal("expected error for array content in Venice mode")
 	}
@@ -1350,7 +1350,7 @@ func TestDecryptDeltaFields_NullContentAllowedInFullFieldMode(t *testing.T) {
 				field:  json.RawMessage(`null`),
 			}
 
-			changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+			changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 			if err != nil {
 				t.Fatalf("unexpected error for null %s in full-field mode: %v", field, err)
 			}
@@ -1374,7 +1374,7 @@ func TestDecryptDeltaFields_VeniceOptionalNonStringPassthrough(t *testing.T) {
 		"refusal": json.RawMessage(`123`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err != nil {
 		t.Fatalf("unexpected error for optional non-string Venice field: %v", err)
 	}
@@ -2290,9 +2290,9 @@ func TestDecryptDeltaFields_EmptyStringSkipped(t *testing.T) {
 		"content": json.RawMessage(`""`),
 	}
 
-	changed, err := decryptDeltaFields(fields, session, "test", EndpointChat)
+	changed, err := decryptChatObject(fields, session, "test", EndpointChat)
 	if err != nil {
-		t.Fatalf("decryptDeltaFields: %v", err)
+		t.Fatalf("decryptChatObject: %v", err)
 	}
 	if changed {
 		t.Error("expected no changes for empty string")
