@@ -32,9 +32,69 @@ func TestExtractChunkMeta_DecryptsToolCallsForNearCloud(t *testing.T) {
 		t.Fatalf("tool_calls[].function.arguments should be encrypted")
 	}
 
-	// This ensures that extractChunkMeta will correctly detect that tool_calls
-	// function fields need decryption when checking IsResponseFieldEncrypted("tool_calls[].function.name", ...)
-	// rather than IsResponseFieldEncrypted("tool_calls", ...)
+	clientPubBytes, err := hex.DecodeString(session.ClientEd25519PubHex())
+	if err != nil {
+		t.Fatalf("decode client ed25519 pub hex: %v", err)
+	}
+	clientX25519Pub, err := Ed25519PubToX25519(clientPubBytes)
+	if err != nil {
+		t.Fatalf("convert client ed25519 pub to x25519: %v", err)
+	}
+
+	encName, err := EncryptXChaCha20([]byte("get_weather"), clientX25519Pub)
+	if err != nil {
+		t.Fatalf("encrypt tool call name: %v", err)
+	}
+	encArgs, err := EncryptXChaCha20([]byte(`{"city":"SF"}`), clientX25519Pub)
+	if err != nil {
+		t.Fatalf("encrypt tool call arguments: %v", err)
+	}
+
+	// If extractChunkMeta gated on the container path ("tool_calls") instead of
+	// the leaf path ("tool_calls[].function.name"), the NearCloud policy would
+	// return false and decryption would be skipped — the assertions below would
+	// then fail because the ciphertext blob would survive intact in the output.
+	chunk := map[string]any{
+		"choices": []map[string]any{{
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{{
+					"index": 0,
+					"function": map[string]any{
+						"name":      encName,
+						"arguments": encArgs,
+					},
+				}},
+			},
+		}},
+	}
+	chunkJSON, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal chunk: %v", err)
+	}
+
+	meta, err := extractChunkMeta(string(chunkJSON), session, EndpointChat)
+	if err != nil {
+		t.Fatalf("extractChunkMeta: %v", err)
+	}
+	if len(meta.ToolCalls) != 1 {
+		t.Fatalf("tool_calls len = %d, want 1", len(meta.ToolCalls))
+	}
+
+	var out struct {
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(meta.ToolCalls[0], &out); err != nil {
+		t.Fatalf("unmarshal decrypted tool_call: %v", err)
+	}
+	if out.Function.Name != "get_weather" {
+		t.Fatalf("tool_calls[0].function.name = %q, want get_weather", out.Function.Name)
+	}
+	if out.Function.Arguments != `{"city":"SF"}` {
+		t.Fatalf("tool_calls[0].function.arguments = %q, want {\"city\":\"SF\"}", out.Function.Arguments)
+	}
 }
 
 // TestDecryptResponseChoices_DecryptsLogprobsForNearCloud regression test for:
