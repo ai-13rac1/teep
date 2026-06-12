@@ -82,6 +82,16 @@ func IsNonEncryptedField(key string) bool {
 	}
 }
 
+func setChanged(changed *bool, c bool, err error) error {
+	if err != nil {
+		return err
+	}
+	if c {
+		*changed = true
+	}
+	return nil
+}
+
 func decryptContentField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
 	raw, ok := fields["content"]
 	if !ok || IsJSONNull(raw) {
@@ -301,15 +311,13 @@ func decryptChoiceLogprobs(choice map[string]json.RawMessage, session Decryptor,
 
 func decryptLogprobsTokenEntry(entry map[string]json.RawMessage, session Decryptor, ctx, policyBase string, endpoint EndpointType) (bool, error) {
 	changed := false
-	if c, err := decryptMaybeEncryptedStringField(entry, "token", session, ctx, policyBase+".token", endpoint); err != nil {
+	c, err := decryptMaybeEncryptedStringField(entry, "token", session, ctx, policyBase+".token", endpoint)
+	if err := setChanged(&changed, c, err); err != nil {
 		return false, err
-	} else if c {
-		changed = true
 	}
-	if c, err := decryptJSONValueField(entry, "bytes", session, ctx+".bytes", policyBase+".bytes", endpoint); err != nil {
+	c, err = decryptJSONValueField(entry, "bytes", session, ctx+".bytes", policyBase+".bytes", endpoint)
+	if err := setChanged(&changed, c, err); err != nil {
 		return false, err
-	} else if c {
-		changed = true
 	}
 	topRaw, ok := entry["top_logprobs"]
 	if !ok || IsJSONNull(topRaw) {
@@ -409,24 +417,21 @@ func decryptChatObject(fields map[string]json.RawMessage, session Decryptor, ctx
 	// than a shared proxy (audio.data). This ensures a future provider that encrypts
 	// tool_calls but not audio, or function_call but not tool_calls, is handled correctly.
 	if session.IsResponseFieldEncrypted(EncFieldAudioData, endpoint) {
-		if c, err := decryptAudioDataField(fields, session, ctx, endpoint); err != nil {
+		c, err := decryptAudioDataField(fields, session, ctx, endpoint)
+		if err := setChanged(&changed, c, err); err != nil {
 			return false, err
-		} else if c {
-			changed = true
 		}
 	}
 	if session.IsResponseFieldEncrypted(EncFieldToolCallsFuncName, endpoint) {
-		if c, err := decryptToolCallsField(fields, session, ctx, endpoint); err != nil {
+		c, err := decryptToolCallsField(fields, session, ctx, endpoint)
+		if err := setChanged(&changed, c, err); err != nil {
 			return false, err
-		} else if c {
-			changed = true
 		}
 	}
 	if session.IsResponseFieldEncrypted(EncFieldFuncCallName, endpoint) {
-		if c, err := decryptFunctionCallField(fields, session, ctx, endpoint); err != nil {
+		c, err := decryptFunctionCallField(fields, session, ctx, endpoint)
+		if err := setChanged(&changed, c, err); err != nil {
 			return false, err
-		} else if c {
-			changed = true
 		}
 	}
 	return changed, nil
@@ -602,10 +607,9 @@ func DecryptSSEChunk(data string, session Decryptor, endpoint EndpointType) (str
 	// mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
 	// NearCloud/NearDirect report "logprobs" container as false but encrypt leaves.
 	if anyLogprobsLeafEncrypted(session, endpoint) {
-		if c, err := decryptChoiceLogprobs(choices[0], session, "choice[0]", endpoint); err != nil {
+		c, err := decryptChoiceLogprobs(choices[0], session, "choice[0]", endpoint)
+		if err := setChanged(&changed, c, err); err != nil {
 			return "", err
-		} else if c {
-			changed = true
 		}
 	}
 	if !changed {
@@ -803,10 +807,9 @@ func DecryptNonStreamResponseForEndpoint(body []byte, session Decryptor, endpoin
 	// Top-level score field: decrypt or fail-closed for any endpoint. For full-
 	// field sessions (e.g. NearCloud), the policy returns true for unknown leaves
 	// on non-score endpoints, so a stray plaintext score field is rejected.
-	if c, err := decryptJSONValueField(full, EncFieldScore, session, EncFieldScore, EncFieldScore, endpoint); err != nil {
+	c, err := decryptJSONValueField(full, EncFieldScore, session, EncFieldScore, EncFieldScore, endpoint)
+	if err := setChanged(&changed, c, err); err != nil {
 		return nil, err
-	} else if c {
-		changed = true
 	}
 
 	if !changed {
