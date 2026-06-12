@@ -1181,16 +1181,17 @@ func extractChunkMeta(data string, session Decryptor, endpoint EndpointType) (ch
 	var m chunkMeta
 	if len(parsed.Choices) > 0 {
 		m.ToolCalls = parsed.Choices[0].Delta.ToolCalls
-		// Gate on a leaf path to detect if tool_calls function fields are encrypted.
-		// NearCloud/NearDirect report "tool_calls" container as false but encrypt leaves
-		// like "tool_calls[].function.name". Check a concrete leaf instead of the container.
-		if session != nil && session.IsResponseFieldEncrypted(EncFieldToolCallsFuncName, endpoint) {
-			for i := range m.ToolCalls {
-				decrypted, err := decryptToolCallMetaRaw(m.ToolCalls[i], session, fmt.Sprintf("delta.tool_calls[%d]", i), endpoint)
-				if err != nil {
-					return chunkMeta{}, err
+		if session != nil && len(m.ToolCalls) > 0 {
+			delta := map[string]json.RawMessage{}
+			toolCallsJSON, _ := json.Marshal(m.ToolCalls) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
+			delta["tool_calls"] = toolCallsJSON
+			if _, err := decryptChatObject(delta, session, "delta", endpoint); err != nil {
+				return chunkMeta{}, err
+			}
+			if raw, ok := delta["tool_calls"]; ok {
+				if err := json.Unmarshal(raw, &m.ToolCalls); err != nil {
+					return chunkMeta{}, fmt.Errorf("extractChunkMeta: parse decrypted tool_calls: %w", err)
 				}
-				m.ToolCalls[i] = decrypted
 			}
 		}
 		if parsed.Choices[0].FinishReason != nil {
@@ -1198,32 +1199,6 @@ func extractChunkMeta(data string, session Decryptor, endpoint EndpointType) (ch
 		}
 	}
 	return m, nil
-}
-
-func decryptToolCallMetaRaw(raw json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (json.RawMessage, error) {
-	var tc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &tc); err != nil {
-		return nil, fmt.Errorf("%s: parse object: %w", ctx, err)
-	}
-	fnRaw, ok := tc["function"]
-	if !ok || IsJSONNull(fnRaw) {
-		return raw, nil
-	}
-	var fn map[string]json.RawMessage
-	if err := json.Unmarshal(fnRaw, &fn); err != nil {
-		return nil, fmt.Errorf("%s.function: parse object: %w", ctx, err)
-	}
-	changed, err := decryptFunctionObject(fn, session, ctx+".function", "tool_calls[].function", endpoint)
-	if err != nil {
-		return nil, err
-	}
-	if !changed {
-		return raw, nil
-	}
-	fnOut, _ := json.Marshal(fn) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
-	tc["function"] = fnOut
-	tcOut, _ := json.Marshal(tc) //nolint:errchkjson // re-marshaling previously-unmarshaled JSON
-	return tcOut, nil
 }
 
 // toolCallDelta is the streaming delta format for a single tool call entry.
