@@ -82,19 +82,6 @@ func IsNonEncryptedField(key string) bool {
 	}
 }
 
-// RequiresEncryptedField reports whether a string-valued field must be
-// encrypted for the active protocol mode and endpoint.
-//
-// In full-field mode (NearCloud/NearDirect/Chutes), every non-metadata string
-// field must be encrypted. In content-only mode (Venice), only content is
-// strictly required to be encrypted; other string fields may be plaintext.
-func RequiresEncryptedField(key string, session Decryptor, endpoint EndpointType) bool {
-	if IsNonEncryptedField(key) {
-		return false
-	}
-	return session.IsResponseFieldEncrypted(key, endpoint)
-}
-
 func decryptContentField(fields map[string]json.RawMessage, session Decryptor, ctx string, endpoint EndpointType) (bool, error) {
 	raw, ok := fields["content"]
 	if !ok || IsJSONNull(raw) {
@@ -706,7 +693,7 @@ func decryptSSEChunkContent(data string, session Decryptor, endpoint EndpointTyp
 			continue
 		}
 		if !session.IsEncryptedChunk(original) {
-			if RequiresEncryptedField(key, session, endpoint) {
+			if !IsNonEncryptedField(key) && session.IsResponseFieldEncrypted(key, endpoint) {
 				return nil, fmt.Errorf("delta.%s: expected encrypted string before decryption", key)
 			}
 			result[key] = s
