@@ -771,7 +771,7 @@ func DecryptNonStreamResponseForEndpoint(body []byte, session Decryptor, endpoin
 	case EndpointEmbeddings:
 		// Embeddings endpoint path: /v1/embeddings.
 		if dataRaw, ok := full["data"]; ok {
-			d, err := decryptResponseEmbeddingsData(dataRaw, session, true, endpoint)
+			d, err := decryptResponseEmbeddingsData(dataRaw, session, endpoint)
 			if err != nil {
 				return nil, err
 			}
@@ -783,7 +783,7 @@ func DecryptNonStreamResponseForEndpoint(body []byte, session Decryptor, endpoin
 	case EndpointScore:
 		// Score endpoint path: /v1/score.
 		if dataRaw, ok := full["data"]; ok {
-			d, err := decryptResponseScoreData(dataRaw, session, true, endpoint)
+			d, err := decryptResponseScoreData(dataRaw, session, endpoint)
 			if err != nil {
 				return nil, err
 			}
@@ -917,20 +917,17 @@ func decryptResponseImageData(dataRaw json.RawMessage, session Decryptor, endpoi
 
 // decryptResponseDataArrayField decrypts a single named JSON-value field in
 // each data[] item of an OpenAI endpoint response. Requires the field to be
-// present when strictDataShape is true. Returns nil when no items contain the
+// present in every data[] object. Returns nil when no items contain the
 // field or nothing changes. parseContext is used in error messages when the
 // data array cannot be parsed (e.g. "parse data as embeddings array").
-func decryptResponseDataArrayField(dataRaw json.RawMessage, fieldName, parseContext, policyPath string, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
+func decryptResponseDataArrayField(dataRaw json.RawMessage, fieldName, parseContext, policyPath string, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
 	// Pre-compute once; policyPath, session, and endpoint are fixed across all items.
 	requiresEncrypted := session.IsResponseFieldEncrypted(policyPath, endpoint)
 	sawField := false
-	out, changed, err := decryptJSONArrayObjects(dataRaw, strictDataShape, parseContext, func(i int, item map[string]json.RawMessage) (bool, error) {
+	out, changed, err := decryptJSONArrayObjects(dataRaw, true, parseContext, func(i int, item map[string]json.RawMessage) (bool, error) {
 		raw, ok := item[fieldName]
 		if !ok {
-			if strictDataShape {
-				return false, fmt.Errorf("data[%d].%s: missing", i, fieldName)
-			}
-			return false, nil
+			return false, fmt.Errorf("data[%d].%s: missing", i, fieldName)
 		}
 		sawField = true
 		if IsJSONNull(raw) {
@@ -960,8 +957,8 @@ func decryptResponseDataArrayField(dataRaw json.RawMessage, fieldName, parseCont
 // Each embedding is stored as an encrypted JSON string that deserialises to a float array.
 // Returns the rewritten data JSON, or nil if nothing was decrypted.
 // Embeddings endpoint path: /v1/embeddings.
-func decryptResponseEmbeddingsData(dataRaw json.RawMessage, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
-	return decryptResponseDataArrayField(dataRaw, EncFieldEmbedding, "parse data as embeddings array", EncFieldEmbedding, session, strictDataShape, endpoint)
+func decryptResponseEmbeddingsData(dataRaw json.RawMessage, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
+	return decryptResponseDataArrayField(dataRaw, EncFieldEmbedding, "parse data as embeddings array", EncFieldEmbedding, session, endpoint)
 }
 
 // decryptResponseRerankResults decrypts document text fields in results[] items of a reranking response.
@@ -1023,8 +1020,8 @@ func decryptResponseRerankResults(resultsRaw json.RawMessage, session Decryptor,
 // the session policy determines whether plaintext is allowed.
 // Returns the rewritten data JSON, or nil if nothing was decrypted.
 // Score endpoint path: /v1/score.
-func decryptResponseScoreData(dataRaw json.RawMessage, session Decryptor, strictDataShape bool, endpoint EndpointType) (json.RawMessage, error) {
-	return decryptResponseDataArrayField(dataRaw, EncFieldScore, "parse data as score array", EncFieldScore, session, strictDataShape, endpoint)
+func decryptResponseScoreData(dataRaw json.RawMessage, session Decryptor, endpoint EndpointType) (json.RawMessage, error) {
+	return decryptResponseDataArrayField(dataRaw, EncFieldScore, "parse data as score array", EncFieldScore, session, endpoint)
 }
 
 // ReassembleNonStream reads an SSE stream (forced by E2EE), decrypts each
