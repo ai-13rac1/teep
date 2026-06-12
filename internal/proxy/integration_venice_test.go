@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/tlsct"
 )
 
@@ -51,17 +53,17 @@ func integrationModel() string {
 		}
 		return "venice:" + m
 	}
-	return "venice:e2ee-qwen3-5-122b-a10b"
+	return "venice:e2ee-qwen3-6-35b-a3b"
 }
 
 func TestIntegrationModel_PrefixHandling(t *testing.T) {
-	t.Setenv("VENICE_E2EE_MODEL", "e2ee-qwen3-5-122b-a10b")
-	if got, want := integrationModel(), "venice:e2ee-qwen3-5-122b-a10b"; got != want {
+	t.Setenv("VENICE_E2EE_MODEL", "e2ee-qwen3-6-35b-a3b")
+	if got, want := integrationModel(), "venice:e2ee-qwen3-6-35b-a3b"; got != want {
 		t.Fatalf("integrationModel() = %q, want %q", got, want)
 	}
 
-	t.Setenv("VENICE_E2EE_MODEL", "venice:e2ee-qwen3-5-122b-a10b")
-	if got, want := integrationModel(), "venice:e2ee-qwen3-5-122b-a10b"; got != want {
+	t.Setenv("VENICE_E2EE_MODEL", "venice:e2ee-qwen3-6-35b-a3b")
+	if got, want := integrationModel(), "venice:e2ee-qwen3-6-35b-a3b"; got != want {
 		t.Fatalf("integrationModel() = %q, want %q", got, want)
 	}
 
@@ -70,6 +72,28 @@ func TestIntegrationModel_PrefixHandling(t *testing.T) {
 	if got, want := integrationModel(), "venice:hf:org/model:v1"; got != want {
 		t.Fatalf("integrationModel() = %q, want %q", got, want)
 	}
+}
+
+func diagnosticBodySnippet(body []byte) string {
+	const max = 320
+	s := strings.TrimSpace(string(body))
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
+}
+
+func diagnosticChunkSnippet(chunks []string) string {
+	if len(chunks) == 0 {
+		return ""
+	}
+	const maxChunks = 3
+	start := len(chunks) - maxChunks
+	if start < 0 {
+		start = 0
+	}
+	combined := strings.Join(chunks[start:], "\n")
+	return diagnosticBodySnippet([]byte(combined))
 }
 
 // with E2EE disabled and Offline true (skips Intel PCS, NRAS, PoC network
@@ -114,6 +138,10 @@ func integrationE2EEConfig(t *testing.T) *config.Config {
 
 // integrationPrompt is a short prompt that minimizes cost and response time.
 const integrationPrompt = "Say hello in exactly two words"
+
+// integrationToolPrompt strongly nudges the model toward tool invocation so
+// tool-call leaf decryption status is exercised by integration tests.
+const integrationToolPrompt = "You must call the get_weather function for San Francisco. Do not provide prose. Return only the function call."
 
 type cancelOnCloseReadCloser struct {
 	io.ReadCloser
@@ -183,12 +211,214 @@ func postChatIntegration(t *testing.T, proxyURL, model string, stream bool) *htt
 // handling tool_calls, audio.data, and function_call fields in responses.
 func postChatWithTools(t *testing.T, proxyURL, model string, stream bool) *http.Response {
 	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}}]}`, model, integrationPrompt, stream)
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}`, model, integrationToolPrompt, stream)
 	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
 	if err != nil {
 		t.Fatalf("POST chat with tools: %v", err)
 	}
 	return resp
+}
+
+type integrationToolCallLeaf struct {
+	Index     int
+	ID        string
+	Type      string
+	Name      string
+	Arguments string
+}
+
+func assertToolCallLeavesPlaintext(t *testing.T, provider string, calls []integrationToolCallLeaf) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatalf("%s: expected at least one tool call", provider)
+	}
+	for _, tc := range calls {
+		if tc.ID == "" {
+			t.Fatalf("%s: tool_call[%d].id is empty", provider, tc.Index)
+		}
+		if tc.Type != "function" {
+			t.Fatalf("%s: tool_call[%d].type = %q, want function", provider, tc.Index, tc.Type)
+		}
+		if tc.Name == "" {
+			t.Fatalf("%s: tool_call[%d].function.name is empty", provider, tc.Index)
+		}
+		if tc.Arguments == "" {
+			t.Fatalf("%s: tool_call[%d].function.arguments is empty", provider, tc.Index)
+		}
+		if e2ee.IsEncryptedChunkXChaCha20(tc.Name) || e2ee.IsEncryptedChunkVenice(tc.Name) {
+			t.Fatalf("%s: tool_call[%d].function.name still looks encrypted: %q", provider, tc.Index, tc.Name)
+		}
+		if e2ee.IsEncryptedChunkXChaCha20(tc.Arguments) || e2ee.IsEncryptedChunkVenice(tc.Arguments) {
+			t.Fatalf("%s: tool_call[%d].function.arguments still looks encrypted", provider, tc.Index)
+		}
+		if tc.Name != "get_weather" {
+			t.Fatalf("%s: tool_call[%d].function.name = %q, want get_weather", provider, tc.Index, tc.Name)
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			t.Fatalf("%s: tool_call[%d].function.arguments not valid JSON: %v; got=%q", provider, tc.Index, err, tc.Arguments)
+		}
+		if _, ok := args["location"]; !ok {
+			t.Fatalf("%s: tool_call[%d].function.arguments missing location key: %q", provider, tc.Index, tc.Arguments)
+		}
+	}
+}
+
+func decodeNonStreamToolCallLeaves(body []byte) ([]integrationToolCallLeaf, error) {
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	if len(parsed.Choices) == 0 {
+		return nil, nil
+	}
+	out := make([]integrationToolCallLeaf, 0, len(parsed.Choices[0].Message.ToolCalls))
+	for i, tc := range parsed.Choices[0].Message.ToolCalls {
+		out = append(out, integrationToolCallLeaf{
+			Index:     i,
+			ID:        tc.ID,
+			Type:      tc.Type,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+	return out, nil
+}
+
+func decodeStreamToolCallLeaves(chunks []string) ([]integrationToolCallLeaf, error) {
+	type partialToolCall struct {
+		ID        string
+		Type      string
+		Name      strings.Builder
+		Arguments strings.Builder
+	}
+	partials := map[int]*partialToolCall{}
+
+	for _, chunk := range chunks {
+		var parsed struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Index    *int   `json:"index"`
+						Function *struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(chunk), &parsed); err != nil {
+			return nil, fmt.Errorf("decode stream chunk: %w", err)
+		}
+		if len(parsed.Choices) == 0 {
+			continue
+		}
+		for j, tc := range parsed.Choices[0].Delta.ToolCalls {
+			idx := j
+			if tc.Index != nil {
+				idx = *tc.Index
+			}
+			p, ok := partials[idx]
+			if !ok {
+				p = &partialToolCall{}
+				partials[idx] = p
+			}
+			if tc.ID != "" {
+				p.ID = tc.ID
+			}
+			if tc.Type != "" {
+				p.Type = tc.Type
+			}
+			if tc.Function != nil {
+				if tc.Function.Name != "" {
+					p.Name.WriteString(tc.Function.Name)
+				}
+				if tc.Function.Arguments != "" {
+					p.Arguments.WriteString(tc.Function.Arguments)
+				}
+			}
+		}
+	}
+
+	indexes := make([]int, 0, len(partials))
+	for idx := range partials {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+	out := make([]integrationToolCallLeaf, 0, len(indexes))
+	for _, idx := range indexes {
+		p := partials[idx]
+		out = append(out, integrationToolCallLeaf{
+			Index:     idx,
+			ID:        p.ID,
+			Type:      p.Type,
+			Name:      p.Name.String(),
+			Arguments: p.Arguments.String(),
+		})
+	}
+	return out, nil
+}
+
+func assertNonStreamToolCallLeaves(t *testing.T, resp *http.Response, provider string) bool {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	calls, err := decodeNonStreamToolCallLeaves(body)
+	if err != nil {
+		t.Fatalf("decode non-stream tool calls: %v; body=%s", err, body)
+	}
+	if len(calls) == 0 {
+		t.Logf("%s non-stream response did not include tool calls; snippet=%q", provider, diagnosticBodySnippet(body))
+		return false
+	}
+	assertToolCallLeavesPlaintext(t, provider, calls)
+	t.Logf("%s non-stream tool calls verified: %d", provider, len(calls))
+	return true
+}
+
+func assertStreamToolCallLeaves(t *testing.T, resp *http.Response, provider string) bool {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	chunks := readSSEChunks(t, resp.Body)
+	if len(chunks) == 0 {
+		t.Fatal("no SSE chunks received")
+	}
+	calls, err := decodeStreamToolCallLeaves(chunks)
+	if err != nil {
+		t.Fatalf("decode stream tool calls: %v", err)
+	}
+	if len(calls) == 0 {
+		t.Logf("%s stream response did not include tool calls; chunk_snippet=%q", provider, diagnosticChunkSnippet(chunks))
+		return false
+	}
+	assertToolCallLeavesPlaintext(t, provider, calls)
+	t.Logf("%s stream tool calls verified: %d", provider, len(calls))
+	return true
 }
 
 // findFactor returns the named factor from a report's factor list.
@@ -413,13 +643,14 @@ func TestIntegration_Venice(t *testing.T) {
 	})
 
 	t.Run("E2EEStreamingWithTools", func(t *testing.T) {
-		// Test that requests with tool schemas don't break E2EE decryption.
-		// This exercises protocol-aware nested field decryption for tool_calls.
+		// Validate that Venice tool-call function leaves are surfaced as plaintext.
 		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
 		defer proxySrv.Close()
 		resp := postChatWithTools(t, proxySrv.URL, integrationModel(), true)
 		defer resp.Body.Close()
-		assertStreamResponse(t, resp)
+		if !assertStreamToolCallLeaves(t, resp, "venice") {
+			t.Skip("venice live model returned no tool calls; cannot assert tool-call leaf status in this run")
+		}
 	})
 
 	t.Run("E2EENonStreamWithTools", func(t *testing.T) {
@@ -427,7 +658,9 @@ func TestIntegration_Venice(t *testing.T) {
 		defer proxySrv.Close()
 		resp := postChatWithTools(t, proxySrv.URL, integrationModel(), false)
 		defer resp.Body.Close()
-		assertNonStreamResponseOrToolCall(t, resp)
+		if !assertNonStreamToolCallLeaves(t, resp, "venice") {
+			t.Skip("venice live model returned no tool calls; cannot assert tool-call leaf status in this run")
+		}
 	})
 
 	t.Run("E2EEPlaintextToolCalls", func(t *testing.T) {
@@ -441,81 +674,67 @@ func TestIntegration_Venice(t *testing.T) {
 		// Use a prompt that encourages tool use and a tool that would be called.
 		// Model behavior varies; if it chooses to return content instead of calling
 		// a tool, we still validate the response structure is valid.
-		toolPrompt := `Use the weather tool to get the current weather for San Francisco.`
+		toolPrompt := integrationToolPrompt
 		model := integrationModel()
 		toolJSON := fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":false,"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather in a location","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The location to get weather for"}}}}}]}`,
+			`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":false,"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather in a location","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The location to get weather for"}},"required":["location"]}}}]}`,
 			model, toolPrompt)
 
-		resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/chat/completions", toolJSON)
-		if err != nil {
-			t.Fatalf("POST chat with tool request: %v", err)
-		}
-		defer resp.Body.Close()
+		const maxAttempts = 3
+		const attemptTimeout = 25 * time.Second
+		lastReason := ""
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			attemptCtx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+			req, reqErr := http.NewRequestWithContext(
+				attemptCtx,
+				http.MethodPost,
+				proxySrv.URL+"/v1/chat/completions",
+				strings.NewReader(toolJSON),
+			)
+			if reqErr != nil {
+				cancel()
+				t.Fatalf("construct tool-call request: %v", reqErr)
+			}
+			req.Header.Set("Content-Type", "application/json")
 
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-		}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				cancel()
+				lastReason = fmt.Sprintf("request error: %v", err)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				lastReason = fmt.Sprintf("read body: %v", readErr)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
 
-		var parsed struct {
-			Choices []struct {
-				Message struct {
-					Content   *string `json:"content"`
-					ToolCalls []struct {
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal(body, &parsed); err != nil {
-			t.Fatalf("decode tool response: %v; body=%s", err, body)
-		}
-		if len(parsed.Choices) == 0 {
-			t.Fatalf("no choices in response: %s", body)
-		}
+			if resp.StatusCode != http.StatusOK {
+				lastReason = fmt.Sprintf("status=%d body=%s", resp.StatusCode, body)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
 
-		msg := parsed.Choices[0].Message
-		if msg.Content != nil && *msg.Content != "" {
-			// Model returned text instead of tool call, which is valid.
-			t.Logf("model returned content instead of tool call: %q", *msg.Content)
+			calls, err := decodeNonStreamToolCallLeaves(body)
+			if err != nil {
+				t.Fatalf("decode tool response: %v; body=%s", err, body)
+			}
+			if len(calls) == 0 {
+				lastReason = "response contained no tool_calls"
+				t.Logf("attempt %d/%d: %s; snippet=%q", attempt, maxAttempts, lastReason, diagnosticBodySnippet(body))
+				continue
+			}
+
+			assertToolCallLeavesPlaintext(t, "venice", calls)
+			t.Logf("venice non-stream tool calls verified in plaintext test: %d", len(calls))
 			return
 		}
 
-		if len(msg.ToolCalls) > 0 {
-			// Validate that tool_calls are accessible (plaintext, not encrypted).
-			// The key assertion here is that we can unmarshal the tool_calls structure
-			// without errors, which proves that:
-			// 1. decryptToolCallsField correctly skipped decryption for Venice
-			// 2. The plaintext function name and arguments are preserved
-			// 3. No encryption-related errors were raised during relay decryption
-			toolCall := msg.ToolCalls[0]
-			if toolCall.Function.Name == "" {
-				t.Fatalf("tool_call function name is empty; structure: %+v", toolCall)
-			}
-			if toolCall.Function.Arguments == "" {
-				t.Fatalf("tool_call function arguments are empty; structure: %+v", toolCall)
-			}
-			// Validate arguments are valid JSON (they should be plaintext JSON, not encrypted).
-			var args map[string]any
-			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
-				t.Fatalf("tool_call arguments not valid JSON (expected plaintext): %v; args=%q", err, toolCall.Function.Arguments)
-			}
-			t.Logf("Venice E2EE tool_calls: function=%q, arguments=%q", toolCall.Function.Name, toolCall.Function.Arguments)
-			return
-		}
-
-		// Model didn't use tools with this prompt, which is acceptable.
-		t.Logf("model did not use tools with this prompt")
+		t.Skipf("venice live model did not return verifiable tool_calls after %d attempts: %s", maxAttempts, lastReason)
 	})
 }

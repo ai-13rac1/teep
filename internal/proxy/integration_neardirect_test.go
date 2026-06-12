@@ -310,13 +310,14 @@ func runNearDirectAttestationReport(t *testing.T) {
 }
 
 func runNearDirectE2EEStreamingWithTools(t *testing.T) {
-	// Test that requests with tool schemas don't break E2EE decryption.
-	// This exercises protocol-aware nested field decryption for tool_calls.
+	// Validate that tool-call function leaves are surfaced as plaintext after E2EE relay decryption.
 	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
 	defer proxySrv.Close()
 	resp := postChatWithTools(t, proxySrv.URL, nearDirectIntegrationModel(), true)
 	defer resp.Body.Close()
-	assertStreamResponse(t, resp)
+	if !assertStreamToolCallLeaves(t, resp, "neardirect") {
+		t.Fatal("neardirect: expected at least one tool call in streaming tools integration test")
+	}
 }
 
 func runNearDirectE2EENonStreamWithTools(t *testing.T) {
@@ -325,5 +326,7 @@ func runNearDirectE2EENonStreamWithTools(t *testing.T) {
 
 	resp := postChatWithTools(t, proxySrv.URL, nearDirectIntegrationModel(), false)
 	defer resp.Body.Close()
-	assertNonStreamResponseOrToolCall(t, resp)
+	if !assertNonStreamToolCallLeaves(t, resp, "neardirect") {
+		t.Fatal("neardirect: expected at least one tool call in non-stream tools integration test")
+	}
 }
