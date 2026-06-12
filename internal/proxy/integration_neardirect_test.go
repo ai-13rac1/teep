@@ -103,6 +103,8 @@ func TestIntegration_NearDirect(t *testing.T) {
 	t.Run("AttestationReport", runNearDirectAttestationReport)
 	t.Run("E2EEStreamingWithTools", runNearDirectE2EEStreamingWithTools)
 	t.Run("E2EENonStreamWithTools", runNearDirectE2EENonStreamWithTools)
+	t.Run("E2EEStreamingMultimodalContentArray", runNearDirectE2EEStreamingMultimodalContentArray)
+	t.Run("E2EENonStreamMultimodalContentArray", runNearDirectE2EENonStreamMultimodalContentArray)
 }
 
 func runNearDirectNonStream(t *testing.T) {
@@ -329,4 +331,58 @@ func runNearDirectE2EENonStreamWithTools(t *testing.T) {
 	if !assertNonStreamToolCallLeaves(t, resp, "neardirect") {
 		t.Fatal("neardirect: expected at least one tool call in non-stream tools integration test")
 	}
+}
+
+func runNearDirectE2EEStreamingMultimodalContentArray(t *testing.T) {
+	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearDirectVLModel()
+	body := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "What color is this image? Answer in one word."},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}
+			]
+		}],
+		"stream": true,
+		"max_tokens": 50
+	}`, model, testPNG())
+
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST chat (multimodal stream E2EE): %v", err)
+	}
+	defer resp.Body.Close()
+
+	assertStreamMultimodalResponse(t, resp, "neardirect")
+}
+
+func runNearDirectE2EENonStreamMultimodalContentArray(t *testing.T) {
+	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearDirectVLModel()
+	body := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "What color is this image? Answer in one word."},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}
+			]
+		}],
+		"stream": false,
+		"max_tokens": 50
+	}`, model, testPNG())
+
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST chat (multimodal non-stream E2EE): %v", err)
+	}
+	defer resp.Body.Close()
+
+	assertNonStreamMultimodalResponse(t, resp, "neardirect")
 }

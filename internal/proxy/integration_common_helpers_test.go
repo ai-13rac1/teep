@@ -184,6 +184,157 @@ func assertStreamResponse(t *testing.T, resp *http.Response) {
 	t.Logf("response (%d chunks): %q", len(chunks), content)
 }
 
+func decodeMultimodalContentText(raw json.RawMessage) (content string, fromArray bool, err error) {
+	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false, nil
+	}
+
+	var collectText func(v any, sb *strings.Builder)
+	collectText = func(v any, sb *strings.Builder) {
+		switch x := v.(type) {
+		case string:
+			sb.WriteString(x)
+		case []any:
+			for _, child := range x {
+				collectText(child, sb)
+			}
+		case map[string]any:
+			if textVal, ok := x["text"]; ok {
+				collectText(textVal, sb)
+			}
+			if contentVal, ok := x["content"]; ok {
+				collectText(contentVal, sb)
+			}
+			if outputTextVal, ok := x["output_text"]; ok {
+				collectText(outputTextVal, sb)
+			}
+		}
+	}
+
+	switch raw[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return "", false, err
+		}
+		return s, false, nil
+	case '[':
+		var arr []any
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return "", false, err
+		}
+		var sb strings.Builder
+		collectText(arr, &sb)
+		return sb.String(), true, nil
+	case '{':
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return "", false, err
+		}
+		var sb strings.Builder
+		collectText(obj, &sb)
+		return sb.String(), false, nil
+	default:
+		return "", false, fmt.Errorf("unexpected content JSON token %q", raw[0])
+	}
+}
+
+func extractDeltaContentMultimodal(t *testing.T, chunkJSON string) (string, bool) {
+	t.Helper()
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content          json.RawMessage `json:"content"`
+				ReasoningContent string          `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(chunkJSON), &chunk); err != nil {
+		t.Fatalf("unmarshal SSE chunk: %v", err)
+	}
+	if len(chunk.Choices) == 0 {
+		return "", false
+	}
+
+	text, fromArray, err := decodeMultimodalContentText(chunk.Choices[0].Delta.Content)
+	if err != nil {
+		t.Fatalf("decode SSE chunk content: %v", err)
+	}
+	if text != "" {
+		return text, fromArray
+	}
+	return chunk.Choices[0].Delta.ReasoningContent, false
+}
+
+func extractMessageContentMultimodal(t *testing.T, body []byte) (string, bool) {
+	t.Helper()
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(resp.Choices) == 0 {
+		t.Fatal("no choices in response")
+	}
+	text, fromArray, err := decodeMultimodalContentText(resp.Choices[0].Message.Content)
+	if err != nil {
+		t.Fatalf("decode message content: %v", err)
+	}
+	return text, fromArray
+}
+
+func assertNonStreamMultimodalResponse(t *testing.T, resp *http.Response, provider string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	content, fromArray := extractMessageContentMultimodal(t, body)
+	if !isPrintableUTF8(content) {
+		t.Errorf("content is not valid printable UTF-8: %q", content)
+	}
+	t.Logf("%s multimodal non-stream response (content array=%v): %q", provider, fromArray, content)
+}
+
+func assertStreamMultimodalResponse(t *testing.T, resp *http.Response, provider string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	chunks := readSSEChunks(t, resp.Body)
+	if len(chunks) == 0 {
+		t.Fatal("no SSE chunks received")
+	}
+
+	var sb strings.Builder
+	sawArrayChunk := false
+	for _, c := range chunks {
+		text, fromArray := extractDeltaContentMultimodal(t, c)
+		sb.WriteString(text)
+		if fromArray {
+			sawArrayChunk = true
+		}
+	}
+	content := sb.String()
+	if !isPrintableUTF8(content) {
+		t.Errorf("content is not valid printable UTF-8: %q", content)
+	}
+	t.Logf("%s multimodal stream response (%d chunks, content array seen=%v): %q", provider, len(chunks), sawArrayChunk, content)
+}
+
 // --------------------------------------------------------------------------
 // Tool-call integration helpers (provider-agnostic)
 // --------------------------------------------------------------------------

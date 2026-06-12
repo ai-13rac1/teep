@@ -102,6 +102,8 @@ func TestIntegration_NearCloud(t *testing.T) {
 	t.Run("AttestationReport", runNearCloudAttestationReport)
 	t.Run("E2EEStreamingWithTools", runNearCloudE2EEStreamingWithTools)
 	t.Run("E2EENonStreamWithTools", runNearCloudE2EENonStreamWithTools)
+	t.Run("E2EEStreamingMultimodalContentArray", runNearCloudE2EEStreamingMultimodalContentArray)
+	t.Run("E2EENonStreamMultimodalContentArray", runNearCloudE2EENonStreamMultimodalContentArray)
 }
 
 func runNearCloudNonStream(t *testing.T) {
@@ -347,6 +349,60 @@ func runNearCloudE2EENonStreamWithTools(t *testing.T) {
 	if !assertNonStreamToolCallLeaves(t, resp, "nearcloud") {
 		t.Fatal("nearcloud: expected at least one tool call in non-stream tools integration test")
 	}
+}
+
+func runNearCloudE2EEStreamingMultimodalContentArray(t *testing.T) {
+	proxySrv := newProxyServer(t, integrationNearCloudE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearCloudVLModel()
+	body := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "What color is this image? Answer in one word."},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}
+			]
+		}],
+		"stream": true,
+		"max_tokens": 50
+	}`, model, testPNG())
+
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST chat (multimodal stream E2EE): %v", err)
+	}
+	defer resp.Body.Close()
+
+	assertStreamMultimodalResponse(t, resp, "nearcloud")
+}
+
+func runNearCloudE2EENonStreamMultimodalContentArray(t *testing.T) {
+	proxySrv := newProxyServer(t, integrationNearCloudE2EEConfig(t))
+	defer proxySrv.Close()
+
+	model := nearCloudVLModel()
+	body := fmt.Sprintf(`{
+		"model": %q,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "What color is this image? Answer in one word."},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}
+			]
+		}],
+		"stream": false,
+		"max_tokens": 50
+	}`, model, testPNG())
+
+	resp, err := integrationPostJSON(t, proxySrv.URL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST chat (multimodal non-stream E2EE): %v", err)
+	}
+	defer resp.Body.Close()
+
+	assertNonStreamMultimodalResponse(t, resp, "nearcloud")
 }
 
 // --------------------------------------------------------------------------
