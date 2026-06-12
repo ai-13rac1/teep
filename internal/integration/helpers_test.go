@@ -91,7 +91,7 @@ func assertMustFail(t *testing.T, r *attestation.VerificationReport, names []str
 	}
 }
 
-func assertFactorStatus(t *testing.T, r *attestation.VerificationReport, name string, want attestation.Status) { //nolint:unparam // want is a generic parameter for this assertion helper
+func assertFactorStatus(t *testing.T, r *attestation.VerificationReport, name string, want attestation.Status) {
 	t.Helper()
 	f := findFactor(t, r, name)
 	if f.Status != want {
