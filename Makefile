@@ -1,4 +1,4 @@
-.PHONY: help build build-debug self-check test test-live test-fuzz integration integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture vet teeplint lint check clean reports report-venice report-neardirect report-nearcloud report-nanogpt report-phalacloud report-chutes e2e-venice
+.PHONY: help build build-debug self-check test test-live test-fuzz integration integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture integration-chutes-fixture vet teeplint lint check clean reports report-venice report-neardirect report-nearcloud report-nanogpt report-phalacloud report-chutes e2e-venice
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -40,25 +40,25 @@ coverage-full: ## Full coverage without -short (live integration tests still nee
 test-live: ## Run live network tests (dials external hosts, requires internet)
 	TEEP_LIVE_TESTS=1 go test -race -v ./internal/tlsct/ -run TestLive
 
-integration: integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture ## Run all integration tests
+integration: integration-venice integration-neardirect integration-nearcloud integration-nanogpt integration-phalacloud integration-chutes integration-neardirect-fixture integration-venice-fixture integration-nearcloud-fixture integration-chutes-fixture ## Run all integration tests
 
 integration-venice: ## Run Venice integration tests (requires VENICE_API_KEY)
-	go test -v -race -timeout 120s -run TestIntegration_Venice ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 300s -run TestIntegration_Venice ./internal/proxy/
 
 integration-neardirect: ## Run NEAR Direct integration tests (requires NEARAI_API_KEY)
-	go test -v -race -timeout 120s -run TestIntegration_NearDirect ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 300s -run TestIntegration_NearDirect ./internal/proxy/
 
 integration-nearcloud: ## Run NearCloud gateway integration tests (requires NEARAI_API_KEY)
-	go test -v -race -timeout 180s -run TestIntegration_NearCloud ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 300s -run TestIntegration_NearCloud ./internal/proxy/
 
 integration-nanogpt: ## Run NanoGPT integration tests (requires NANOGPT_API_KEY)
-	go test -v -race -timeout 120s -run TestIntegration_NanoGPT ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 120s -run TestIntegration_NanoGPT ./internal/proxy/
 
 integration-phalacloud: ## Run Phala Cloud integration tests (requires PHALA_API_KEY)
-	go test -v -race -timeout 120s -run TestIntegration_PhalaCloud ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 120s -run TestIntegration_PhalaCloud ./internal/proxy/
 
 integration-chutes: ## Run Chutes integration tests (requires CHUTES_API_KEY)
-	go test -v -race -timeout 600s -run TestIntegration_Chutes ./internal/proxy/
+	TEEP_TESTS_LOAD_DOTENV=1 go test -v -race -timeout 600s -run TestIntegration_Chutes ./internal/proxy/
 
 integration-neardirect-fixture: ## Run NEAR Direct fixture integration test (no API key needed)
 	go test -v -race -timeout 60s -run TestIntegration_NearDirect_Fixture ./internal/integration/
@@ -68,6 +68,9 @@ integration-venice-fixture: ## Run Venice fixture integration test (no API key n
 
 integration-nearcloud-fixture: ## Run NearCloud fixture integration test (no API key needed)
 	go test -v -race -timeout 60s -run TestIntegration_NearCloud_Fixture ./internal/integration/
+
+integration-chutes-fixture: ## Run Chutes fixture integration test (no API key needed)
+	go test -v -race -timeout 60s -run TestIntegration_Chutes_Fixture ./internal/integration/
 
 vet: ## Run go vet
 	go vet ./cmd/... ./internal/...

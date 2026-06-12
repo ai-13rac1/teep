@@ -230,6 +230,34 @@ func TestVeniceSessionNewAndPublicKey(t *testing.T) {
 	}
 }
 
+func TestVeniceSessionIsResponseFieldEncrypted_NestedPaths(t *testing.T) {
+	s := &VeniceSession{}
+	tests := []struct {
+		name     string
+		field    string
+		endpoint EndpointType
+		want     bool
+	}{
+		{name: "content encrypted on chat", field: "content", endpoint: EndpointChat, want: true},
+		{name: "content plaintext on embeddings", field: "content", endpoint: EndpointEmbeddings, want: false},
+		{name: "content plaintext on score", field: "content", endpoint: EndpointScore, want: false},
+		{name: "tool function name plaintext", field: "tool_calls[].function.name", endpoint: EndpointChat, want: false},
+		{name: "tool function arguments plaintext", field: "tool_calls[].function.arguments", endpoint: EndpointChat, want: false},
+		{name: "function_call args plaintext", field: "function_call.arguments", endpoint: EndpointChat, want: false},
+		{name: "audio data plaintext", field: "audio.data", endpoint: EndpointChat, want: false},
+		{name: "logprobs token plaintext", field: "logprobs.content[].token", endpoint: EndpointChat, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := s.IsResponseFieldEncrypted(tc.field, tc.endpoint)
+			if got != tc.want {
+				t.Fatalf("IsResponseFieldEncrypted(%q, %q)=%v want %v", tc.field, tc.endpoint, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSetModelKeyValidation tests all validation paths of SetModelKey.
 func TestSetModelKeyValidation(t *testing.T) {
 	keyA := mustPrivKey(t, testKeyAScalar())

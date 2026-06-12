@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,19 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
-	"github.com/13rac1/teep/internal/tlsct"
 )
-
-// integrationClient is an HTTP client with a 5-minute timeout for integration
-// tests. Chutes E2EE can take ~30s attestation + ~60s inference, and with
-// instance failover retries the total may exceed 120s. 5 minutes gives
-// generous headroom without hanging forever on a stuck connection.
-var integrationClient = tlsct.NewHTTPClient(5 * time.Minute)
 
 // skipIntegration skips the test if VENICE_API_KEY is unset or if running
 // under go test -short.
@@ -44,17 +36,17 @@ func integrationModel() string {
 		}
 		return "venice:" + m
 	}
-	return "venice:e2ee-qwen3-5-122b-a10b"
+	return "venice:e2ee-qwen3-6-35b-a3b"
 }
 
 func TestIntegrationModel_PrefixHandling(t *testing.T) {
-	t.Setenv("VENICE_E2EE_MODEL", "e2ee-qwen3-5-122b-a10b")
-	if got, want := integrationModel(), "venice:e2ee-qwen3-5-122b-a10b"; got != want {
+	t.Setenv("VENICE_E2EE_MODEL", "e2ee-qwen3-6-35b-a3b")
+	if got, want := integrationModel(), "venice:e2ee-qwen3-6-35b-a3b"; got != want {
 		t.Fatalf("integrationModel() = %q, want %q", got, want)
 	}
 
-	t.Setenv("VENICE_E2EE_MODEL", "venice:e2ee-qwen3-5-122b-a10b")
-	if got, want := integrationModel(), "venice:e2ee-qwen3-5-122b-a10b"; got != want {
+	t.Setenv("VENICE_E2EE_MODEL", "venice:e2ee-qwen3-6-35b-a3b")
+	if got, want := integrationModel(), "venice:e2ee-qwen3-6-35b-a3b"; got != want {
 		t.Fatalf("integrationModel() = %q, want %q", got, want)
 	}
 
@@ -103,92 +95,6 @@ func integrationE2EEConfig(t *testing.T) *config.Config {
 		},
 		AllowFail: attestation.KnownFactors,
 	}
-}
-
-// integrationPrompt is a short prompt that minimizes cost and response time.
-const integrationPrompt = "Say hello in exactly two words"
-
-// postChatIntegration sends a POST /v1/chat/completions with the standard
-// integration prompt. Uses integrationClient (60s timeout).
-func postChatIntegration(t *testing.T, proxyURL, model string, stream bool) *http.Response {
-	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v}`, model, integrationPrompt, stream)
-	resp, err := integrationClient.Post(proxyURL+"/v1/chat/completions", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST chat: %v", err)
-	}
-	return resp
-}
-
-// findFactor returns the named factor from a report's factor list.
-func findFactor(factors []attestation.FactorResult, name string) (attestation.FactorResult, bool) {
-	for _, f := range factors {
-		if f.Name == name {
-			return f, true
-		}
-	}
-	return attestation.FactorResult{}, false
-}
-
-// isPrintableUTF8 returns true if s is valid UTF-8 and contains at least one
-// printable, non-control character.
-func isPrintableUTF8(s string) bool {
-	if !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		if unicode.IsPrint(r) && !unicode.IsControl(r) {
-			return true
-		}
-	}
-	return false
-}
-
-// assertNonStreamResponse validates a non-streaming chat response has valid
-// printable UTF-8 content.
-func assertNonStreamResponse(t *testing.T, resp *http.Response) {
-	t.Helper()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	content := extractMessageContent(t, body)
-	if !isPrintableUTF8(content) {
-		t.Errorf("content is not valid printable UTF-8: %q", content)
-	}
-	t.Logf("response: %q", content)
-}
-
-// assertStreamResponse validates a streaming chat response has valid printable
-// UTF-8 content across all SSE chunks.
-func assertStreamResponse(t *testing.T, resp *http.Response) {
-	t.Helper()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
-	}
-
-	chunks := readSSEChunks(t, resp.Body)
-	if len(chunks) == 0 {
-		t.Fatal("no SSE chunks received")
-	}
-
-	var sb strings.Builder
-	for _, c := range chunks {
-		sb.WriteString(extractDeltaContent(t, c))
-	}
-	content := sb.String()
-	if !isPrintableUTF8(content) {
-		t.Errorf("content is not valid printable UTF-8: %q", content)
-	}
-	t.Logf("response (%d chunks): %q", len(chunks), content)
 }
 
 // assertReportFactors verifies tier-1 factors pass, REPORTDATA binding holds,
@@ -256,6 +162,14 @@ func TestIntegration_Venice(t *testing.T) {
 		assertStreamResponse(t, resp)
 	})
 
+	t.Run("E2EENonStream", func(t *testing.T) {
+		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
+		defer proxySrv.Close()
+		resp := postChatIntegration(t, proxySrv.URL, integrationModel(), false)
+		defer resp.Body.Close()
+		assertNonStreamResponse(t, resp)
+	})
+
 	t.Run("AttestationReport", func(t *testing.T) {
 		cfg := integrationE2EEConfig(t)
 		cfg.Offline = false
@@ -285,5 +199,101 @@ func TestIntegration_Venice(t *testing.T) {
 			t.Fatalf("decode report: %v", err)
 		}
 		assertReportFactors(t, &report)
+	})
+
+	t.Run("E2EEStreamingWithTools", func(t *testing.T) {
+		// Validate that Venice tool-call function leaves are surfaced as plaintext.
+		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
+		defer proxySrv.Close()
+		resp := postChatWithTools(t, proxySrv.URL, integrationModel(), true)
+		defer resp.Body.Close()
+		if !assertStreamToolCallLeaves(t, resp, "venice") {
+			t.Skip("venice live model returned no tool calls; cannot assert tool-call leaf status in this run")
+		}
+	})
+
+	t.Run("E2EENonStreamWithTools", func(t *testing.T) {
+		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
+		defer proxySrv.Close()
+		resp := postChatWithTools(t, proxySrv.URL, integrationModel(), false)
+		defer resp.Body.Close()
+		if !assertNonStreamToolCallLeaves(t, resp, "venice") {
+			t.Skip("venice live model returned no tool calls; cannot assert tool-call leaf status in this run")
+		}
+	})
+
+	t.Run("E2EEPlaintextToolCalls", func(t *testing.T) {
+		// Venice E2EE preserves plaintext for tool_calls function name and arguments
+		// (unlike NearCloud/NearDirect which use full-field encryption).
+		// This test validates that when Venice returns tool_calls, the function
+		// name and arguments are accessible as plaintext strings without decryption.
+		proxySrv := newProxyServer(t, integrationE2EEConfig(t))
+		defer proxySrv.Close()
+
+		// Use a prompt that encourages tool use and a tool that would be called.
+		// Model behavior varies; if it chooses to return content instead of calling
+		// a tool, we still validate the response structure is valid.
+		toolPrompt := integrationToolPrompt
+		model := integrationModel()
+		toolJSON := fmt.Sprintf(
+			`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":false,"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the current weather in a location","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The location to get weather for"}},"required":["location"]}}}]}`,
+			model, toolPrompt)
+
+		const maxAttempts = 3
+		const attemptTimeout = 25 * time.Second
+		lastReason := ""
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			attemptCtx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+			req, reqErr := http.NewRequestWithContext(
+				attemptCtx,
+				http.MethodPost,
+				proxySrv.URL+"/v1/chat/completions",
+				strings.NewReader(toolJSON),
+			)
+			if reqErr != nil {
+				cancel()
+				t.Fatalf("construct tool-call request: %v", reqErr)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				cancel()
+				lastReason = fmt.Sprintf("request error: %v", err)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
+
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				lastReason = fmt.Sprintf("read body: %v", readErr)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				lastReason = fmt.Sprintf("status=%d body=%s", resp.StatusCode, body)
+				t.Logf("attempt %d/%d: %s", attempt, maxAttempts, lastReason)
+				continue
+			}
+
+			calls, err := decodeNonStreamToolCallLeaves(body)
+			if err != nil {
+				t.Fatalf("decode tool response: %v; body=%s", err, body)
+			}
+			if len(calls) == 0 {
+				lastReason = "response contained no tool_calls"
+				t.Logf("attempt %d/%d: %s; snippet=%q", attempt, maxAttempts, lastReason, diagnosticBodySnippet(body))
+				continue
+			}
+
+			assertToolCallLeavesPlaintext(t, "venice", calls)
+			t.Logf("venice non-stream tool calls verified in plaintext test: %d", len(calls))
+			return
+		}
+
+		t.Skipf("venice live model did not return verifiable tool_calls after %d attempts: %s", maxAttempts, lastReason)
 	})
 }

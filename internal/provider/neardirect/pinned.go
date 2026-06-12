@@ -263,7 +263,7 @@ func (h *PinnedHandler) encryptBody(
 
 	raw := &attestation.RawAttestation{SigningKey: sk}
 	enc := NewE2EE()
-	result, sess, _, err := enc.EncryptRequest(req.Body, raw, req.Path)
+	result, sess, _, err := enc.EncryptRequest(req.Body, raw, req.Endpoint)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("neardirect E2EE encrypt: %w", err)
 	}
@@ -277,6 +277,7 @@ func (h *PinnedHandler) encryptBody(
 	hdrs.Set("X-Signing-Algo", "ed25519")
 	hdrs.Set("X-Client-Pub-Key", ncSess.ClientEd25519PubHex())
 	hdrs.Set("X-Encryption-Version", "2")
+	hdrs.Set("X-Encrypt-All-Fields", "true")
 
 	return result, ncSess, hdrs, nil
 }

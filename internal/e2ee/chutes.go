@@ -75,6 +75,14 @@ func (s *ChutesSession) Zero() {
 	s.RequestCiphertext = nil
 }
 
+// IsResponseFieldEncrypted returns true for all fields because Chutes uses
+// full-body encryption. No field is plaintext. Per api_support.md:
+// all response fields (content, tool_calls, logprobs, refusal) are encrypted by construction.
+func (s *ChutesSession) IsResponseFieldEncrypted(_ string, _ EndpointType) bool {
+	// Everything encrypted in Chutes full-body E2EE (all endpoints: /v1/chat/completions, /v1/embeddings, etc.)
+	return true
+}
+
 // HKDF info strings for the Chutes E2EE protocol.
 const (
 	hkdfInfoChutesReq    = "e2e-req-v1"

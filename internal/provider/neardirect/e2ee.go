@@ -15,29 +15,50 @@ type E2EE struct{}
 // NewE2EE returns a NEAR AI RequestEncryptor.
 func NewE2EE() *E2EE { return &E2EE{} }
 
-// EncryptRequest encrypts request fields with NEAR AI E2EE. The endpointPath
-// determines which fields are encrypted:
-//   - /v1/chat/completions: encrypts messages[].content (text or serialized VL array)
-//   - /v1/images/generations: encrypts the prompt field
+// EncryptRequest encrypts the request body for the given endpoint type using
+// NEAR AI E2EE (Ed25519/X25519 + XChaCha20-Poly1305).
 //
-// Unsupported endpoint paths fail closed — the TEE does not forward E2EE
-// headers for other endpoints (embeddings, audio, rerank), so encrypting them
-// would leave the model TEE unable to decrypt.
-func (n *E2EE) EncryptRequest(body []byte, raw *attestation.RawAttestation, endpointPath string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
-	switch endpointPath {
-	case "/v1/chat/completions":
+// Supported endpoint types:
+//   - chat: encrypts messages[].content (string or serialized VL array)
+//   - images: encrypts prompt
+//   - embeddings: encrypts input (string or string array)
+//   - rerank: encrypts query and documents[]
+//   - score: encrypts text_1 and text_2
+//
+// Unsupported endpoints fail closed.
+func (n *E2EE) EncryptRequest(body []byte, raw *attestation.RawAttestation, endpoint e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+	switch endpoint {
+	case e2ee.EndpointChat:
 		encBody, session, err := e2ee.EncryptChatMessagesNearCloud(body, raw.SigningKey)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		return encBody, session, nil, nil
-	case "/v1/images/generations":
+	case e2ee.EndpointImages:
 		encBody, session, err := e2ee.EncryptImagePromptNearCloud(body, raw.SigningKey)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		return encBody, session, nil, nil
+	case e2ee.EndpointEmbeddings:
+		encBody, session, err := e2ee.EncryptEmbeddingsNearCloud(body, raw.SigningKey)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return encBody, session, nil, nil
+	case e2ee.EndpointRerank:
+		encBody, session, err := e2ee.EncryptRerankNearCloud(body, raw.SigningKey)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return encBody, session, nil, nil
+	case e2ee.EndpointScore:
+		encBody, session, err := e2ee.EncryptScoreNearCloud(body, raw.SigningKey)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return encBody, session, nil, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("NEAR AI E2EE not supported for endpoint %q", endpointPath)
+		return nil, nil, nil, fmt.Errorf("NearAI E2EE not supported for endpoint %q", endpoint)
 	}
 }

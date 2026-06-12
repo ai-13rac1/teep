@@ -189,11 +189,9 @@ func (h *PinnedHandler) encryptBody(
 		return nil, nil, nil, errors.New("E2EE requested but no signing key available")
 	}
 
-	raw := &attestation.RawAttestation{SigningKey: sk}
-	enc := neardirect.NewE2EE()
-	result, sess, _, err := enc.EncryptRequest(req.Body, raw, req.Path)
+	result, ncSess, err := encryptNearCloudBody(req.Body, sk, req.Endpoint)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("NearCloud E2EE encrypt: %w", err)
+		return nil, nil, nil, err
 	}
 
 	// NearCloud E2EE protocol headers per NEAR AI docs.
@@ -201,17 +199,34 @@ func (h *PinnedHandler) encryptBody(
 	// to pin requests to a specific model instance by signing key, which
 	// causes 502 "model unavailable" errors when the instance restarts or
 	// scales. The official NEAR AI E2EE protocol does not require it.
+	hdrs := nearCloudE2EEHeaders(ncSess)
+
+	return result, ncSess, hdrs, nil
+}
+
+func encryptNearCloudBody(body []byte, signingKey string, endpoint e2ee.EndpointType) ([]byte, *e2ee.NearCloudSession, error) {
+	raw := &attestation.RawAttestation{SigningKey: signingKey}
+	enc := neardirect.NewE2EE()
+	result, sess, _, err := enc.EncryptRequest(body, raw, endpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("NearCloud E2EE encrypt: %w", err)
+	}
+
 	ncSess, ok := sess.(*e2ee.NearCloudSession)
 	if !ok {
 		sess.Zero()
-		return nil, nil, nil, errors.New("NearCloud E2EE: unexpected session type")
+		return nil, nil, errors.New("NearCloud E2EE: unexpected session type")
 	}
+	return result, ncSess, nil
+}
+
+func nearCloudE2EEHeaders(session *e2ee.NearCloudSession) http.Header {
 	hdrs := make(http.Header)
 	hdrs.Set("X-Signing-Algo", "ed25519")
-	hdrs.Set("X-Client-Pub-Key", ncSess.ClientEd25519PubHex())
+	hdrs.Set("X-Client-Pub-Key", session.ClientEd25519PubHex())
 	hdrs.Set("X-Encryption-Version", "2")
-
-	return result, sess, hdrs, nil
+	hdrs.Set("X-Encrypt-All-Fields", "true")
+	return hdrs
 }
 
 // setDialer overrides the TLS dial function. Only accessible from tests

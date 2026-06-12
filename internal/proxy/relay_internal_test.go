@@ -227,9 +227,11 @@ func TestHTTPError_Unwrap(t *testing.T) {
 
 type noopDecryptor struct{ zeroed bool }
 
-func (n *noopDecryptor) IsEncryptedChunk(string) bool   { return false }
-func (n *noopDecryptor) Decrypt(string) ([]byte, error) { return nil, nil }
-func (n *noopDecryptor) Zero()                          { n.zeroed = true }
+func (n *noopDecryptor) IsEncryptedChunk(string) bool                            { return false }
+func (n *noopDecryptor) Decrypt(string) ([]byte, error)                          { return nil, nil }
+func (n *noopDecryptor) IsRequestFieldEncrypted(string) bool                     { return false }
+func (n *noopDecryptor) IsResponseFieldEncrypted(string, e2ee.EndpointType) bool { return false }
+func (n *noopDecryptor) Zero()                                                   { n.zeroed = true }
 
 func TestZeroE2EESessions_NilBoth(t *testing.T) {
 	zeroE2EESessions(nil, nil) // must not panic
@@ -782,11 +784,11 @@ func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
 // mockDecryptor satisfies e2ee.Decryptor for tests that need a non-nil session.
 type mockDecryptor struct{}
 
-func (mockDecryptor) IsEncryptedChunk(_ string) bool { return false }
-func (mockDecryptor) Decrypt(_ string) ([]byte, error) {
-	return nil, errors.New("mock decrypt")
-}
-func (mockDecryptor) Zero() {}
+func (mockDecryptor) IsEncryptedChunk(_ string) bool                          { return false }
+func (mockDecryptor) Decrypt(_ string) ([]byte, error)                        { return nil, errors.New("mock decrypt") }
+func (mockDecryptor) IsRequestFieldEncrypted(string) bool                     { return false }
+func (mockDecryptor) IsResponseFieldEncrypted(string, e2ee.EndpointType) bool { return false }
+func (mockDecryptor) Zero()                                                   {}
 
 func TestHandlePinnedPostRelay_NoError_NoSession(t *testing.T) {
 	s := newMinimalServer()
@@ -1189,6 +1191,15 @@ func TestFromConfig_Nearcloud(t *testing.T) {
 	if p.ChatPath != "/v1/chat/completions" {
 		t.Errorf("ChatPath = %q, want /v1/chat/completions", p.ChatPath)
 	}
+	if p.EmbeddingsPath != "/v1/embeddings" {
+		t.Errorf("EmbeddingsPath = %q, want /v1/embeddings", p.EmbeddingsPath)
+	}
+	if p.RerankPath != "/v1/rerank" {
+		t.Errorf("RerankPath = %q, want /v1/rerank", p.RerankPath)
+	}
+	if p.ScorePath != "/v1/score" {
+		t.Errorf("ScorePath = %q, want /v1/score", p.ScorePath)
+	}
 }
 
 func TestFromConfig_Chutes(t *testing.T) {
@@ -1212,7 +1223,7 @@ func TestFromConfig_Chutes(t *testing.T) {
 func TestBuildUpstreamBody_E2EERequiredButNotActive(t *testing.T) {
 	s := newMinimalServer()
 	prov := &provider.Provider{Name: "test-e2ee", E2EE: true}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", false /* e2eeActive */, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", false /* e2eeActive */, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(E2EE required, not active): err=%v", err)
 	if err == nil {
 		t.Error("expected error when E2EE required but not active")
@@ -1226,7 +1237,7 @@ func TestBuildUpstreamBody_FreshRaw_MissingSigningKey(t *testing.T) {
 	s := newMinimalServer()
 	prov := &provider.Provider{Name: "test", E2EE: false}
 	freshRaw := &attestation.RawAttestation{SigningKey: ""} // no signing key
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true /* e2eeActive */, prov, freshRaw, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true /* e2eeActive */, prov, freshRaw, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(freshRaw, missing signing key): err=%v", err)
 	if err == nil {
 		t.Error("expected error for missing signing key")
@@ -1250,7 +1261,7 @@ func TestRelayResponse_ChutesStream(t *testing.T) {
 	meta := &e2ee.ChutesE2EE{Session: session}
 	// SSE body ending with [DONE] — RelayStreamChutes parses it and returns cleanly.
 	body := strings.NewReader("data: [DONE]\n\n")
-	ss, relayErr := relayResponse(ctx, rec, body, nil, meta, true /* stream */)
+	ss, relayErr := relayResponse(ctx, rec, body, nil, meta, true /* stream */, e2ee.EndpointChat)
 	t.Logf("relayResponse(chutes stream): ss=%v err=%v status=%d", ss, relayErr, rec.Code)
 	// [DONE]-only stream succeeds with zero stats.
 	if relayErr != nil {
@@ -1268,7 +1279,7 @@ func TestRelayResponse_ChutesNonStream(t *testing.T) {
 	meta := &e2ee.ChutesE2EE{Session: session}
 	// Non-encrypted body causes DecryptResponseBlobChutes to fail.
 	body := strings.NewReader(`{"choices":[]}`)
-	ss, relayErr := relayResponse(ctx, rec, body, nil, meta, false /* non-stream */)
+	ss, relayErr := relayResponse(ctx, rec, body, nil, meta, false /* non-stream */, e2ee.EndpointChat)
 	t.Logf("relayResponse(chutes non-stream): ss=%v err=%v", ss, relayErr)
 	// Decryption failure is expected with an uninitialized session.
 	if relayErr == nil {
@@ -1288,7 +1299,7 @@ func (m *mockReportDataVerifier) VerifyReportData(_ [64]byte, _ *attestation.Raw
 
 type mockRequestEncryptor struct{ err error }
 
-func (m *mockRequestEncryptor) EncryptRequest(_ []byte, _ *attestation.RawAttestation, _ string) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
+func (m *mockRequestEncryptor) EncryptRequest(_ []byte, _ *attestation.RawAttestation, _ e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
 	return []byte("encrypted"), nil, nil, m.err
 }
 
@@ -1415,7 +1426,7 @@ func TestBuildUpstreamBody_FreshRaw_WithKey_EncryptorError(t *testing.T) {
 	mockEnc := &mockRequestEncryptor{err: errors.New("mock encrypt error")}
 	prov := &provider.Provider{Name: "test", E2EE: false, Encryptor: mockEnc}
 	freshRaw := &attestation.RawAttestation{SigningKey: "some-signing-key"}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, freshRaw, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, freshRaw, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(fresh key, encryptor error): err=%v", err)
 	if err == nil {
 		t.Error("expected error from mock encryptor")
@@ -1433,7 +1444,7 @@ func TestBuildUpstreamBody_FreshRaw_WithKey_Success(t *testing.T) {
 	mockEnc := &mockRequestEncryptor{} // err == nil → success
 	prov := &provider.Provider{Name: "test", E2EE: false, Encryptor: mockEnc}
 	freshRaw := &attestation.RawAttestation{SigningKey: "some-signing-key"}
-	body, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, freshRaw, "/chat")
+	body, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, freshRaw, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(fresh key, success): body=%v err=%v", body, err)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1457,7 +1468,7 @@ func TestBuildUpstreamBody_CachedSigningKey(t *testing.T) {
 		SkipSigningKeyCache: false,
 		E2EEMaterialFetcher: nil,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(cached key): err=%v", err)
 	// Encryptor was reached — it returned our sentinel error.
 	if err == nil {
@@ -1484,7 +1495,7 @@ func TestBuildUpstreamBody_E2EEMaterialFetcher_NoCachedKey(t *testing.T) {
 		Attester:            mockAtt,
 		E2EEMaterialFetcher: fetcher,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(no cached key): err=%v", err)
 	// Falls through to fresh attest which returns our mock error.
 	if err == nil {
@@ -1508,7 +1519,7 @@ func TestBuildUpstreamBody_E2EEMaterialFetcher_FetchError(t *testing.T) {
 		Attester:            mockAtt,
 		E2EEMaterialFetcher: fetcher,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(fetch error): err=%v", err)
 	// Falls through to fresh attest.
 	if err == nil {
@@ -1536,7 +1547,7 @@ func TestBuildUpstreamBody_E2EEMaterialFetcher_KeyMismatch(t *testing.T) {
 		Attester:            mockAtt,
 		E2EEMaterialFetcher: fetcher,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(key mismatch): err=%v invalidated=%v", err, fetcher.invalidated)
 	// Pool invalidated, falls through to fresh attest.
 	if len(fetcher.invalidated) == 0 {
@@ -1568,7 +1579,7 @@ func TestBuildUpstreamBody_E2EEMaterialFetcher_KeyMatch(t *testing.T) {
 		Encryptor:           mockEnc,
 		E2EEMaterialFetcher: fetcher,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(key match): err=%v", err)
 	// Encryptor was reached via nonce pool path.
 	if err == nil {
@@ -1591,7 +1602,7 @@ func TestBuildUpstreamBody_FreshAttestation_AttesterError(t *testing.T) {
 		SkipSigningKeyCache: false,
 		E2EEMaterialFetcher: nil,
 	}
-	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, "/chat")
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
 	t.Logf("buildUpstreamBody(fresh attest error): err=%v", err)
 	if err == nil {
 		t.Error("expected error from mock attester")

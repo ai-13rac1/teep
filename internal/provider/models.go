@@ -88,45 +88,29 @@ type modelEntry struct {
 	Architecture  json.RawMessage `json:"architecture"`
 }
 
-// ModelFilter returns the set of model names that should be included in a
-// filtered model listing. Implementations must be safe for concurrent use.
-type ModelFilter interface {
-	Models(ctx context.Context) (map[string]struct{}, error)
+// ownedByModelLister wraps a genericModelLister and keeps only models whose
+// owned_by field matches a configured owner string exactly.
+type ownedByModelLister struct {
+	inner   *genericModelLister
+	ownedBy string
 }
 
-// filteredModelLister wraps a genericModelLister and filters its results
-// against a ModelFilter. Only models whose "id" appears in the filter set
-// are returned. All upstream metadata (pricing, context_length, etc.) is
-// preserved for included models.
-type filteredModelLister struct {
-	inner  *genericModelLister
-	filter ModelFilter
-}
-
-// NewFilteredModelLister returns a ModelLister that fetches the full model
-// catalog from baseURL/v1/models (with apiKey auth) and then filters to
-// only include models present in the filter set.
-func NewFilteredModelLister(baseURL, apiKey string, client *http.Client, filter ModelFilter) ModelLister {
-	return &filteredModelLister{
+// NewOwnedByModelLister returns a ModelLister that fetches baseURL/v1/models
+// and returns only entries whose owned_by field matches ownedBy exactly.
+func NewOwnedByModelLister(baseURL, apiKey string, client *http.Client, ownedBy string) ModelLister {
+	return &ownedByModelLister{
 		inner: &genericModelLister{
 			baseURL: baseURL,
 			apiKey:  apiKey,
 			client:  client,
 		},
-		filter: filter,
+		ownedBy: ownedBy,
 	}
 }
 
-// ListModels fetches the filter set, then the full catalog, and returns
-// only the intersection. The filter is fetched first to avoid a wasted
-// upstream call if the filter fails.
-func (f *filteredModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error) {
-	allowed, filterErr := f.filter.Models(ctx)
-	if filterErr != nil {
-		return nil, fmt.Errorf("models: endpoint filter: %w", filterErr)
-	}
-
-	all, err := f.inner.ListModels(ctx)
+// ListModels fetches the full catalog and filters by owned_by.
+func (l *ownedByModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error) {
+	all, err := l.inner.ListModels(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -135,14 +119,14 @@ func (f *filteredModelLister) ListModels(ctx context.Context) ([]json.RawMessage
 	for _, raw := range all {
 		var m modelEntry
 		if unknown, err := jsonstrict.Unmarshal(raw, &m); err != nil {
-			return nil, fmt.Errorf("models: unmarshal entry to extract id: %w", err)
+			return nil, fmt.Errorf("models: unmarshal entry to extract owned_by: %w", err)
 		} else if len(unknown) > 0 {
-			slog.Warn("unexpected JSON fields", "fields", unknown, "context", "model entry")
+			slog.Debug("unexpected JSON fields", "fields", unknown, "context", "model entry")
 		}
 		if m.ID == "" {
 			return nil, errors.New("models: model entry missing required id")
 		}
-		if _, ok := allowed[m.ID]; ok {
+		if m.OwnedBy == l.ownedBy {
 			out = append(out, raw)
 		}
 	}

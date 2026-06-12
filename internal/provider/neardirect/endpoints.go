@@ -137,49 +137,6 @@ func (r *EndpointResolver) Resolve(ctx context.Context, model string) (string, e
 	return domain, nil
 }
 
-// Models returns the set of model names known to the endpoint discovery cache.
-// If the cache is stale or empty, a refresh is triggered first. Returns nil on
-// error if the cache is also empty.
-func (r *EndpointResolver) Models(ctx context.Context) (map[string]struct{}, error) {
-	r.mu.RLock()
-	stale := time.Since(r.fetchedAt) > endpointsTTL
-	size := len(r.mapping)
-	r.mu.RUnlock()
-
-	if stale || size == 0 {
-		ch := r.sf.DoChan("refresh", func() (any, error) {
-			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
-			defer cancel()
-			return nil, r.refresh(rctx)
-		})
-
-		var err error
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("endpoint discovery: %w", ctx.Err())
-		case res := <-ch:
-			err = res.Err
-			if err != nil {
-				r.mu.RLock()
-				size = len(r.mapping)
-				r.mu.RUnlock()
-				if size == 0 {
-					return nil, fmt.Errorf("endpoint discovery: %w", err)
-				}
-				slog.WarnContext(ctx, "nearai: endpoint discovery refresh failed for Models, using stale mapping", "err", err)
-			}
-		}
-	}
-
-	r.mu.RLock()
-	out := make(map[string]struct{}, len(r.mapping))
-	for m := range r.mapping {
-		out[m] = struct{}{}
-	}
-	r.mu.RUnlock()
-	return out, nil
-}
-
 // refresh fetches the endpoint mapping from the discovery URL and replaces
 // the cached mapping. Holds the write lock only for the swap.
 func (r *EndpointResolver) refresh(ctx context.Context) error {

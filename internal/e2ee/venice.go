@@ -92,6 +92,17 @@ func (s *VeniceSession) Zero() {
 	}
 }
 
+// IsResponseFieldEncrypted reports whether the given response field is encrypted
+// in Venice E2EE responses. Venice only encrypts choices[].delta.content in
+// chat completions (/api/v1/chat/completions); all other fields are plaintext.
+// Per api_support.md: Venice encrypts only messages[].content (request) and
+// choices[].delta.content (response).
+// The endpoint guard future-proofs against additional Venice API endpoints
+// inadvertently inheriting the chat encryption policy.
+func (s *VeniceSession) IsResponseFieldEncrypted(fieldPath string, endpoint EndpointType) bool {
+	return endpoint == EndpointChat && fieldPath == EncFieldContent
+}
+
 // hkdfInfoVenice is the HKDF info string required by the Venice E2EE protocol.
 // Do not change — this value must match the TEE server implementation.
 const hkdfInfoVenice = "ecdsa_encryption"

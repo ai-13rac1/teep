@@ -8,12 +8,70 @@
 // Dependency flow: attestation → e2ee → provider → proxy → cmd
 package e2ee
 
-// Decryptor is implemented by all E2EE session types. It provides the
-// minimum surface that relay functions and the proxy need to decrypt
-// response content and clean up key material.
+// EndpointType identifies the canonical OpenAI-compatible endpoint for field
+// encryption policy routing. These types are independent of provider-specific
+// upstream paths; actual paths are documented at call sites.
+type EndpointType string
+
+const (
+	// EndpointChat is /v1/chat/completions (or /api/v1/chat/completions for Venice).
+	EndpointChat EndpointType = "chat"
+	// EndpointEmbeddings is /v1/embeddings.
+	EndpointEmbeddings EndpointType = "embeddings"
+	// EndpointImages is /v1/images/generations.
+	EndpointImages EndpointType = "images"
+	// EndpointRerank is /v1/rerank.
+	EndpointRerank EndpointType = "rerank"
+	// EndpointScore is /v1/score.
+	EndpointScore EndpointType = "score"
+	// EndpointAudio is /v1/audio/transcriptions (multipart).
+	EndpointAudio EndpointType = "audio"
+)
+
+// EncField* constants identify the dot-notation sub-field paths within inference
+// API JSON structures that are subject to field-level encryption. Each constant
+// value is the exact path string passed to Decryptor.IsResponseFieldEncrypted
+// and used as case labels in session policy switch statements. Named constants
+// prevent silent typo mismatches between relay.go call sites and session policy
+// definitions (nearcloud.go, venice.go).
+const (
+	EncFieldContent              = "content"
+	EncFieldContentText          = "content[].text"
+	EncFieldRefusal              = "refusal"
+	EncFieldName                 = "name"
+	EncFieldReasoning            = "reasoning"
+	EncFieldReasoningContent     = "reasoning_content"
+	EncFieldAudioData            = "audio.data"
+	EncFieldFuncCallName         = "function_call.name"
+	EncFieldFuncCallArgs         = "function_call.arguments"
+	EncFieldToolCallsFuncName    = "tool_calls[].function.name"
+	EncFieldToolCallsFuncArgs    = "tool_calls[].function.arguments"
+	EncFieldLogprobsContentToken = "logprobs.content[].token"
+	EncFieldLogprobsContentBytes = "logprobs.content[].bytes"
+	EncFieldLogprobsRefusalToken = "logprobs.refusal[].token" //nolint:gosec // G101 false positive: enc path constant, not a credential
+	EncFieldLogprobsRefusalBytes = "logprobs.refusal[].bytes"
+	EncFieldB64JSON              = "b64_json"
+	EncFieldRevisedPrompt        = "revised_prompt"
+	EncFieldEmbedding            = "embedding"
+	EncFieldRerankDocumentText   = "results[].document.text"
+	EncFieldScore                = "score"
+)
+
+// Decryptor is implemented by field-level E2EE sessions used by relay
+// decryption (for example, Venice and NearCloud/NearDirect sessions). Chutes
+// uses a dedicated full-body relay path via ChutesE2EE/ChutesSession.
+//
+// It provides the minimum surface that relay functions and the proxy need to
+// decrypt response content and clean up key material.
 type Decryptor interface {
 	IsEncryptedChunk(val string) bool
 	Decrypt(ciphertextHex string) ([]byte, error)
+	// IsResponseFieldEncrypted checks if the given field path requires encryption
+	// at the specified endpoint type (chat, embeddings, images, etc.).
+	// Endpoint types are canonical OpenAI route kinds; actual provider paths
+	// (e.g., /v1/chat/completions vs /api/v1/chat/completions) are documented
+	// at call sites.
+	IsResponseFieldEncrypted(fieldPath string, endpoint EndpointType) bool
 	Zero()
 }
 
