@@ -1040,23 +1040,32 @@ Status rule:
     - `gpu` evidence is REQUIRED. If `gpu` is absent or empty, fail closed
        and set both `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
     - If `gpu` is present, `report_data.gpu_evidence_hash` must be present and
-       equal the recomputed hash.
+       equal the recomputed hash (constant-time compare via
+       `subtle.ConstantTimeCompare`, consistent with the REPORTDATA comparison
+       standard used elsewhere in this plan).
     - Determine `nvswitch_expected` using this deterministic normalization
       algorithm (in order):
       1. Parse `gpu` as JSON object and require `gpu.evidences` array.
       2. Set `gpu_count = len(gpu.evidences)`.
       3. Inspect `gpu.evidences[*].arch` values to detect GPU architectures.
-      4. If `gpu_count == 8` AND at least one GPU arch is `HOPPER`, set
-         `nvswitch_expected = true`. This is the only condition that requires NVSwitch evidence.
-      5. Otherwise (single/dual/quad GPU, Blackwell systems, or unknown arches),
+      4. If `gpu_count == 8` AND any GPU arch value is unrecognized (not
+         `HOPPER` and not `BLACKWELL`), fail closed and set both
+         `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`. Unknown
+         architectures on 8-GPU systems must not silently skip NVSwitch
+         verification.
+      5. If `gpu_count == 8` AND at least one GPU arch is `HOPPER`, set
+         `nvswitch_expected = true`. This is the only condition that requires
+         NVSwitch evidence.
+      6. Otherwise (single/dual/quad GPU, or 8-GPU Blackwell-only systems),
          set `nvswitch_expected = false`.
-      6. If required fields for this derivation are malformed, missing, or
+      7. If required fields for this derivation are malformed, missing, or
          ambiguous (for example `gpu` present but `gpu.evidences` missing),
          fail closed and set both `cpu_gpu_chain` and
          `nvidia_gpu_attestation` to `Fail`.
     - If `nvswitch_expected` is true, `nvswitch` evidence is REQUIRED and
        `report_data.nvswitch_evidence_hash` must be present and equal the
-       recomputed hash; missing/mismatch is a fail-closed error and sets both
+       recomputed hash (constant-time compare); missing/mismatch is a
+       fail-closed error and sets both
        `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
     - If `nvswitch_expected` is false (for example single-GPU systems or
        8-GPU Blackwell MPT systems),
@@ -1466,10 +1475,15 @@ When `nvswitch` is absent, the hash concatenation is `tls_key_fp || hpke_key || 
 In addition to REPORTDATA verification, the envelope must be validated as
 follows:
 
-1. Parse the full envelope with `internal/jsonstrict` and reject unknown
+**Format downgrade prevention priority order** (steps 1–2 are never relaxed,
+even if strict schema validation is loosened for forward compatibility):
+
+1. Require `format` equals exactly `https://tinfoil.sh/predicate/attestation/v3`.
+   This is the authoritative format gate. Reject any other value.
+2. Reject any response with a `body` field (legacy V2 format indicator).
+   This is the independent legacy-format guard.
+3. Parse the full envelope with `internal/jsonstrict` and reject unknown
    fields fail-closed before any trust decisions.
-2. Require `format` equals exactly `https://tinfoil.sh/predicate/attestation/v3`.
-   Reject any response with a `body` field (legacy format indicator).
 3. Parse and validate `report_data.tls_key_fp`, `report_data.hpke_key`,
    `report_data.nonce`, and optional hash fields as hex strings that decode
    to exactly 32 bytes (64 hex chars).
@@ -1497,15 +1511,22 @@ follows:
     - Verify all hex strings in `report_data` are exactly 64 characters when
       present (32 bytes).
 9. Verify `signature` using ECDSA ASN.1 over SHA-256 of the JSON payload
-   produced from the parsed envelope with the `signature` field set to empty
-   string (`""`), using the implementation's deterministic serializer
-   (for Go, `encoding/json` marshaling of the typed struct).
-   - Construct the verification payload by:
-     1. Taking the parsed attestation struct (typed Attestation object, not raw JSON)
-     2. Setting the `Signature` field to empty string
-     3. Marshaling to JSON using `encoding/json` (standard deterministic ordering)
-   - Compute SHA-256 of the resulting JSON bytes
-   - Verify the base64-decoded `signature` field (DER ASN.1 ECDSA signature) against this hash
+   with the `signature` value replaced by an empty string.
+   - **Preferred approach**: byte-level surgery on the raw JSON response.
+     Find the `"signature":"<base64>"` value in the raw bytes and replace
+     the value with `""`, preserving all other bytes exactly. This avoids
+     implementation-dependent JSON serialization differences between Go's
+     `encoding/json` and the Tinfoil enclave's serializer (which may be a
+     different language). Differences in field ordering, whitespace, unicode
+     escaping, or number formatting between serializers would cause spurious
+     signature verification failures.
+   - **Alternative**: If Tinfoil documents an explicit serialization contract
+     (e.g., RFC 8785 JCS or Go `encoding/json` struct-order guarantee), the
+     parse-modify-reserialize approach is acceptable. Without such a contract,
+     raw-byte surgery is the only safe approach.
+   - Compute SHA-256 of the resulting JSON bytes (with signature zeroed).
+   - Verify the base64-decoded `signature` field (DER ASN.1 ECDSA signature)
+     against this hash using the leaf public key from `certificate`.
    - Reject non-ECDSA leaf public keys.
    - Decode `signature` from base64 and verify DER ASN.1 form.
 10. If envelope signature verification fails, fail closed before any CPU/GPU
@@ -1580,21 +1601,32 @@ verified through Sigstore.
 For a given configuration repo (e.g. `tinfoilsh/confidential-model-router`):
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/releases/latest
+GET https://api.github.com/repos/{repo}/releases/latest
 ```
 
 Parse `tag_name` from the response. Then fetch the digest:
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/releases/download/{tag}/tinfoil.hash
+GET https://github.com/{repo}/releases/download/{tag}/tinfoil.hash
 ```
 
 Returns a plain-text SHA-256 hex digest.
 
+**Trust note on `github-proxy.tinfoil.sh`**: The original Tinfoil client SDKs
+use `github-proxy.tinfoil.sh` as a GitHub API proxy. This is a
+Tinfoil-operated service that concentrates supply chain trust — a compromised
+or DNS-hijacked proxy can serve stale Sigstore bundles for old vulnerable CVM
+images, and the Sigstore verification will still pass (Sigstore proves "this
+code was built by this workflow" but not "this is the latest code"). Teep
+should prefer `api.github.com` directly as the primary source. If GitHub rate
+limits are a concern, `github-proxy.tinfoil.sh` can be used as a fallback, but
+this must be documented as a trust tradeoff. Consider pinning a minimum
+acceptable release timestamp to prevent rollback to old vulnerable images.
+
 #### Step 2: Fetch Sigstore DSSE Bundle
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/attestations/sha256:{digest}
+GET https://api.github.com/repos/{repo}/attestations/sha256:{digest}
 ```
 
 Returns JSON with `attestations[0].bundle` containing a Sigstore DSSE
@@ -1760,8 +1792,11 @@ non-empty-body `/v1/audio/*` request.
    - AAD is empty. The HPKE sealer's internal nonce counter auto-increments.
    - Zero-length chunks may appear and should be skipped by receivers.
    - End of message is indicated by HTTP stream termination (no sentinel).
-   - Enforce bounded chunk size in the decryptor (implementation limit) before
-     allocating buffers; oversized chunk lengths are protocol errors.
+   - **Maximum chunk size: 16 MiB** (16 * 1024 * 1024 bytes). Reject chunk
+     length prefixes above this bound before allocating buffers. The 4-byte
+     uint32 length allows up to ~4 GiB; without a bound, a malicious server
+     can trigger 4 GiB allocation before AEAD verification. 16 MiB is
+     sufficient for any inference response chunk.
 4. Set request header `Ehbp-Encapsulated-Key` to the lowercase hex encoding
    of the HPKE encapsulated key (32 bytes → 64 hex chars for X25519).
 5. Send encrypted bodies with unknown length (`Content-Length` unset/unknown).
@@ -1789,9 +1824,14 @@ non-empty-body `/v1/audio/*` request.
 3. Decrypt response body chunks:
    - Same framing as request: `[4-byte length] [ciphertext]`.
    - Each chunk decrypted with AES-256-GCM using `aead_key`.
-   - Nonce for chunk `i` (zero-indexed): `aead_nonce XOR i`.
+   - Nonce for chunk `i` (zero-indexed): `aead_nonce XOR i`, where `i` is a
+     uint64 counter XORed into the low 8 bytes of the 12-byte `aead_nonce`.
+   - **Maximum chunk count: 2^31.** AES-GCM has a hard 2^32 invocation limit
+     with the same key before nonce reuse enables the "forbidden attack"
+     (AEAD forgery + plaintext recovery). Fail closed if the chunk counter
+     exceeds 2^31 (conservative bound with safety margin).
    - AAD is empty.
-   - Reject chunk lengths above implementation bounds before allocation.
+   - Reject chunk lengths above 16 MiB before allocation.
 4. On any decryption failure: fail closed, abort the response.
 
 Response mode detection:
@@ -2782,7 +2822,17 @@ New Go module dependencies:
    downgrade: the attester always requests nonce-based attestation and rejects
    any response without a `report_data` structured field.
 
-10. **Independent V3 verification coverage**: Public client libraries may have
+10. **WebSocket `/v1/realtime` reduced defense-in-depth**: Unlike all other
+   inference endpoints, WebSocket connections have no EHBP body-layer
+   encryption. Under TEE.fail (where TLS private keys can be fabricated),
+   WebSocket traffic is fully exposed with zero defense-in-depth. The plan
+   correctly emits `e2ee_usable: Skip` for this path, but users should
+   understand that `/v1/realtime` relies solely on attested TLS (SPKI
+   pinning) for confidentiality — there is no second encryption layer.
+
+   Applies to: both providers equally.
+
+11. **Independent V3 verification coverage**: Public client libraries may have
    incomplete V3 verification coverage. Teep must maintain independent V3
    verification (envelope signature, REPORTDATA hash, GPU evidence hash
    binding, and nonce checks) and fixture-based regression tests.
