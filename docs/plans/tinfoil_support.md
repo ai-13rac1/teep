@@ -1867,7 +1867,10 @@ interface, REPORTDATA verifier, and TDX policy checks — all of which can be
 unit-tested with TDX fixtures. The deployed Tinfoil router currently runs
 on SEV-SNP, so the provider cannot be validated against the live deployment
 until Phase 3 (SEV-SNP verification) lands. Phase 1 is not independently
-deployable against the live Tinfoil infrastructure.
+deployable against the live Tinfoil infrastructure. **Recommendation**: stub
+the SEV-SNP path in Phase 1 with an `fmt.Errorf("sev-snp: not yet
+implemented")` return so the `cpu.platform` dispatch and interfaces are correct
+from the start, avoiding structural rework when Phase 3 lands.
 
 **Files to create**:
 - `internal/provider/tinfoil/tinfoil.go` — Shared types, constants, Preparer
@@ -1875,10 +1878,21 @@ deployable against the live Tinfoil infrastructure.
   (V3 structured JSON, CPU report dispatch, TDX/SEV-SNP helpers)
 - `internal/provider/tinfoil/attester.go` — `NewAttester`: V3 fetch (with
   nonce), structured JSON parsing, HPKE key from response field
-- `internal/provider/tinfoil/reportdata.go` — `ReportDataVerifier`:
-  SHA-256 hash recomputation, GPU evidence hash verification
-- `internal/provider/tinfoil/policy.go` — TDX additional policy checks +
-  MR_SEAM whitelist
+- `internal/provider/tinfoil/verify.go` — `ReportDataVerifier` (SHA-256
+  hash recomputation, GPU evidence hash verification) and TDX additional
+  policy checks + MR_SEAM whitelist. These are combined into a single file
+  because both are applied together in the same attestation verification pass.
+
+**Note on nonce handling**: The attester should use the existing
+`attestation.NewNonce()` and `nonce.Hex()` from `internal/attestation/attestation.go`
+rather than raw byte manipulation. The `Nonce` type already encapsulates
+32-byte generation, hex encoding, and parsing.
+
+**Note on resolver reuse**: The `tinfoil_v3_direct` model-to-domain resolver
+(Phase 5) duplicates ~280 lines of concurrent cache logic from
+`neardirect/endpoints.go` (singleflight, TTL, mutex, stale-cache fallback).
+Consider extracting a shared resolver type in `internal/provider/` to avoid
+maintaining two copies of non-trivial concurrent code.
 
 **Implementation**:
 
@@ -2159,16 +2173,29 @@ encryption and response decryption.
 4. **Tinfoil RequestEncryptor** (`tinfoil/e2ee.go`):
    - Implements `provider.RequestEncryptor`.
    - `EncryptRequest(body, raw, endpointPath)`:
-     - Extract HPKE public key from raw attestation (`raw.SigningKey`,
-       already extracted by the V2 or V3 attester).
+     - Extract HPKE public key from raw attestation. **Note**: storing the
+       X25519 HPKE key in `raw.SigningKey` will be misidentified by
+       `E2EEKeyType()` as Ed25519 (both are 64 hex chars). The implementation
+       must either add `raw.SigningAlgo = "x25519-hpke"` to `knownSigningAlgos`
+       in `attestation.go`, or use a dedicated HPKE key field on
+       `RawAttestation` rather than co-opting `SigningKey`.
      - Call `ehbp.EncryptRequest(body, pubKey)`.
-     - Return encrypted body bytes and a Decryptor for the response.
-   - Return a `Decryptor` that reads `Ehbp-Response-Nonce` from the response
-     headers and calls `ehbp.DecryptResponse`.
+     - Return encrypted body bytes and an EHBP response handler.
+   - **EHBP does not implement the existing `Decryptor` interface** from
+     `e2ee/session.go`. That interface is field-level (hex string in, plaintext
+     bytes out) and designed for Venice/NearCloud per-field encryption. EHBP is
+     a full-body `io.Reader` transformer driven by response headers. EHBP
+     follows the `ChutesE2EE`/`ChutesSession` pattern — a separate
+     transport-level type with its own proxy integration path. The EHBP type
+     should carry the HPKE sender context and encapsulated key, and provide a
+     `DecryptResponse(resp *http.Response) (io.ReadCloser, error)` method that
+     reads `Ehbp-Response-Nonce` from response headers and performs decryption.
 
 5. **Proxy Integration**:
-   - The existing proxy E2EE flow calls `Encryptor.EncryptRequest()` and then
-     uses the returned Decryptor. The EHBP encryptor follows this same pattern.
+   - The proxy integration follows the `ChutesE2EE` pattern rather than the
+     `Decryptor`-based field-level relay path. EHBP encryption/decryption is
+     transport-level: the entire request body is encrypted before sending, and
+     the entire response body is decrypted before the proxy parses SSE/JSON.
    - Set `Ehbp-Encapsulated-Key` header on the outgoing request.
    - Ensure encrypted requests have unknown content length (chunked transfer);
       never send encrypted body with fixed `Content-Length`.
@@ -2607,6 +2634,15 @@ The `tee_*` factors are proposed renames of the existing `tdx_*` factors,
 generalized to cover both Intel TDX and AMD SEV-SNP. **This rename must be
 performed atomically within a single commit** to avoid silent breakage.
 
+**Critical precondition**: `ReportDataBindingPassed()` in
+`internal/attestation/report.go` hardcodes `"tdx_reportdata_binding"`. The
+proxy gates **all** E2EE activation on this function — at least four call
+sites in `proxy.go` and two in `nearcloud/pinned.go` and
+`neardirect/pinned.go`. If Tinfoil emits `tee_reportdata_binding` but this
+function is not updated, it silently returns `false` and the proxy refuses
+E2EE for all Tinfoil requests. This function **must** be updated as part of
+(or before) the rename commit.
+
 The following references must all be updated together:
 
 1. **`KnownFactors` list** in `internal/attestation/report.go` — rename all
@@ -2614,29 +2650,37 @@ The following references must all be updated together:
 2. **`ReportDataBindingPassed()`** in `internal/attestation/report.go` —
    currently hardcodes the string `"tdx_reportdata_binding"`. Must be
    updated to `"tee_reportdata_binding"` (or the new equivalent name).
-3. **All factor emission sites** across provider packages (`nearcloud`,
+3. **`DefaultAllowFail`** in `internal/attestation/report.go` — contains
+   `tdx_*` strings and is distinct from the per-provider lists in
+   `defaults.go`.
+4. **All factor emission sites** across provider packages (`nearcloud`,
    `neardirect`, `chutes`, `venice`, etc.) that emit `tdx_*` factor names.
-4. **`proxy.go`** — lines that gate E2EE on `ReportDataBindingPassed()`
+5. **`proxy.go`** — lines that gate E2EE on `ReportDataBindingPassed()`
    are safe if the function is updated, but verify no other string
    literals reference old names.
-5. **`internal/verify/factory.go`** — the `newReportDataVerifier`,
+6. **`internal/verify/factory.go`** — the `newReportDataVerifier`,
    `newAttester`, `supplyChainPolicy`, `e2eeEnabledByDefault`, and
    `chatPathForProvider` switch blocks reference provider names. Factor name
    strings emitted by these functions must also be updated.
-6. **`validateAllowFail()`** in `internal/config/config.go` — validates
+7. **`validateAllowFail()`** in `internal/config/config.go` — validates
    against `KnownFactors`. After the rename, existing user `teep.toml`
    files with `allow_fail = ["tdx_hardware_config"]` will fail validation
    at startup because the factor name is no longer recognized. **This is
-   correct fail-closed behavior** — unrecognized config entries must produce
+   a breaking user-facing change.** Unrecognized config entries must produce
    an error (per AGENTS.md: "Unknown or misspelled config values MUST be
    rejected at startup"). Users must update their config to use the new
    `tee_*` names.
-7. **Default allow-fail lists** in `internal/defaults/defaults.go` — update
+8. **Default allow-fail lists** in `internal/defaults/defaults.go` — update
    all `tdx_*` entries in per-provider defaults.
-8. **Documentation** — update `docs/measurement_allowlists.md`,
+9. **`cmd/teep/help.go`** — contains `"tdx_reportdata_binding"` in
+   human-readable factor descriptions (user-visible output).
+10. **`README.md` and `README_ADVANCED.md`** — extensive references to
+   `tdx_*` factor names with descriptions in factor tables.
+11. **Documentation** — update `docs/measurement_allowlists.md`,
    `docs/api_support.md`, and any other docs referencing `tdx_*` factors.
-9. **Test assertions** — update all test files that assert on `tdx_*` factor
-   name strings.
+12. **Test assertions** — update all test files that assert on `tdx_*` factor
+   name strings. There are at least 9 integration test files with string
+   literal references to `tdx_*` factor names.
 
 This rename should be applied across all providers (not just Tinfoil) as a
 prerequisite or co-requisite commit. Until the rename lands, Tinfoil can
