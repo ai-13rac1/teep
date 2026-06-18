@@ -6,8 +6,8 @@
 //	GET {base_url}/.well-known/tinfoil-attestation?nonce={hex}
 //
 // The response is a V3 attestation document containing CPU quotes (TDX or
-// SEV-SNP), GPU evidence, optional NVSwitch evidence, a TLS certificate,
-// and an ECDSA envelope signature.
+// SEV-SNP), GPU evidence (required), topology-conditional NVSwitch evidence,
+// a TLS certificate, and an ECDSA envelope signature.
 package tinfoil
 
 import (

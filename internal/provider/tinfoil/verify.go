@@ -39,7 +39,9 @@ func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation
 			attestation.NoncePrefix(raw.Nonce))
 	}
 
-	// GPU and NVSwitch verification — only applicable when GPU evidence is present.
+	// GPU evidence is required per spec. When absent, REPORTDATA verification
+	// still succeeds (the hash matches what the server computed) but gpu_bound
+	// will be false, causing gpu-related factors to fail closed in BuildReport.
 	hasGPU := raw.TinfoilGPUEvidenceHash != "" && len(raw.GPURawJSON) > 0
 	nvswitchExpected := false
 	if hasGPU {
@@ -73,17 +75,19 @@ func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation
 	detail := "v3: reportdata_hash verified, nonce_bound=true"
 	if hasGPU {
 		detail += ", gpu_bound=true"
-	}
-	if nvswitchExpected {
-		detail += ", nvswitch_bound=true"
+		if nvswitchExpected {
+			detail += ", nvswitch_bound=true"
+		}
+	} else {
+		detail += ", gpu_bound=false"
 	}
 	return detail, nil
 }
 
 // buildReportDataPreimage constructs the hash preimage for REPORTDATA[0:32].
 // The preimage is: tls_key_fp || hpke_key || nonce [|| gpu_hash [|| nvswitch_hash]]
-// GPU and NVSwitch hashes are omitted when the enclave has no GPU evidence
-// (e.g., the router enclave is CPU-only).
+// GPU and NVSwitch hashes are included when present in the attestation response.
+// The preimage must match what the server computed to verify REPORTDATA binding.
 func buildReportDataPreimage(raw *attestation.RawAttestation) ([]byte, error) {
 	tlsKeyFP, err := hex.DecodeString(raw.TinfoilTLSKeyFP)
 	if err != nil {

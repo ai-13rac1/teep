@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/jsonstrict"
@@ -100,8 +101,16 @@ func parseV3Response(body []byte) (*attestation.RawAttestation, *v3Response, err
 	if err := validateHexField("nonce", resp.ReportData.Nonce); err != nil {
 		return nil, nil, err
 	}
-	// gpu_evidence_hash and nvswitch_evidence_hash are optional — the
-	// router enclave is CPU-only and does not include GPU evidence.
+	// GPU evidence is required per spec. When absent, we still parse the
+	// response so that BuildReport can produce factor-level failures, but
+	// we emit a loud warning. Missing GPU evidence means cpu_gpu_chain and
+	// all nvidia factors will fail closed.
+	if resp.ReportData.GPUEvidenceHash == "" || len(resp.GPU) == 0 {
+		slog.Warn("tinfoil V3 response missing required GPU evidence",
+			"has_gpu_field", len(resp.GPU) > 0,
+			"has_gpu_evidence_hash", resp.ReportData.GPUEvidenceHash != "",
+		)
+	}
 	if resp.ReportData.GPUEvidenceHash != "" {
 		if err := validateHexField("gpu_evidence_hash", resp.ReportData.GPUEvidenceHash); err != nil {
 			return nil, nil, err
