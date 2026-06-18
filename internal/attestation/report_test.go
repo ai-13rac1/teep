@@ -120,14 +120,14 @@ func allExcept(exclude ...string) []string {
 // BuildReport-level tests (cross-cutting concerns)
 // ---------------------------------------------------------------------------
 
-// TestBuildReportFactorCount ensures exactly 29 factors are produced.
+// TestBuildReportFactorCount ensures exactly 30 factors are produced.
 func TestBuildReportFactorCount(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	if len(report.Factors) != 29 {
-		t.Errorf("factor count: got %d, want 29", len(report.Factors))
+	if len(report.Factors) != 30 {
+		t.Errorf("factor count: got %d, want 30", len(report.Factors))
 	}
 }
 
@@ -2442,14 +2442,14 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 		GatewayNonce:    gatewayNonce,
 	})
 
-	// Base 29 + 13 gateway factors = 42
+	// Base 30 + 13 gateway factors = 43
 	// Gateway factors: gateway_nonce_match, gateway_tee_quote_present,
 	// gateway_tee_quote_structure, gateway_tee_cert_chain, gateway_tee_quote_signature,
 	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
 	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 42 {
-		t.Errorf("factor count with gateway: got %d, want 42", len(report.Factors))
+	if len(report.Factors) != 43 {
+		t.Errorf("factor count with gateway: got %d, want 43", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}

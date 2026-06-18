@@ -280,10 +280,10 @@ var ChutesDefaultAllowFail = []string{
 // TinfoilDefaultAllowFail is the tinfoil-specific default allow_fail list.
 // Tinfoil runs its own TEE stack (TDX or SEV-SNP) with Sigstore supply chain
 // verification instead of compose-based binding. Core TDX/SEV-SNP quote
-// integrity and REPORTDATA binding are enforced. cpu_id_registry is
-// allowed to fail because Tinfoil does not participate in Proof of Cloud.
-// tee_boot_config and intel_pcs_collateral are allowed because SEV-SNP has
-// no RTMR equivalent and uses AMD KDS instead of Intel PCS.
+// integrity, REPORTDATA binding, and Sigstore code verification are enforced.
+// cpu_id_registry is allowed to fail because Tinfoil does not participate in
+// Proof of Cloud. intel_pcs_collateral is allowed because SEV-SNP uses AMD
+// KDS instead of Intel PCS.
 var TinfoilDefaultAllowFail = []string{
 	"cpu_id_registry",
 	"tee_boot_config",
@@ -301,7 +301,7 @@ var KnownFactors = []string{
 	"tee_tcb_not_revoked", "nvidia_payload_present", "nvidia_signature", "nvidia_claims",
 	"nvidia_nonce_client_bound", "nvidia_nras_verified", FactorE2EECapable, FactorE2EEUsable, "tls_key_binding", "cpu_gpu_chain",
 	"measured_model_weights", "build_transparency_log", "cpu_id_registry",
-	"compose_binding", "sigstore_verification", "event_log_integrity",
+	"compose_binding", "sigstore_verification", "sigstore_code_verified", "event_log_integrity",
 	// Gateway factors (nearcloud only).
 	"gateway_nonce_match", "gateway_tee_quote_present", "gateway_tee_quote_structure",
 	"gateway_tee_cert_chain", "gateway_tee_quote_signature", "gateway_tee_debug_disabled",
@@ -332,6 +332,7 @@ var OnlineFactors = []string{
 	"build_transparency_log",
 	"cpu_id_registry",
 	"sigstore_verification",
+	"sigstore_code_verified",
 	"gateway_cpu_id_registry",
 }
 
@@ -415,6 +416,36 @@ func (r *RawAttestation) E2EEKeyType() string {
 	return "ecdsa"
 }
 
+// TinfoilSupplyChainResult holds the results of Tinfoil-specific Sigstore
+// supply chain verification and code/hardware measurement comparison.
+// Nil for non-Tinfoil providers.
+type TinfoilSupplyChainResult struct {
+	// SigstoreVerified is true when the Sigstore DSSE bundle was fetched
+	// and cryptographically verified for the provider's repo.
+	SigstoreVerified bool
+	SigstoreDetail   string
+	SigstoreErr      error
+
+	// CodeMatch is true when code measurements from the Sigstore predicate
+	// match the live enclave measurements.
+	CodeMatch       bool
+	CodeMatchDetail string
+	CodeMatchErr    error
+
+	// HWMatch is the matched hardware measurement entry ID (TDX only).
+	// Empty when not applicable (SEV-SNP) or when no match found.
+	HWMatch    string
+	HWMatchErr error
+
+	// GPUHashBound is true when GPU evidence hash was verified in REPORTDATA.
+	GPUHashBound bool
+
+	// TDXPolicyErr is the combined error from Tinfoil-specific TDX policy checks.
+	// Nil when platform is SEV-SNP or all checks pass.
+	TDXPolicyErr    error
+	TDXPolicyDetail string
+}
+
 // ComposeBindingResult holds the outcome of verifying the app_compose → MRConfigID binding.
 type ComposeBindingResult struct {
 	// Checked is true when AppCompose was present and verification was attempted.
@@ -455,6 +486,10 @@ type ReportInput struct {
 	GatewayCompose  *ComposeBindingResult
 	GatewayEventLog []EventLogEntry
 	GatewayPolicy   MeasurementPolicy // separate measurement allowlists for gateway CVM (GW-M-04)
+
+	// TinfoilSC holds Tinfoil-specific Sigstore supply chain results.
+	// Nil for non-Tinfoil providers.
+	TinfoilSC *TinfoilSupplyChainResult
 
 	// E2EETest is the result of a live E2EE test inference. Nil when
 	// the provider is not E2EE-capable or the test was not attempted.
@@ -576,6 +611,7 @@ func buildEvaluators(includeGateway bool) []evaluatorFunc {
 		evalCPUIDRegistry,
 		evalComposeBinding,
 		evalSigstoreVerification,
+		evalSigstoreCodeVerified,
 		evalEventLogIntegrity,
 	}
 	if includeGateway {
@@ -736,6 +772,18 @@ func tdxQuoteStructure(in *ReportInput) FactorResult {
 }
 
 func evalTEEMeasurement(in *ReportInput) []FactorResult {
+	// Tinfoil supply chain: code measurements verified via Sigstore predicate.
+	if in.TinfoilSC != nil {
+		if in.TinfoilSC.CodeMatch {
+			return factor(TierCore, "tee_measurement", Pass, in.TinfoilSC.CodeMatchDetail)
+		}
+		if in.TinfoilSC.CodeMatchErr != nil {
+			return factor(TierCore, "tee_measurement", Fail,
+				fmt.Sprintf("Sigstore code measurement mismatch: %v", in.TinfoilSC.CodeMatchErr))
+		}
+		// Sigstore verification was attempted but code match not set — fall through to policy.
+	}
+
 	switch {
 	case in.TDX != nil && in.TDX.ParseErr == nil:
 		return evalTDXMeasurement(in)
@@ -788,6 +836,15 @@ func evalSEVMeasurement(in *ReportInput) []FactorResult {
 }
 
 func evalTEEHardwareConfig(in *ReportInput) []FactorResult {
+	// Tinfoil TDX policy checks (TD_ATTRIBUTES, XFAM, RTMR3, TEE_TCB_SVN, MR registers).
+	if in.TinfoilSC != nil && in.TinfoilSC.TDXPolicyDetail != "" {
+		if in.TinfoilSC.TDXPolicyErr != nil {
+			return factor(TierCore, "tee_hardware_config", Fail,
+				fmt.Sprintf("Tinfoil TDX policy: %v", in.TinfoilSC.TDXPolicyErr))
+		}
+		return factor(TierCore, "tee_hardware_config", Pass, in.TinfoilSC.TDXPolicyDetail)
+	}
+
 	switch {
 	case in.TDX != nil && in.TDX.ParseErr == nil:
 		return evalTDXHardwareConfig(in)
@@ -820,6 +877,18 @@ func evalSEVHardwareConfig(in *ReportInput) []FactorResult {
 }
 
 func evalTEEBootConfig(in *ReportInput) []FactorResult {
+	// Tinfoil TDX: hardware measurement match (MRTD + RTMR0).
+	if in.TinfoilSC != nil && in.TDX != nil && in.TDX.ParseErr == nil {
+		if in.TinfoilSC.HWMatch != "" {
+			return factor(TierCore, "tee_boot_config", Pass,
+				fmt.Sprintf("hardware measurements matched entry %q", in.TinfoilSC.HWMatch))
+		}
+		if in.TinfoilSC.HWMatchErr != nil {
+			return factor(TierCore, "tee_boot_config", Fail,
+				fmt.Sprintf("hardware measurement match: %v", in.TinfoilSC.HWMatchErr))
+		}
+	}
+
 	switch {
 	case in.TDX != nil && in.TDX.ParseErr == nil:
 		return evalTDXBootConfig(in)
@@ -1252,10 +1321,21 @@ func evalTLSKeyBinding(in *ReportInput) []FactorResult {
 			"no TLS certificate binding in attestation")
 	}
 }
-func evalCPUGPUChain(_ *ReportInput) []FactorResult {
+func evalCPUGPUChain(in *ReportInput) []FactorResult {
+	if in.TinfoilSC != nil && in.TinfoilSC.GPUHashBound {
+		return factor(TierSupplyChain, "cpu_gpu_chain", Pass,
+			"GPU evidence hash verified in REPORTDATA")
+	}
 	return factor(TierSupplyChain, "cpu_gpu_chain", Fail, "CPU-GPU attestation not bound")
 }
-func evalMeasuredModelWeights(_ *ReportInput) []FactorResult {
+func evalMeasuredModelWeights(in *ReportInput) []FactorResult {
+	// Tinfoil: dm-verity root hash is part of the Sigstore-verified code
+	// measurement. If Sigstore + code measurements pass, model weights are
+	// transitively authenticated via the dm-verity chain.
+	if in.TinfoilSC != nil && in.TinfoilSC.SigstoreVerified && in.TinfoilSC.CodeMatch {
+		return factor(TierSupplyChain, "measured_model_weights", Pass,
+			"model weights transitively authenticated via Sigstore + dm-verity code measurements")
+	}
 	return factor(TierSupplyChain, "measured_model_weights", Fail, "no model weight hashes")
 }
 func evalBuildTransparencyLog(in *ReportInput) []FactorResult {
@@ -1609,6 +1689,34 @@ func evalSigstoreVerification(in *ReportInput) []FactorResult {
 	return factor(TierSupplyChain, "sigstore_verification", Pass,
 		fmt.Sprintf("%d image digest(s) found in Sigstore transparency log", len(in.Sigstore)))
 }
+func evalSigstoreCodeVerified(in *ReportInput) []FactorResult {
+	if in.TinfoilSC == nil {
+		return factor(TierSupplyChain, "sigstore_code_verified", Skip,
+			"not a Tinfoil provider; Sigstore code verification not applicable")
+	}
+	if in.TinfoilSC.SigstoreErr != nil {
+		return factor(TierSupplyChain, "sigstore_code_verified", Fail,
+			fmt.Sprintf("Sigstore verification failed: %v", in.TinfoilSC.SigstoreErr))
+	}
+	if !in.TinfoilSC.SigstoreVerified {
+		return factor(TierSupplyChain, "sigstore_code_verified", Fail,
+			"Sigstore DSSE bundle not verified")
+	}
+	if in.TinfoilSC.CodeMatchErr != nil {
+		return factor(TierSupplyChain, "sigstore_code_verified", Fail,
+			fmt.Sprintf("code measurement mismatch: %v", in.TinfoilSC.CodeMatchErr))
+	}
+	if !in.TinfoilSC.CodeMatch {
+		return factor(TierSupplyChain, "sigstore_code_verified", Fail,
+			"Sigstore verified but code measurements not compared")
+	}
+	detail := "Sigstore DSSE bundle verified, code measurements match"
+	if in.TinfoilSC.SigstoreDetail != "" {
+		detail = in.TinfoilSC.SigstoreDetail
+	}
+	return factor(TierSupplyChain, "sigstore_code_verified", Pass, detail)
+}
+
 func evalEventLogIntegrity(in *ReportInput) []FactorResult {
 	if len(in.Raw.EventLog) == 0 {
 		if in.Raw.BackendFormat == FormatChutes {

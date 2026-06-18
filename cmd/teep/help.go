@@ -338,6 +338,17 @@ var factorRegistry = []factorInfo{
 			"signed provenance. Skipped when no image digests are found.",
 	},
 	{
+		Name:    "sigstore_code_verified",
+		Tier:    3,
+		Summary: "Sigstore code measurements verified",
+		Description: "Tinfoil-specific: fetches the Sigstore DSSE bundle from the " +
+			"provider's GitHub repo, cryptographically verifies it against the " +
+			"Sigstore trusted root, then compares the code measurements in the " +
+			"predicate against the live enclave's TDX RTMRs or SEV-SNP launch " +
+			"measurement. Passes when both the Sigstore bundle is valid and " +
+			"code measurements match. Skipped for non-Tinfoil providers.",
+	},
+	{
 		Name:    "event_log_integrity",
 		Tier:    3,
 		Summary: "Event log replays to match quote RTMRs",

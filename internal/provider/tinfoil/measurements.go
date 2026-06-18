@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/13rac1/teep/internal/attestation"
 )
 
 // Predicate type URIs for Tinfoil Sigstore attestations.
@@ -142,6 +144,26 @@ func MatchHardwareMeasurements(entries []HardwareMeasurementEntry, enclave *Encl
 	}
 	return "", fmt.Errorf("no hardware measurement entry matches enclave MRTD=%s RTMR0=%s",
 		enclave.MRTD, enclave.RTMR0)
+}
+
+// EnclaveMeasurementsFromTDX extracts EnclaveMeasurements from a TDX verification result.
+func EnclaveMeasurementsFromTDX(tdx *attestation.TDXVerifyResult) *EnclaveMeasurements {
+	return &EnclaveMeasurements{
+		MRTD:     hex.EncodeToString(tdx.MRTD),
+		RTMR0:    hex.EncodeToString(tdx.RTMRs[0][:]),
+		RTMR1:    hex.EncodeToString(tdx.RTMRs[1][:]),
+		RTMR2:    hex.EncodeToString(tdx.RTMRs[2][:]),
+		RTMR3:    hex.EncodeToString(tdx.RTMRs[3][:]),
+		Platform: "tdx",
+	}
+}
+
+// EnclaveMeasurementsFromSEV extracts EnclaveMeasurements from a SEV-SNP verification result.
+func EnclaveMeasurementsFromSEV(sev *attestation.SEVVerifyResult) *EnclaveMeasurements {
+	return &EnclaveMeasurements{
+		SEVMeasurement: hex.EncodeToString(sev.Measurement),
+		Platform:       "sev-snp",
+	}
 }
 
 // hexEqual compares two hex strings constant-time after normalization.

@@ -98,7 +98,7 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 		"nvidia_payload_present",
 	}, "no NVIDIA payload")
 
-	// Must Fail: not implemented.
+	// Must Fail: not implemented / no Sigstore data in fixture.
 	assertMustFail(t, report, []string{
 		"cpu_gpu_chain",
 		"measured_model_weights",
@@ -108,6 +108,7 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 	assertMustFail(t, report, []string{
 		"compose_binding",
 		"sigstore_verification",
+		"sigstore_code_verified",
 		"event_log_integrity",
 	}, "no data in SEV-SNP fixture")
 

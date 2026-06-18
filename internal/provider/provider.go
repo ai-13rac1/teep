@@ -162,6 +162,14 @@ type Provider struct {
 	// (e.g. "/v1/score"). Empty means unsupported.
 	ScorePath string
 
+	// ResponsesPath is the upstream API path for responses
+	// (e.g. "/v1/responses"). Empty means unsupported.
+	ResponsesPath string
+
+	// SpeechPath is the upstream API path for text-to-speech
+	// (e.g. "/v1/audio/speech"). Empty means unsupported.
+	SpeechPath string
+
 	// E2EE indicates whether this provider supports end-to-end encryption.
 	E2EE bool
 
@@ -203,6 +211,11 @@ type Provider struct {
 	// report cache expires. Returns ("", false) if the domain cannot be
 	// determined (the proxy must fail closed in that case).
 	SPKIDomainForModel func(ctx context.Context, model string) (string, bool)
+
+	// SigstoreRepo is the GitHub repo for Tinfoil Sigstore supply chain
+	// verification (e.g. "tinfoilsh/confidential-model-router"). Empty for
+	// non-Sigstore providers.
+	SigstoreRepo string
 
 	// SupplyChainPolicy defines the allowed container image repos for this
 	// provider. May be nil if the provider has no policy.

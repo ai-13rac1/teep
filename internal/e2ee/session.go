@@ -26,6 +26,10 @@ const (
 	EndpointScore EndpointType = "score"
 	// EndpointAudio is /v1/audio/transcriptions (multipart).
 	EndpointAudio EndpointType = "audio"
+	// EndpointResponses is /v1/responses.
+	EndpointResponses EndpointType = "responses"
+	// EndpointSpeech is /v1/audio/speech.
+	EndpointSpeech EndpointType = "speech"
 )
 
 // EncField* constants identify the dot-notation sub-field paths within inference

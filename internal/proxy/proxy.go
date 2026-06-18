@@ -488,6 +488,8 @@ func New(cfg *config.Config) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/images/generations", s.handleEndpoint(&imagesEndpoint))
 	s.mux.HandleFunc("POST /v1/rerank", s.handleEndpoint(&rerankEndpoint))
 	s.mux.HandleFunc("POST /v1/score", s.handleEndpoint(&scoreEndpoint))
+	s.mux.HandleFunc("POST /v1/responses", s.handleEndpoint(&responsesEndpoint))
+	s.mux.HandleFunc("POST /v1/audio/speech", s.handleEndpoint(&speechEndpoint))
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
 
@@ -759,11 +761,14 @@ func fromConfig(
 		p.ChatPath = "/v1/chat/completions"
 		p.EmbeddingsPath = "/v1/embeddings"
 		p.AudioPath = "/v1/audio/transcriptions"
+		p.ResponsesPath = "/v1/responses"
+		p.SpeechPath = "/v1/audio/speech"
 		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
 		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		p.SigstoreRepo = "tinfoilsh/confidential-model-router"
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 		p.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
 			return "inference.tinfoil.sh", true
@@ -778,6 +783,8 @@ func fromConfig(
 		p.ChatPath = "/v1/chat/completions"
 		p.EmbeddingsPath = "/v1/embeddings"
 		p.AudioPath = "/v1/audio/transcriptions"
+		p.ResponsesPath = "/v1/responses"
+		p.SpeechPath = "/v1/audio/speech"
 		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
@@ -857,6 +864,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
 	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult)
+	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov)
 
 	totalDur := time.Since(totalStart)
 	slog.InfoContext(ctx, "verification complete",
@@ -870,6 +878,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		"nras", fmtDur(nrasDur),
 		"poc", fmtDur(pocDur),
 		"compose", fmtDur(composeDur),
+		"tinfoil_sc", fmtDur(tinfoilSCDur),
 	)
 
 	ms := s.stats.getModelStats(prov.Name, upstreamModel)
@@ -894,6 +903,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Compose:           sc.Compose,
 		Sigstore:          sc.Sigstore,
 		Rekor:             sc.Rekor,
+		TinfoilSC:         tinfoilSC,
 		E2EEConfigured:    prov.E2EE,
 	})
 	return report, raw
@@ -1088,6 +1098,120 @@ func (s *Server) verifySupplyChain(
 	return sc, time.Since(start)
 }
 
+// verifyTinfoilSupplyChain performs Tinfoil-specific Sigstore supply chain
+// verification and code/hardware measurement comparison. Returns nil for
+// non-Tinfoil providers.
+func (s *Server) verifyTinfoilSupplyChain(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	tdxResult *attestation.TDXVerifyResult,
+	sevResult *attestation.SEVVerifyResult,
+	prov *provider.Provider,
+) (*attestation.TinfoilSupplyChainResult, time.Duration) {
+	if raw.BackendFormat != attestation.FormatTinfoil || prov.SigstoreRepo == "" {
+		return nil, 0
+	}
+	start := time.Now()
+	result := &attestation.TinfoilSupplyChainResult{}
+
+	// Check GPU hash bound from REPORTDATA verification detail.
+	bindingDetail := ""
+	if tdxResult != nil {
+		bindingDetail = tdxResult.ReportDataBindingDetail
+	} else if sevResult != nil {
+		bindingDetail = sevResult.ReportDataBindingDetail
+	}
+	result.GPUHashBound = strings.Contains(bindingDetail, "gpu_bound=true")
+
+	// TDX policy checks.
+	if tdxResult != nil && tdxResult.ParseErr == nil {
+		pol := tinfoil.CheckTDXPolicy(tdxResult)
+		result.TDXPolicyErr = pol.Err()
+		if result.TDXPolicyErr == nil {
+			result.TDXPolicyDetail = "Tinfoil TDX policy: TD_ATTRIBUTES, XFAM, MR registers, RTMR3, TEE_TCB_SVN all pass"
+		} else {
+			result.TDXPolicyDetail = fmt.Sprintf("Tinfoil TDX policy checks failed: %v", result.TDXPolicyErr)
+		}
+	}
+
+	// Sigstore DSSE bundle verification.
+	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(s.cfg.Offline))
+	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, prov.SigstoreRepo)
+	if err != nil {
+		result.SigstoreErr = err
+		slog.WarnContext(ctx, "Tinfoil Sigstore verification failed",
+			"repo", prov.SigstoreRepo, "err", err)
+		return result, time.Since(start)
+	}
+	result.SigstoreVerified = true
+	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", prov.SigstoreRepo, predicateType)
+
+	// Parse code measurements from the verified predicate.
+	if predicateType != tinfoil.PredicateMultiPlatform {
+		result.CodeMatchErr = fmt.Errorf("unexpected predicate type %q, want %q", predicateType, tinfoil.PredicateMultiPlatform)
+		return result, time.Since(start)
+	}
+	codeMeasurements, err := tinfoil.ParseMultiPlatformPredicate(predicateBytes)
+	if err != nil {
+		result.CodeMatchErr = fmt.Errorf("parse multi-platform predicate: %w", err)
+		return result, time.Since(start)
+	}
+
+	// Build enclave measurements and compare.
+	switch {
+	case tdxResult != nil && tdxResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromTDX(tdxResult)
+		if err := tinfoil.CompareMultiPlatformTDX(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("TDX code measurements match Sigstore predicate (RTMR1=%s..., RTMR2=%s...)",
+				truncTo(codeMeasurements.RTMR1, 16), truncTo(codeMeasurements.RTMR2, 16))
+		}
+
+		// Hardware measurement match (TDX only).
+		hwPredBytes, hwPredType, hwErr := sv.FetchAndVerify(ctx, "tinfoilsh/hardware-measurements")
+		switch {
+		case hwErr != nil:
+			result.HWMatchErr = fmt.Errorf("fetch hardware measurements: %w", hwErr)
+		case hwPredType != tinfoil.PredicateHardwareMeasurements:
+			result.HWMatchErr = fmt.Errorf("unexpected hardware predicate type %q", hwPredType)
+		default:
+			entries, parseErr := tinfoil.ParseHardwareMeasurements(hwPredBytes)
+			if parseErr != nil {
+				result.HWMatchErr = fmt.Errorf("parse hardware measurements: %w", parseErr)
+			} else if matchID, matchErr := tinfoil.MatchHardwareMeasurements(entries, enclave); matchErr != nil {
+				result.HWMatchErr = matchErr
+			} else {
+				result.HWMatch = matchID
+			}
+		}
+
+	case sevResult != nil && sevResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromSEV(sevResult)
+		if err := tinfoil.CompareMultiPlatformSEVSNP(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("SEV-SNP code measurement matches Sigstore predicate (%s...)",
+				truncTo(codeMeasurements.SNPMeasurement, 16))
+		}
+
+	default:
+		result.CodeMatchErr = errors.New("no parseable TDX or SEV-SNP result for code measurement comparison")
+	}
+
+	return result, time.Since(start)
+}
+
+// truncTo returns the first n characters of s, or s itself if shorter.
+func truncTo(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 // --------------------------------------------------------------------------
 // Endpoint handler factory
 // --------------------------------------------------------------------------
@@ -1220,6 +1344,23 @@ var (
 			}
 			return "", false
 		},
+	}
+	responsesEndpoint = endpointConfig{
+		name:         "responses",
+		endpointType: e2ee.EndpointResponses,
+		endpointPath: func(p *provider.Provider) string { return p.ResponsesPath },
+		unsupported:  "responses",
+		parseRequest: parseChatRequest,
+		contentType:  "application/json",
+		canStream:    true,
+	}
+	speechEndpoint = endpointConfig{
+		name:         "speech",
+		endpointType: e2ee.EndpointSpeech,
+		endpointPath: func(p *provider.Provider) string { return p.SpeechPath },
+		unsupported:  "text-to-speech",
+		parseRequest: parseJSONModelRequest,
+		contentType:  "application/json",
 	}
 )
 
