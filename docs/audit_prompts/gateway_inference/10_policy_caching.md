@@ -79,7 +79,7 @@ All other factors are enforced by default for nearcloud, including:
 
 **Model backend factors (Tier 1–3):**
 - `nonce_match`, `tee_quote_present`, `tee_quote_structure`, `tee_cert_chain`, `tee_quote_signature`, `tee_debug_disabled`,
-- `tee_mrseam_mrtd` — enforces model MRSEAM and MRTD allowlists,
+- `tee_measurement` — enforces model MRSEAM and MRTD allowlists,
 - `signing_key_present`, `tee_reportdata_binding`,
 - `tee_tcb_not_revoked`, `intel_pcs_collateral`, `tee_tcb_current`,
 - `nvidia_payload_present`, `nvidia_signature`, `nvidia_claims`, `nvidia_nonce_client_bound`, `nvidia_nras_verified`,
@@ -89,12 +89,12 @@ All other factors are enforced by default for nearcloud, including:
 **Gateway factors (Tier 4):**
 - `gateway_nonce_match`, `gateway_tee_quote_present`, `gateway_tee_quote_structure`,
 - `gateway_tee_cert_chain`, `gateway_tee_quote_signature`, `gateway_tee_debug_disabled`,
-- `gateway_tee_mrseam_mrtd` — enforces gateway MRSEAM and MRTD allowlists,
+- `gateway_tee_measurement` — enforces gateway MRSEAM and MRTD allowlists,
 - `gateway_compose_binding`, `gateway_event_log_integrity`.
 
 The audit MUST evaluate whether additional factors should be enforced and document the rationale for the current enforcement boundary.
 
-> **Known divergence**: Venice currently uses the global `DefaultAllowFail` (less strict than `NearcloudDefaultAllowFail`), has no gateway factors, and does not enforce `tee_mrseam_mrtd` or `build_transparency_log` by default. Venice may have its own allow_fail list in the future.
+> **Known divergence**: Venice currently uses the global `DefaultAllowFail` (less strict than `NearcloudDefaultAllowFail`), has no gateway factors, and does not enforce `tee_measurement` or `build_transparency_log` by default. Venice may have its own allow_fail list in the future.
 
 #### Complete Factor Inventory
 
@@ -197,7 +197,7 @@ Chutes uses a separate enforcement configuration (`ChutesDefaultAllowFail`) with
 
 **Enforced factors** (NOT in `ChutesDefaultAllowFail`):
 - `nonce_match`, `tee_quote_present`, `tee_quote_structure`, `tee_cert_chain`, `tee_quote_signature`, `tee_debug_disabled`
-- `tee_mrseam_mrtd`, `tee_reportdata_binding`
+- `tee_measurement`, `tee_reportdata_binding`
 - `intel_pcs_collateral`, `tee_tcb_not_revoked`, `tee_tcb_current`
 - `e2ee_capable`, `signing_key_present`
 

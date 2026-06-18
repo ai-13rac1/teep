@@ -129,7 +129,7 @@ Chutes providers produce TDX quotes only from the backend sek8s instances, not f
 - **No gateway TDX quote**: The Chutes gateway is unattested and produces no TDX quote. No `gateway_*` TDX factors exist for chutes.
 - **Two-step fetch**: The TDX quote is fetched via the evidence endpoint (`/chutes/{chute}/evidence?nonce={hex}`) through the Chutes gateway, separate from the instances endpoint that returns E2EE keys. The audit should verify that the evidence response is correctly parsed and that the TDX quote bytes are extracted from the response structure.
 - **Same verification code**: The TDX quote parsing, signature verification, PCK chain validation, and debug-bit checking should use the same `internal/attestation/tdx.go` code path as nearcloud. Verify this is the case.
-- **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 golden values than nearcloud. These are checked via the same `tee_mrseam_mrtd` factor. See Section 05 for measurement details.
+- **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 golden values than nearcloud. These are checked via the same `tee_measurement` factor. See Section 05 for measurement details.
 - **Multiple instances**: Chutes may return multiple instances (up to `MaxInstances = 256`), each producing its own TDX quote. Verify that each instance's quote is independently verified and that a single verification failure blocks the request.
 
 Primary reference: `internal/provider/chutes/chutes.go`, `internal/attestation/tdx.go`.

@@ -11,7 +11,7 @@ Tier 1: Core Attestation
   ✗ tee_cert_chain             no TDX quote available; cannot verify cert chain  [ENFORCED]
   ✗ tee_quote_signature        no TDX quote available; cannot verify signature  [ENFORCED]
   ✗ tee_debug_disabled         no TDX quote available; cannot check debug flag  [ENFORCED]
-  ✗ tee_mrseam_mrtd            no parseable TDX quote; cannot check MRSEAM/MRTD (enforced)  [ENFORCED]
+  ✗ tee_measurement            no parseable TDX quote; cannot check MRSEAM/MRTD (enforced)  [ENFORCED]
   ✗ tee_hardware_config        no parseable TDX quote; cannot check RTMR0 (enforced)  [ENFORCED]
   ✗ tee_boot_config            no parseable TDX quote; cannot check RTMR1/RTMR2 (enforced)  [ENFORCED]
   ✓ signing_key_present        enclave pubkey present (1d4e65f73e...)  [ENFORCED]

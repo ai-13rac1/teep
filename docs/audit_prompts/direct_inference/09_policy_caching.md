@@ -72,7 +72,7 @@ The current `NeardirectDefaultAllowFail` factors are:
 
 All other factors are enforced by default for neardirect, including:
 - `nonce_match`, `tee_quote_present`, `tee_quote_structure`, `tee_cert_chain`, `tee_quote_signature`, `tee_debug_disabled`,
-- `tee_mrseam_mrtd` — enforces MRSEAM and MRTD allowlists,
+- `tee_measurement` — enforces MRSEAM and MRTD allowlists,
 - `signing_key_present`, `tee_reportdata_binding`,
 - `tee_tcb_not_revoked`, `intel_pcs_collateral`, `tee_tcb_current`,
 - `nvidia_payload_present`, `nvidia_signature`, `nvidia_claims`, `nvidia_nonce_client_bound`, `nvidia_nras_verified`,

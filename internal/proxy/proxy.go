@@ -392,6 +392,7 @@ type Server struct {
 	attestClient    *http.Client            // for attestation fetches
 	collateral      trust.HTTPSGetter       // for Intel PCS collateral fetches
 	verifyQuote     attestation.TDXVerifier // constructed from cfg.Offline + collateral
+	sevVerifier     attestation.SEVVerifier // constructed from cfg.Offline + AMD KDS getter
 	upstreamClient  *http.Client            // for chat completions forwards
 	sseConns        atomic.Int64            // active SSE /events connections
 	e2eeFailed      sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
@@ -440,6 +441,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.nvidiaVerifier = attestation.DefaultNVIDIAVerifier()
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral)
+	s.sevVerifier = attestation.NewSEVVerifier(cfg.Offline, attestation.NewSEVCertGetter(s.attestClient))
 
 	for name, cp := range cfg.Providers {
 		if cp == nil {
@@ -849,6 +851,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	slog.DebugContext(ctx, "attestation fetch complete", "provider", prov.Name, "elapsed", fetchDur)
 
 	tdxResult, tdxDur := s.verifyTDX(ctx, raw, nonce, prov)
+	sevResult, sevDur := s.verifySEV(ctx, raw, nonce, prov)
 	nvidiaResult, nvidiaDur := verifyNVIDIA(ctx, raw, nonce, prov.Name)
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
@@ -861,6 +864,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		"total", fmtDur(totalDur),
 		"fetch", fmtDur(fetchDur),
 		"tdx", fmtDur(tdxDur),
+		"sev", fmtDur(sevDur),
 		"nvidia", fmtDur(nvidiaDur),
 		"nras", fmtDur(nrasDur),
 		"poc", fmtDur(pocDur),
@@ -882,6 +886,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		ImageRepos:        sc.ImageRepos,
 		DigestToRepo:      sc.DigestToRepo,
 		TDX:               tdxResult,
+		SEV:               sevResult,
 		Nvidia:            nvidiaResult,
 		NvidiaNRAS:        nrasResult,
 		PoC:               pocResult,
@@ -917,6 +922,33 @@ func (s *Server) verifyTDX(
 	}
 	dur := time.Since(start)
 	slog.DebugContext(ctx, "TDX verification complete", "provider", prov.Name, "elapsed", dur)
+	return result, dur
+}
+
+// verifySEV runs SEV-SNP report verification and REPORTDATA binding.
+func (s *Server) verifySEV(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	nonce attestation.Nonce,
+	prov *provider.Provider,
+) (*attestation.SEVVerifyResult, time.Duration) {
+	if len(raw.SEVReportBytes) == 0 {
+		return nil, 0
+	}
+	slog.DebugContext(ctx, "SEV-SNP verification starting", "provider", prov.Name)
+	start := time.Now()
+	result := s.sevVerifier(ctx, raw.SEVReportBytes)
+	if prov.ReportDataVerifier != nil && result.ParseErr == nil {
+		detail, err := prov.ReportDataVerifier.VerifyReportData(result.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.DebugContext(ctx, "no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			result.ReportDataBindingErr = err
+			result.ReportDataBindingDetail = detail
+		}
+	}
+	dur := time.Since(start)
+	slog.DebugContext(ctx, "SEV-SNP verification complete", "provider", prov.Name, "elapsed", dur)
 	return result, dur
 }
 
@@ -2344,22 +2376,34 @@ func (s *Server) buildUpstreamBody(
 			if err != nil {
 				return nil, fmt.Errorf("fetch signing key: %w", err)
 			}
-			if raw.IntelQuote == "" {
-				return nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
-			}
 			// Only REPORTDATA binding is needed here, not full online
-			// verification (Intel PCS collateral). The primary
-			// fetchAndVerify() path already did online verification for
-			// the cached report.
-			tdxResult := attestation.VerifyTDXQuoteOffline(ctx, raw.IntelQuote)
-			if tdxResult.ParseErr != nil {
-				return nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
-			}
-			if prov.ReportDataVerifier != nil {
-				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-				if err != nil {
-					return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+			// verification. The primary fetchAndVerify() path already
+			// did online verification for the cached report.
+			switch {
+			case raw.IntelQuote != "":
+				tdxResult := attestation.VerifyTDXQuoteOffline(ctx, raw.IntelQuote)
+				if tdxResult.ParseErr != nil {
+					return nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
 				}
+				if prov.ReportDataVerifier != nil {
+					_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+					if err != nil {
+						return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+					}
+				}
+			case len(raw.SEVReportBytes) > 0:
+				sevResult := attestation.VerifySEVReportOffline(ctx, raw.SEVReportBytes)
+				if sevResult.ParseErr != nil {
+					return nil, fmt.Errorf("fresh SEV-SNP report parse failed: %w", sevResult.ParseErr)
+				}
+				if prov.ReportDataVerifier != nil {
+					_, err := prov.ReportDataVerifier.VerifyReportData(sevResult.ReportData, raw, nonce)
+					if err != nil {
+						return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+					}
+				}
+			default:
+				return nil, errors.New("fresh attestation has no TEE evidence; cannot verify signing key binding")
 			}
 			s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
 		}

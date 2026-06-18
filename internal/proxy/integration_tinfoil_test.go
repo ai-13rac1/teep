@@ -56,6 +56,25 @@ func integrationTinfoilPlaintextConfig(t *testing.T) *config.Config {
 	}
 }
 
+// integrationTinfoilE2EEConfig returns a config pointing at the live
+// Tinfoil API with E2EE enabled and Offline true.
+func integrationTinfoilE2EEConfig(t *testing.T) *config.Config {
+	t.Helper()
+	return &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Offline:    true,
+		Providers: map[string]*config.Provider{
+			"tinfoil_v3_cloud": {
+				Name:    "tinfoil_v3_cloud",
+				BaseURL: "https://inference.tinfoil.sh",
+				APIKey:  os.Getenv("TINFOIL_API_KEY"),
+				E2EE:    true,
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+}
+
 func TestIntegration_Tinfoil(t *testing.T) {
 	skipTinfoilIntegration(t)
 
@@ -75,22 +94,25 @@ func TestIntegration_Tinfoil(t *testing.T) {
 		assertStreamResponse(t, resp)
 	})
 
-	// E2EE subtests are skipped: Tinfoil's router uses SEV-SNP, but
-	// BuildReport only has TDX evaluators. tee_reportdata_binding Fails
-	// for SEV-SNP, which blocks the proxy's E2EE path. SEV-SNP evaluator
-	// support will enable these tests.
 	t.Run("E2EEStreaming", func(t *testing.T) {
-		t.Skip("SEV-SNP: tee_reportdata_binding requires TDX evaluators; SEV-SNP support pending")
+		proxySrv := newProxyServer(t, integrationTinfoilE2EEConfig(t))
+		defer proxySrv.Close()
+		resp := postChatIntegration(t, proxySrv.URL, tinfoilIntegrationModel(), true)
+		defer resp.Body.Close()
+		assertStreamResponse(t, resp)
 	})
 
 	t.Run("E2EENonStream", func(t *testing.T) {
-		t.Skip("SEV-SNP: tee_reportdata_binding requires TDX evaluators; SEV-SNP support pending")
+		proxySrv := newProxyServer(t, integrationTinfoilE2EEConfig(t))
+		defer proxySrv.Close()
+		resp := postChatIntegration(t, proxySrv.URL, tinfoilIntegrationModel(), false)
+		defer resp.Body.Close()
+		assertNonStreamResponse(t, resp)
 	})
 
 	t.Run("AttestationReport", func(t *testing.T) {
-		// Plaintext (E2EE off) + online mode so the report includes full
-		// verification without being blocked by SEV-SNP binding.
-		cfg := integrationTinfoilPlaintextConfig(t)
+		// E2EE on + online mode so the report includes full verification.
+		cfg := integrationTinfoilE2EEConfig(t)
 		cfg.Offline = false
 		proxySrv := newProxyServer(t, cfg)
 		defer proxySrv.Close()
@@ -120,15 +142,21 @@ func TestIntegration_Tinfoil(t *testing.T) {
 			t.Fatalf("decode report: %v", err)
 		}
 
-		// Live test against actual SEV-SNP hardware. The report evaluators
-		// are TDX-only, so many factors will fail. Assert only TEE-agnostic
-		// factors. e2ee_usable cannot be asserted because E2EE is disabled
-		// (SEV-SNP binding blocks the proxy E2EE path).
+		// Live test against actual SEV-SNP hardware with TEE-agnostic
+		// evaluators. SEV-SNP factors should now pass.
 		mustPass := []string{
 			"nonce_match",
+			"tee_quote_present",
+			"tee_quote_structure",
+			"tee_debug_disabled",
+			"tee_reportdata_binding",
+			"tee_hardware_config",
+			"tee_tcb_current",
+			"tee_tcb_not_revoked",
 			"signing_key_present",
 			"e2ee_capable",
 			"tls_key_binding",
+			"e2ee_usable",
 		}
 		for _, name := range mustPass {
 			f, ok := findFactor(report.Factors, name)

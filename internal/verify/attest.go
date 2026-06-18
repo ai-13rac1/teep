@@ -2,12 +2,14 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/multi"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 )
@@ -35,11 +37,37 @@ func verifyTDX(ctx context.Context, raw *attestation.RawAttestation, nonce attes
 	tdxResult := verifier(ctx, raw.IntelQuote)
 	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && tdxResult.ParseErr == nil {
 		detail, err := rdVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-		tdxResult.ReportDataBindingErr = err
-		tdxResult.ReportDataBindingDetail = detail
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			tdxResult.ReportDataBindingErr = err
+			tdxResult.ReportDataBindingDetail = detail
+		}
 	}
 	slog.Debug("TDX verification complete", "elapsed", time.Since(tdxStart))
 	return tdxResult
+}
+
+// verifySEV runs SEV-SNP report verification and report data binding.
+// Returns nil if no SEV report is present.
+func verifySEV(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, providerName string, verifier attestation.SEVVerifier) *attestation.SEVVerifyResult {
+	if len(raw.SEVReportBytes) == 0 {
+		return nil
+	}
+	slog.Debug("SEV-SNP verification starting", "report_len", len(raw.SEVReportBytes))
+	sevStart := time.Now()
+	sevResult := verifier(ctx, raw.SEVReportBytes)
+	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && sevResult.ParseErr == nil {
+		detail, err := rdVerifier.VerifyReportData(sevResult.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			sevResult.ReportDataBindingErr = err
+			sevResult.ReportDataBindingDetail = detail
+		}
+	}
+	slog.Debug("SEV-SNP verification complete", "elapsed", time.Since(sevStart))
+	return sevResult
 }
 
 // verifyNVIDIA runs NVIDIA EAT and NRAS verification.

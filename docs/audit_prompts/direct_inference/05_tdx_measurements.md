@@ -61,7 +61,7 @@ For complete attestation of a dstack-based CVM, the verification process should:
 
 The code supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and RTMR0-3. The direct inference provider (neardirect / NEAR AI) does not publish authenticated measurement baselines in-band, but teep now provides Go-coded stopgap defaults and operator tooling to partially close this gap:
 
-**MRSEAM — Go-coded defaults from Intel releases.** `DstackBaseMeasurementPolicy()` in `internal/attestation/dstack_defaults.go` ships an allowlist of four Intel-published MRSEAM values corresponding to TDX module versions 1.5.08, 1.5.16, 2.0.08, and 2.0.02. These are sourced from Intel's official release notes. The `tee_mrseam_mrtd` factor is enforced by default for neardirect (it is NOT in `NeardirectDefaultAllowFail`).
+**MRSEAM — Go-coded defaults from Intel releases.** `DstackBaseMeasurementPolicy()` in `internal/attestation/dstack_defaults.go` ships an allowlist of four Intel-published MRSEAM values corresponding to TDX module versions 1.5.08, 1.5.16, 2.0.08, and 2.0.02. These are sourced from Intel's official release notes. The `tee_measurement` factor is enforced by default for neardirect (it is NOT in `NeardirectDefaultAllowFail`).
 
 **MRTD — Go-coded defaults from dstack reproducible builds.** The same base policy ships two MRTD values corresponding to dstack-nvidia image versions 0.5.4.1 and 0.5.5, derived from reproducible build artifacts.
 
@@ -83,7 +83,7 @@ The code supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and R
 - MRCONFIGID is expected to be cryptographically checked via compose binding,
 - RTMR fields are expected to be consistency-checked via event log replay when event logs are present,
 - REPORTDATA is expected to be cryptographically verified via the neardirect binding scheme (sha256(signing_address + tls_fingerprint) + nonce),
-- MRSEAM and MRTD are enforced by default via Go-coded allowlists sourced from Intel TDX module releases and dstack reproducible builds — the `tee_mrseam_mrtd` factor is enforced (not in `NeardirectDefaultAllowFail`),
+- MRSEAM and MRTD are enforced by default via Go-coded allowlists sourced from Intel TDX module releases and dstack reproducible builds — the `tee_measurement` factor is enforced (not in `NeardirectDefaultAllowFail`),
 - RTMR0 is checked via `tee_hardware_config` against per-provider observed values — allowed to fail by default,
 - RTMR1 and RTMR2 are checked via `tee_boot_config` against per-provider observed values — allowed to fail by default,
 - MRSIGNERSEAM, MROWNER, MROWNERCONFIG are expected to be all-zeros for standard dstack deployments and should be documented as informational-only.

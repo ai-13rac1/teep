@@ -176,7 +176,7 @@ func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport)
 		"tee_quote_present",
 		"tee_quote_structure",
 		"tee_debug_disabled",
-		"tee_mrseam_mrtd",
+		"tee_measurement",
 		"signing_key_present",
 		"tee_reportdata_binding",
 		"nvidia_payload_present",
@@ -197,7 +197,7 @@ func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport)
 		"gateway_tee_cert_chain",
 		"gateway_tee_quote_signature",
 		"gateway_tee_debug_disabled",
-		"gateway_tee_mrseam_mrtd",
+		"gateway_tee_measurement",
 		"gateway_compose_binding",
 		"gateway_event_log_integrity",
 	})

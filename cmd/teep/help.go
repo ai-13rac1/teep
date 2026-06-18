@@ -83,13 +83,13 @@ var factorRegistry = []factorInfo{
 			"workloads must never run in debug mode.",
 	},
 	{
-		Name:    "tee_mrseam_mrtd",
+		Name:    "tee_measurement",
 		Tier:    1,
-		Summary: "MRSEAM/MRTD match measurement policy",
-		Description: "Checks that the TDX MRSEAM and MRTD values from the quote " +
-			"match the configured measurement policy allowlists. MRSEAM " +
-			"identifies the Intel TDX module version; MRTD is a SHA-384 " +
-			"hash of the initial TD image. Both are verifiable from Intel " +
+		Summary: "TEE measurement matches policy",
+		Description: "Checks that the TEE measurement values match the configured " +
+			"measurement policy allowlists. For TDX: MRSEAM identifies the " +
+			"Intel TDX module version, MRTD is a SHA-384 hash of the initial " +
+			"TD image. For SEV-SNP: the launch measurement. Values are verifiable from " +
 			"releases and dstack build artifacts. Skipped when no " +
 			"MRSEAM/MRTD policy is configured.",
 	},
@@ -400,7 +400,7 @@ var factorRegistry = []factorInfo{
 			"passing through the API gateway.",
 	},
 	{
-		Name:    "gateway_tee_mrseam_mrtd",
+		Name:    "gateway_tee_measurement",
 		Tier:    4,
 		Summary: "Gateway MRSEAM/MRTD match policy",
 		Description: "Checks that the gateway TDX MRSEAM and MRTD values match " +

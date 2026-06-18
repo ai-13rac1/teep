@@ -210,7 +210,7 @@ See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model analysis
 
 The code supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and RTMR0-3 for both the gateway and the model backend. If the gateway inference provider does not publish authenticated measurement baselines in-band, teep should use Go-coded stopgap defaults and operator tooling to partially close this gap:
 
-**MRSEAM — Go-coded defaults from Intel releases.** `DstackBaseMeasurementPolicy()` in `internal/attestation/dstack_defaults.go` ships an allowlist of four Intel-published MRSEAM values corresponding to TDX module versions 1.5.08, 1.5.16, 2.0.08, and 2.0.02. These are sourced from Intel's official release notes. The `tee_mrseam_mrtd` and `gateway_tee_mrseam_mrtd` factors are enforced by default for nearcloud (they are NOT in `NearcloudDefaultAllowFail`).
+**MRSEAM — Go-coded defaults from Intel releases.** `DstackBaseMeasurementPolicy()` in `internal/attestation/dstack_defaults.go` ships an allowlist of four Intel-published MRSEAM values corresponding to TDX module versions 1.5.08, 1.5.16, 2.0.08, and 2.0.02. These are sourced from Intel's official release notes. The `tee_measurement` and `gateway_tee_measurement` factors are enforced by default for nearcloud (they are NOT in `NearcloudDefaultAllowFail`).
 
 **MRTD — Go-coded defaults from dstack reproducible builds.** The same base policy ships two MRTD values corresponding to dstack-nvidia image versions 0.5.4.1 and 0.5.5, derived from reproducible build artifacts. These apply to both the model backend and gateway CVMs.
 
@@ -358,7 +358,7 @@ For each field, the report MUST distinguish between:
 - MRCONFIGID is expected to be cryptographically checked via compose binding,
 - RTMR fields are expected to be consistency-checked via event log replay when event logs are present,
 - REPORTDATA is expected to be cryptographically verified via the nearai binding scheme (sha256(signing_address + tls_fingerprint) + nonce),
-- MRSEAM and MRTD are enforced by default via Go-coded allowlists sourced from Intel TDX module releases and dstack reproducible builds — the `tee_mrseam_mrtd` factor is enforced,
+- MRSEAM and MRTD are enforced by default via Go-coded allowlists sourced from Intel TDX module releases and dstack reproducible builds — the `tee_measurement` factor is enforced,
 - RTMR0 is checked via `tee_hardware_config` against per-provider observed values — allowed to fail by default,
 - RTMR1 and RTMR2 are checked via `tee_boot_config` against per-provider observed values — allowed to fail by default,
 - MRSIGNERSEAM, MROWNER, MROWNERCONFIG are expected to be all-zeros for standard dstack deployments and should be documented as informational-only.
@@ -367,7 +367,7 @@ For each field, the report MUST distinguish between:
 - MRCONFIGID is expected to be cryptographically checked via gateway compose binding,
 - RTMR fields are expected to be consistency-checked via gateway event log replay when gateway event logs are present,
 - REPORTDATA is expected to be cryptographically verified via the gateway binding scheme (sha256(tls_fingerprint) + nonce — note: no signing_address for the gateway),
-- MRSEAM and MRTD are enforced by default via the same Go-coded allowlists as the model backend — `gateway_tee_mrseam_mrtd` is enforced,
+- MRSEAM and MRTD are enforced by default via the same Go-coded allowlists as the model backend — `gateway_tee_measurement` is enforced,
 - RTMR0 is checked via `gateway_tee_hardware_config` — allowed to fail by default,
 - RTMR1 and RTMR2 are checked via `gateway_tee_boot_config` — allowed to fail by default,
 - MRSIGNERSEAM, MROWNER, MROWNERCONFIG are expected to be all-zeros.
@@ -661,7 +661,7 @@ All other factors are enforced by default for nearcloud, including:
 - `tee_cert_chain` — validates model PCK chain to Intel roots,
 - `tee_quote_signature` — validates model quote signature,
 - `tee_debug_disabled` — prevents model debug enclaves from being trusted,
-- `tee_mrseam_mrtd` — enforces model MRSEAM and MRTD allowlists,
+- `tee_measurement` — enforces model MRSEAM and MRTD allowlists,
 - `signing_key_present` — ensures the model enclave provided a public key for E2EE,
 - `tee_reportdata_binding` — prevents key-substitution MITM on the model backend's E2EE key,
 - `tee_tcb_not_revoked` — rejects revoked TCB levels,
@@ -680,13 +680,13 @@ All other factors are enforced by default for nearcloud, including:
 - `gateway_tee_cert_chain` — validates gateway PCK chain to Intel roots,
 - `gateway_tee_quote_signature` — validates gateway quote signature,
 - `gateway_tee_debug_disabled` — prevents gateway debug enclaves from being trusted,
-- `gateway_tee_mrseam_mrtd` — enforces gateway MRSEAM and MRTD allowlists,
+- `gateway_tee_measurement` — enforces gateway MRSEAM and MRTD allowlists,
 - `gateway_compose_binding` — enforces gateway image/config binding to MRConfigID,
 - `gateway_event_log_integrity` — enforces gateway RTMR replay consistency.
 
 The audit MUST evaluate whether additional factors should be enforced by default and document the rationale for the current enforcement boundary.
 
-> **Known divergence**: Venice uses the global `DefaultAllowFail` (less strict than `NearcloudDefaultAllowFail`), has no gateway factors, and does not enforce `tee_mrseam_mrtd` or `build_transparency_log` by default. Venice should have its own allowlist in the future.
+> **Known divergence**: Venice uses the global `DefaultAllowFail` (less strict than `NearcloudDefaultAllowFail`), has no gateway factors, and does not enforce `tee_measurement` or `build_transparency_log` by default. Venice should have its own allowlist in the future.
 
 > **Known divergence: Chutes/Sek8s.** Chutes uses its own `ChutesDefaultAllowFail` list (defined in `internal/attestation/report.go`), which reflects the sek8s attestation model’s structural limitations. The chutes-specific allowed-to-fail factors include:
 > - `nvidia_signature` — GPU cert validation (sek8s doesn’t validate NVIDIA root the same way as dstack),
@@ -701,7 +701,7 @@ The audit MUST evaluate whether additional factors should be enforced by default
 > - `event_log_integrity` — not applicable (returns `Skip`; event log not exposed to clients),
 > Note: `e2ee_usable` is enforced for chutes (not in `ChutesDefaultAllowFail`). The Deferred factor mechanism allows it to start as Skip without blocking requests (see §4.16).
 >
-> Factors that remain **enforced** for chutes include: `nonce_match`, `tee_quote_present`, `tee_quote_structure`, `tee_cert_chain`, `tee_quote_signature`, `tee_debug_disabled`, `tee_mrseam_mrtd`, `tee_reportdata_binding`, `intel_pcs_collateral`, `tee_tcb_current`, `tee_tcb_not_revoked`, `e2ee_capable`, `signing_key_present`.
+> Factors that remain **enforced** for chutes include: `nonce_match`, `tee_quote_present`, `tee_quote_structure`, `tee_cert_chain`, `tee_quote_signature`, `tee_debug_disabled`, `tee_measurement`, `tee_reportdata_binding`, `intel_pcs_collateral`, `tee_tcb_current`, `tee_tcb_not_revoked`, `e2ee_capable`, `signing_key_present`.
 >
 > The audit for chutes MUST verify: (a) that Skip results for compose_binding, sigstore_verification, event_log_integrity, and build_transparency_log are correctly returned with explanatory messages, (b) that these Skip factors are in `ChutesDefaultAllowFail` and do not block traffic, (c) that the enforced factors provide adequate security despite the absence of compose/event-log/supply-chain checks, (d) that no `gateway_*` factors exist (the Chutes gateway is unattested).
 

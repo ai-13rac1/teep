@@ -276,7 +276,7 @@ This would eliminate residual trust assumption 3 (golden measurement correctness
 
 ## Teep Status
 
-**Hardware measurement enforcement:** Partially enforced by default. MRTD and MRSEAM are pinned in `internal/provider/chutes/policy.go` and enforced fail-closed via `tee_mrseam_mrtd`. RTMR0, RTMR1, and RTMR2 are also pinned and registered in Teep defaults, but their corresponding checks (`tee_hardware_config` / `tee_boot_config`) are allow-fail by default for Chutes. REPORTDATA binding is enforced via `ReportDataVerifier` in `internal/provider/chutes/reportdata.go`.
+**Hardware measurement enforcement:** Partially enforced by default. MRTD and MRSEAM are pinned in `internal/provider/chutes/policy.go` and enforced fail-closed via `tee_measurement`. RTMR0, RTMR1, and RTMR2 are also pinned and registered in Teep defaults, but their corresponding checks (`tee_hardware_config` / `tee_boot_config`) are allow-fail by default for Chutes. REPORTDATA binding is enforced via `ReportDataVerifier` in `internal/provider/chutes/reportdata.go`.
 
 **Supply chain factors:** Correctly return `Skip` for `build_transparency_log`, `compose_binding`, `sigstore_verification`, and `event_log_integrity` because the sek8s architecture does not expose the required evidence to clients.
 

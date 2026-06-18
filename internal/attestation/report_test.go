@@ -434,7 +434,7 @@ func TestEvalTDXQuotePresent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
 			raw.IntelQuote = tc.quote
-			assertSingleFactor(t, evalTDXQuotePresent(&ReportInput{Raw: raw}), tc.want)
+			assertSingleFactor(t, evalTEEQuotePresent(&ReportInput{Raw: raw}), tc.want)
 		})
 	}
 }
@@ -465,7 +465,7 @@ func TestEvalTDXParseDependent(t *testing.T) {
 
 	t.Run("nil_tdx_all_fail", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
-		results := evalTDXParseDependent(&ReportInput{Raw: raw})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw})
 		if len(results) != 4 {
 			t.Fatalf("got %d results, want 4", len(results))
 		}
@@ -477,7 +477,7 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("all_pass", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		if len(results) != 4 {
 			t.Fatalf("got %d results, want 4", len(results))
 		}
@@ -489,7 +489,7 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("debug_enabled", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{DebugEnabled: true, TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		f := assertFactor(t, results, "tee_debug_disabled", Fail)
 		if !strings.Contains(f.Detail, "debug") {
 			t.Errorf("detail should mention debug: %s", f.Detail)
@@ -499,21 +499,21 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("cert_chain_err", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{CertChainErr: errors.New("expired"), TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		assertFactor(t, results, "tee_cert_chain", Fail)
 	})
 
 	t.Run("signature_err", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{SignatureErr: errors.New("bad sig"), TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		assertFactor(t, results, "tee_quote_signature", Fail)
 	})
 
 	t.Run("parse_err_skips_chain_sig_debug", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{ParseErr: errors.New("bad quote")}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		assertFactor(t, results, "tee_quote_structure", Fail)
 		assertFactor(t, results, "tee_cert_chain", Skip)
 		assertFactor(t, results, "tee_quote_signature", Skip)
@@ -531,7 +531,7 @@ func TestEvalTDXQuoteStructure(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		results := evalTDXParseDependent(&ReportInput{
+		results := evalTEEParseDependent(&ReportInput{
 			Raw: raw, Nonce: nonce, TDX: tdx,
 		})
 		f := assertFactor(t, results, "tee_quote_structure", Pass)
@@ -546,28 +546,28 @@ func TestEvalTDXQuoteStructure(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		results := evalTDXParseDependent(&ReportInput{
+		results := evalTEEParseDependent(&ReportInput{
 			Raw: raw, Nonce: nonce, TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("aa", 48): {}},
 			},
 		})
-		// tee_quote_structure should pass — measurement checks moved to tee_mrseam_mrtd
+		// tee_quote_structure should pass — measurement checks moved to tee_measurement
 		assertFactor(t, results, "tee_quote_structure", Pass)
 	})
 }
 
-func TestEvalTDXMrseamMrtd(t *testing.T) {
+func TestEvalTDXMeasurement(t *testing.T) {
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEMeasurement(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEMeasurement(&ReportInput{}), Skip)
 	})
 
 	t.Run("mrtd_mismatch", func(t *testing.T) {
@@ -575,7 +575,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("aa", 48): {}},
@@ -591,7 +591,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow:   map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -608,7 +608,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow:   map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -625,7 +625,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -641,7 +641,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRSeamAllow: map[string]struct{}{strings.Repeat("22", 48): {}},
@@ -664,16 +664,16 @@ func TestEvalTDXHardwareConfig(t *testing.T) {
 
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{}), Skip)
 	})
 
 	t.Run("rtmr0_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		f := assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -688,7 +688,7 @@ func TestEvalTDXHardwareConfig(t *testing.T) {
 
 	t.Run("rtmr0_match", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -710,16 +710,16 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{}), Skip)
 	})
 
 	t.Run("rtmr1_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		f := assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -737,7 +737,7 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("rtmr2_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		f := assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -755,7 +755,7 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("pass_both_match", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -774,7 +774,7 @@ func TestEvalTDXBootConfig_PassRTMR2Only(t *testing.T) {
 	var rtmrs [4][48]byte
 	copy(rtmrs[2][:], bytesFromHex(t, strings.Repeat("cd", 48)))
 	tdx := &TDXVerifyResult{RTMRs: rtmrs}
-	assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+	assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 		TDX: tdx,
 		Policy: MeasurementPolicy{
 			RTMRAllow: [4]map[string]struct{}{
@@ -813,7 +813,7 @@ func TestEvalTDXReportDataBinding(t *testing.T) {
 		{
 			"fail_nil_tdx",
 			nil,
-			Fail, "no parseable TDX",
+			Fail, "no parseable TEE",
 		},
 		{
 			"fail_binding_err",
@@ -827,7 +827,7 @@ func TestEvalTDXReportDataBinding(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXReportDataBinding(&ReportInput{
+			f := assertSingleFactor(t, evalTEEReportDataBinding(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.wantStatus)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -841,11 +841,227 @@ func TestEvalTDXReportDataBinding_EmptySigningKey(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, "")
 	tdx := &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)} // ParseErr == nil
-	f := assertSingleFactor(t, evalTDXReportDataBinding(&ReportInput{
+	f := assertSingleFactor(t, evalTEEReportDataBinding(&ReportInput{
 		Raw: raw, Nonce: nonce, TDX: tdx,
 	}), Fail)
 	if !strings.Contains(f.Detail, "public key absent") {
 		t.Errorf("detail %q should mention 'public key absent'", f.Detail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SEV-SNP evaluator unit tests
+// ---------------------------------------------------------------------------
+
+func buildSEVInput(sev *SEVVerifyResult) *ReportInput {
+	nonce := NewNonce()
+	raw := &RawAttestation{
+		Verified:       true,
+		Nonce:          nonce.Hex(),
+		Model:          "test-model",
+		TEEHardware:    "amd-sev-snp",
+		SEVReportBytes: make([]byte, 1184),
+		SigningKey:     "1d4e65f73eabcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	return &ReportInput{
+		Raw:   raw,
+		Nonce: nonce,
+		SEV:   sev,
+	}
+}
+
+func TestEvalSEVQuotePresent(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		f := assertSingleFactor(t, evalTEEQuotePresent(in), Pass)
+		if !strings.Contains(f.Detail, "SEV-SNP") {
+			t.Errorf("detail %q should mention SEV-SNP", f.Detail)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		in.Raw.SEVReportBytes = nil
+		in.SEV = nil
+		assertSingleFactor(t, evalTEEQuotePresent(in), Fail)
+	})
+}
+
+func TestEvalSEVParseDependent(t *testing.T) {
+	t.Run("parse_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{ParseErr: errors.New("bad report")})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_structure", Fail)
+		assertFactor(t, results, "tee_cert_chain", Skip)
+		assertFactor(t, results, "tee_quote_signature", Skip)
+		assertFactor(t, results, "tee_debug_disabled", Skip)
+	})
+
+	t.Run("offline_pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement: make([]byte, 48),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_structure", Pass)
+		assertFactor(t, results, "tee_cert_chain", Skip)      // offline
+		assertFactor(t, results, "tee_quote_signature", Skip) // offline
+		assertFactor(t, results, "tee_debug_disabled", Pass)
+	})
+
+	t.Run("online_pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:    make([]byte, 48),
+			OnlineVerified: true,
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_cert_chain", Pass)
+		assertFactor(t, results, "tee_quote_signature", Pass)
+	})
+
+	t.Run("cert_chain_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			CertChainErr: errors.New("invalid cert"),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_cert_chain", Fail)
+	})
+
+	t.Run("signature_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			SignatureErr: errors.New("bad signature"),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_signature", Fail)
+	})
+
+	t.Run("debug_enabled", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			DebugEnabled: true,
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_debug_disabled", Fail)
+	})
+}
+
+func TestEvalSEVMeasurement(t *testing.T) {
+	meas := strings.Repeat("ab", 48)
+	measBytes, _ := hex.DecodeString(meas)
+
+	t.Run("no_policy", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{}
+		assertSingleFactor(t, evalTEEMeasurement(in), Skip)
+	})
+
+	t.Run("match", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{MRTDAllow: map[string]struct{}{meas: {}}}
+		assertSingleFactor(t, evalTEEMeasurement(in), Pass)
+	})
+
+	t.Run("mismatch", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{MRTDAllow: map[string]struct{}{strings.Repeat("cd", 48): {}}}
+		assertSingleFactor(t, evalTEEMeasurement(in), Fail)
+	})
+}
+
+func TestEvalSEVHardwareConfig(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{GuestPolicy: 0x30000})
+		f := assertSingleFactor(t, evalTEEHardwareConfig(in), Pass)
+		if !strings.Contains(f.Detail, "guest policy valid") {
+			t.Errorf("detail %q should mention guest policy valid", f.Detail)
+		}
+	})
+
+	t.Run("fail_policy_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{PolicyErr: errors.New("debug must be disabled")})
+		assertSingleFactor(t, evalTEEHardwareConfig(in), Fail)
+	})
+}
+
+func TestEvalSEVBootConfig(t *testing.T) {
+	in := buildSEVInput(&SEVVerifyResult{})
+	f := assertSingleFactor(t, evalTEEBootConfig(in), Skip)
+	if !strings.Contains(f.Detail, "no RTMR equivalent") {
+		t.Errorf("detail %q should mention no RTMR equivalent", f.Detail)
+	}
+}
+
+func TestEvalSEVReportDataBinding(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			ReportDataBindingDetail: "verified binding",
+		})
+		assertSingleFactor(t, evalTEEReportDataBinding(in), Pass)
+	})
+
+	t.Run("fail_binding_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			ReportDataBindingErr: errors.New("mismatch"),
+		})
+		assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+	})
+
+	t.Run("fail_no_detail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		f := assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+		if !strings.Contains(f.Detail, "no REPORTDATA verifier") {
+			t.Errorf("detail %q should mention no verifier", f.Detail)
+		}
+	})
+
+	t.Run("fail_no_signing_key", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{ReportDataBindingDetail: "ok"})
+		in.Raw.SigningKey = ""
+		f := assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+		if !strings.Contains(f.Detail, "public key absent") {
+			t.Errorf("detail %q should mention public key absent", f.Detail)
+		}
+	})
+}
+
+func TestEvalSEVTCBCurrent(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			CurrentTCB: SEVTCBVersion{BlSpl: 0x0a, SnpSpl: 0x17, UcodeSpl: 0x54},
+		})
+		f := assertSingleFactor(t, evalTEETCBCurrent(in), Pass)
+		if !strings.Contains(f.Detail, "meets minimums") {
+			t.Errorf("detail %q should mention meets minimums", f.Detail)
+		}
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			TCBErr: errors.New("BlSpl too low"),
+		})
+		assertSingleFactor(t, evalTEETCBCurrent(in), Fail)
+	})
+}
+
+func TestEvalSEVTCBNotRevoked(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		assertSingleFactor(t, evalTEETCBNotRevoked(in), Pass)
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			TCBErr: errors.New("TCB revoked"),
+		})
+		assertSingleFactor(t, evalTEETCBNotRevoked(in), Fail)
+	})
+}
+
+func TestEvalIntelPCSCollateral_SEV(t *testing.T) {
+	in := buildSEVInput(&SEVVerifyResult{})
+	f := assertSingleFactor(t, evalIntelPCSCollateral(in), Skip)
+	if !strings.Contains(f.Detail, "AMD KDS") {
+		t.Errorf("detail %q should mention AMD KDS", f.Detail)
 	}
 }
 
@@ -912,7 +1128,7 @@ func TestEvalTDXTCBCurrent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{
+			f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.want)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -955,7 +1171,7 @@ func TestEvalTDXTCBNotRevoked(t *testing.T) {
 		{
 			"skip_nil_tdx",
 			nil,
-			Skip, "no parseable TDX",
+			Skip, "no parseable TEE",
 		},
 		{
 			"skip_offline",
@@ -971,7 +1187,7 @@ func TestEvalTDXTCBNotRevoked(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXTCBNotRevoked(&ReportInput{
+			f := assertSingleFactor(t, evalTEETCBNotRevoked(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.want)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -2229,7 +2445,7 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 	// Base 29 + 13 gateway factors = 42
 	// Gateway factors: gateway_nonce_match, gateway_tee_quote_present,
 	// gateway_tee_quote_structure, gateway_tee_cert_chain, gateway_tee_quote_signature,
-	// gateway_tee_debug_disabled, gateway_tee_mrseam_mrtd, gateway_tee_hardware_config,
+	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
 	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
 	if len(report.Factors) != 42 {
@@ -3070,30 +3286,30 @@ func TestCheckImageRepoPolicy_AllPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXMrseamMrtd
+// evalGatewayTDXMeasurement
 // ---------------------------------------------------------------------------
 
-func TestEvalGatewayTDXMrseamMrtd_NilGatewayTDX(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_NilGatewayTDX(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_NoPolicy(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_NoPolicy(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{},
 		// No GatewayPolicy configured → both HasMRTDPolicy and HasMRSeamPolicy are false
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRTDFail(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRTDFail(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{MRTD: []byte{0xaa, 0xbb}},
@@ -3101,13 +3317,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRTDFail(t *testing.T) {
 			MRTDAllow: map[string]struct{}{"ccdd": {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRTDPass(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRTDPass(t *testing.T) {
 	mrtd := []byte{0xaa, 0xbb}
 	mrtdHex := hex.EncodeToString(mrtd)
 	in := &ReportInput{
@@ -3117,13 +3333,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRTDPass(t *testing.T) {
 			MRTDAllow: map[string]struct{}{mrtdHex: {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRSeamFail(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRSeamFail(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{MRSeam: []byte{0x01}},
@@ -3131,13 +3347,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRSeamFail(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{"ffff": {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_BothMatch(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_BothMatch(t *testing.T) {
 	mrtd := []byte{0xaa}
 	mrseam := []byte{0xbb}
 	in := &ReportInput{
@@ -3148,13 +3364,13 @@ func TestEvalGatewayTDXMrseamMrtd_BothMatch(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRSeamOnlyPass(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRSeamOnlyPass(t *testing.T) {
 	mrseam := []byte{0xcc}
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
@@ -3163,7 +3379,7 @@ func TestEvalGatewayTDXMrseamMrtd_MRSeamOnlyPass(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3610,7 +3826,7 @@ func TestEvalTDXTCBCurrent_OutOfDateWithAdvisories(t *testing.T) {
 		TcbStatus:   "OutOfDate",
 		AdvisoryIDs: []string{"INTEL-SA-00615"},
 	}
-	f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Fail)
+	f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Fail)
 	t.Logf("detail: %s", f.Detail)
 	if !strings.Contains(f.Detail, "INTEL-SA-00615") {
 		t.Errorf("detail should contain advisory ID: %s", f.Detail)
@@ -3627,7 +3843,7 @@ func TestEvalTDXTCBCurrent_CollateralErrFallthrough(t *testing.T) {
 		TeeTCBSVN:     []byte{0x07, 0x01},
 		CollateralErr: errors.New("pcs timeout"),
 	}
-	f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Skip)
+	f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Skip)
 	t.Logf("detail: %s", f.Detail)
 	if !strings.Contains(f.Detail, "pcs timeout") {
 		t.Errorf("detail should contain error: %s", f.Detail)

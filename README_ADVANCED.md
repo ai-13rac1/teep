@@ -103,7 +103,7 @@ Each factor produces PASS, FAIL, or SKIP. Factors marked `[ENFORCED]` cause the 
 | 4 | `tee_cert_chain` | Certificate chain verifies against Intel SGX/TDX root CA. Proves genuine Intel hardware. |
 | 5 | `tee_quote_signature` | ECDSA signature over the TDX quote body is valid. Proves the quote hasn't been tampered with. |
 | 6 | `tee_debug_disabled` | TD_ATTRIBUTES debug bit is 0. A debug enclave lets the host read enclave memory. |
-| 7 | `tee_mrseam_mrtd` | MRTD and MRSEAM match configured measurement policy allowlists. Skipped when no allowlist is configured. |
+| 7 | `tee_measurement` | MRTD and MRSEAM match configured measurement policy allowlists. Skipped when no allowlist is configured. |
 | 8 | `tee_hardware_config` | RTMR[0] matches the hardware config allowlist. Skipped when no allowlist is configured. |
 | 9 | `tee_boot_config` | RTMR[1] and RTMR[2] match the boot config allowlists. Skipped when no allowlist is configured. |
 | 10 | `signing_key_present` | Enclave ECDH public key present in response. Required for E2EE key exchange. |
@@ -149,7 +149,7 @@ Verifies the TEE gateway itself (`cloud-api.near.ai`), in addition to the model 
 | 33 | `gateway_tee_cert_chain` | Gateway certificate chain verifies against Intel SGX/TDX root CA. |
 | 34 | `gateway_tee_quote_signature` | ECDSA signature over the gateway TDX quote body is valid. |
 | 35 | `gateway_tee_debug_disabled` | Gateway TD_ATTRIBUTES debug bit is 0 (production enclave). |
-| 36 | `gateway_tee_mrseam_mrtd` | Gateway MRTD and MRSEAM match configured measurement policy allowlists. |
+| 36 | `gateway_tee_measurement` | Gateway MRTD and MRSEAM match configured measurement policy allowlists. |
 | 37 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches the hardware config allowlist. |
 | 38 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match the boot config allowlists. |
 | 39 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binds `sha256(signing_address ‖ tls_fingerprint)` — same scheme as NEAR AI Direct. |

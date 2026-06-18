@@ -908,7 +908,7 @@ Nitro). The rename mapping:
 | `tdx_cert_chain`          | `tee_cert_chain`       | TDX, Nitro             |
 | `tdx_quote_signature`     | `tee_quote_signature`  | TDX, SEV-SNP, Nitro   |
 | `tdx_debug_disabled`      | `tee_debug_disabled`   | TDX, Nitro             |
-| `tdx_mrseam_mrtd`         | `tee_mrseam_mrtd`      | TDX (MRTD/MRSEAM), Nitro (PCR0) |
+| `tdx_mrseam_mrtd`         | `tee_measurement`      | TDX (MRTD/MRSEAM), Nitro (PCR0) |
 | `tdx_hardware_config`     | `tee_hardware_config`  | TDX (RTMR0), Nitro (PCR1) |
 | `tdx_boot_config`         | `tee_boot_config`      | TDX (RTMR1/2), Nitro (PCR2) |
 | `tdx_reportdata_binding`  | `tee_reportdata_binding` | TDX, Nitro (public_key binding) |
@@ -933,7 +933,7 @@ rename later. Option (a) is preferred for consistency.
 | `tee_cert_chain`         | Certificate chain validates to AWS Nitro root      |
 | `tee_quote_signature`    | COSE_Sign1 ECDSA-P384 signature verifies           |
 | `tee_debug_disabled`     | PCR0 is NOT all-zeros (not debug mode)             |
-| `tee_mrseam_mrtd`        | PCR0 matches measurement allowlist                 |
+| `tee_measurement`        | PCR0 matches measurement allowlist                 |
 | `signing_key_present`    | X25519 `public_key` present in attestation doc     |
 | `tee_reportdata_binding` | Attested public_key matches key exchange public_key |
 | `e2ee_capable`           | E2EE material (session key) successfully derived   |
@@ -1130,7 +1130,7 @@ Add them to `KnownFactors`. The rename folds them into `tee_*` later.
 - `TestBuildReportNitroBlocked` — Verify `Blocked()` when Nitro signature fails
 - `TestBuildReportNitroPass` — Verify all Nitro factors pass with valid input
 - `TestBuildReportNitroDebugMode` — Verify `tee_debug_disabled` fails
-- `TestBuildReportNitroPCRMismatch` — Verify `tee_mrseam_mrtd` fails
+- `TestBuildReportNitroPCRMismatch` — Verify `tee_measurement` fails
 - `TestBuildReportMixedTDXNitro` — Verify only one TEE type evaluated (mutual exclusion)
 - Counter consistency: `Passed + Failed + Skipped == len(Factors)`
 

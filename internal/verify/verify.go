@@ -76,8 +76,9 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		}()
 	}
 
-	// Build a per-call verifier so concurrent Run calls don't race on a global.
+	// Build per-call verifiers so concurrent Run calls don't race on a global.
 	verifier := attestation.NewTDXVerifier(opts.Offline, attestation.NewCollateralGetter(client))
+	sevVerifier := attestation.NewSEVVerifier(opts.Offline, attestation.NewSEVCertGetter(client))
 
 	// Inject shared client into attester for capture/replay.
 	type clientSetter interface{ SetClient(*http.Client) }
@@ -93,6 +94,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	}
 
 	tdxResult := verifyTDX(ctx, raw, nonce, opts.ProviderName, verifier)
+	sevResult := verifySEV(ctx, raw, nonce, opts.ProviderName, sevVerifier)
 	nv := opts.NVIDIAVerifier
 	if nv == nil {
 		nv = attestation.DefaultNVIDIAVerifier()
@@ -147,6 +149,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		GatewayPolicy:     mergedGWPolicy,
 		SupplyChainPolicy: supplyChainPolicy(opts.ProviderName),
 		TDX:               tdxResult,
+		SEV:               sevResult,
 		Nvidia:            nvidiaResult,
 		NvidiaNRAS:        nrasResult,
 		PoC:               pocResult,

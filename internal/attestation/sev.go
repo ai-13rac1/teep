@@ -103,6 +103,17 @@ type SEVVerifyResult struct {
 
 	// CurrentTCB contains the TCB version components from the report.
 	CurrentTCB SEVTCBVersion
+
+	// OnlineVerified is true when AMD KDS was contacted and the report
+	// signature and VCEK cert chain were verified against the AMD root.
+	OnlineVerified bool
+
+	// ReportDataBindingErr is non-nil if REPORTDATA does not match the
+	// expected binding. Set by the provider's ReportDataVerifier.
+	ReportDataBindingErr error
+
+	// ReportDataBindingDetail describes the verified binding on success.
+	ReportDataBindingDetail string
 }
 
 // Guest policy minimums.
@@ -254,6 +265,8 @@ func VerifySEVReportOnline(ctx context.Context, report []byte, getter trust.HTTP
 		result.CertChainErr = err
 		result.SignatureErr = err
 		slog.DebugContext(ctx, "SEV-SNP online verification failed", "err", err)
+	} else {
+		result.OnlineVerified = true
 	}
 
 	return result

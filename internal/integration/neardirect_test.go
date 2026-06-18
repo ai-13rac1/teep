@@ -148,7 +148,7 @@ func assertNeardirectReport(t *testing.T, report *attestation.VerificationReport
 		"tee_quote_present",
 		"tee_quote_structure",
 		"tee_debug_disabled",
-		"tee_mrseam_mrtd",
+		"tee_measurement",
 		"signing_key_present",
 		"tee_reportdata_binding",
 		"nvidia_payload_present",
