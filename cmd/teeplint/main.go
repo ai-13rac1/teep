@@ -391,7 +391,8 @@ func checkUsesFormatDetect(r *result, p *providerInfo, fd *ast.FuncDecl) {
 	r.failf("%s does not call formatdetect.Detect (%s:%d)", fd.Name.Name, filepath.Base(pos.Filename), pos.Line)
 }
 
-// FetchAttestation calls provider.FetchAttestationJSON for bounded reads.
+// FetchAttestation calls provider.FetchAttestationJSON for bounded reads,
+// either directly or via a package-level helper function.
 func checkFetchUsesBoundedRead(r *result, p *providerInfo) {
 	for _, f := range p.files {
 		for _, decl := range f.Decls {
@@ -400,7 +401,7 @@ func checkFetchUsesBoundedRead(r *result, p *providerInfo) {
 				continue
 			}
 			if fd.Name.Name == "FetchAttestation" {
-				if containsCall(fd.Body, "provider", "FetchAttestationJSON") {
+				if containsCallTransitive(fd.Body, "provider", "FetchAttestationJSON", p.files) {
 					pos := p.fset.Position(fd.Name.Pos())
 					r.passf("FetchAttestation uses provider.FetchAttestationJSON (%s:%d)", filepath.Base(pos.Filename), pos.Line)
 					return
@@ -1142,6 +1143,40 @@ func hasFunc(files []*ast.File, name string) bool {
 				continue
 			}
 			if fd.Name.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// containsCallTransitive checks if the AST node contains a call to
+// pkg.funcName, either directly or via a package-level function that
+// itself calls pkg.funcName. Only one level of indirection is checked.
+func containsCallTransitive(node ast.Node, pkg, funcName string, files []*ast.File) bool {
+	if containsCall(node, pkg, funcName) {
+		return true
+	}
+	// Check if node calls any package-level function whose body contains the target call.
+	if node == nil {
+		return false
+	}
+	var calledFuncs []string
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		calledFuncs = append(calledFuncs, ident.Name)
+		return true
+	})
+	for _, name := range calledFuncs {
+		for _, f := range files {
+			if fd := findFunc(f, name); fd != nil && containsCall(fd.Body, pkg, funcName) {
 				return true
 			}
 		}

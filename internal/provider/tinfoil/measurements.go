@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/13rac1/teep/internal/attestation"
 )
@@ -164,6 +165,35 @@ func EnclaveMeasurementsFromSEV(sev *attestation.SEVVerifyResult) *EnclaveMeasur
 		SEVMeasurement: hex.EncodeToString(sev.Measurement),
 		Platform:       "sev-snp",
 	}
+}
+
+// modelRepoMap maps Tinfoil model IDs to their Sigstore GitHub repos.
+// Models not in this map fall back to the constructed convention:
+// tinfoilsh/confidential-{model-slug-after-slash-lowercased}.
+var modelRepoMap = map[string]string{
+	"nomic-ai/nomic-embed-text-v1.5":           "tinfoilsh/confidential-nomic-embed-text",
+	"fixie-ai/ultravox-v0_4-1B-v20250115":      "tinfoilsh/confidential-audio-processing",
+	"mistralai/Mistral-Small-3.1-24B-Instruct": "tinfoilsh/confidential-voxtral-small-24b",
+	"Qwen/Qwen3-VL-30B":                        "tinfoilsh/confidential-qwen3-vl-30b",
+	"Qwen/Qwen3-TTS":                           "tinfoilsh/confidential-qwen3-tts",
+}
+
+// RepoForModel returns the Sigstore GitHub repo for a given model ID.
+// Uses a known mapping table, falling back to the naming convention
+// "tinfoilsh/confidential-{slug}" where slug is the lowercased part after
+// the org prefix (e.g. "meta-llama/Llama-4-Scout" → "tinfoilsh/confidential-llama-4-scout").
+// If the constructed repo doesn't exist, SigstoreVerifier.FetchAndVerify
+// will fail closed.
+func RepoForModel(model string) string {
+	if repo, ok := modelRepoMap[model]; ok {
+		return repo
+	}
+	// Convention: take the part after "/" (or the whole string), lowercase it.
+	slug := model
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		slug = model[i+1:]
+	}
+	return "tinfoilsh/confidential-" + strings.ToLower(slug)
 }
 
 // hexEqual compares two hex strings constant-time after normalization.

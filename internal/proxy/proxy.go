@@ -768,28 +768,34 @@ func fromConfig(
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
 		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
-		p.SigstoreRepo = "tinfoilsh/confidential-model-router"
+		p.SigstoreRepoForModel = func(_ string) string {
+			return "tinfoilsh/confidential-model-router"
+		}
 		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 		p.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
 			return "inference.tinfoil.sh", true
 		}
 	case "tinfoil_v3_direct":
 		resolver := tinfoil.NewDirectResolver(cp.APIKey, offline)
-		// Direct provider routes API traffic through the router; attestation
-		// verifies the per-model inference enclave. Dynamic per-model routing
-		// (sending traffic directly to *.inference.tinfoil.sh) requires EHBP
-		// proxy integration and is not yet implemented.
-		p.BaseURL = tinfoil.DefaultBaseURL
+		p.BaseURL = tinfoil.DefaultBaseURL // fallback for model discovery
 		p.ChatPath = "/v1/chat/completions"
 		p.EmbeddingsPath = "/v1/embeddings"
 		p.AudioPath = "/v1/audio/transcriptions"
 		p.ResponsesPath = "/v1/responses"
 		p.SpeechPath = "/v1/audio/speech"
-		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.Attester = tinfoil.NewDirectAttester(resolver, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
 		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		p.SigstoreRepoForModel = tinfoil.RepoForModel
+		p.BaseURLForModel = func(ctx context.Context, model string) (string, error) {
+			d, err := resolver.Resolve(ctx, model)
+			if err != nil {
+				return "", fmt.Errorf("tinfoil direct: resolve model %q: %w", model, err)
+			}
+			return "https://" + d, nil
+		}
 		p.ModelLister = provider.NewModelLister(tinfoil.DefaultBaseURL, cp.APIKey, config.NewAttestationClient(offline))
 		p.SPKIDomainForModel = func(ctx context.Context, model string) (string, bool) {
 			d, err := resolver.Resolve(ctx, model)
@@ -864,7 +870,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
 	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult)
-	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov)
+	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov, upstreamModel)
 
 	totalDur := time.Since(totalStart)
 	slog.InfoContext(ctx, "verification complete",
@@ -1107,8 +1113,13 @@ func (s *Server) verifyTinfoilSupplyChain(
 	tdxResult *attestation.TDXVerifyResult,
 	sevResult *attestation.SEVVerifyResult,
 	prov *provider.Provider,
+	upstreamModel string,
 ) (*attestation.TinfoilSupplyChainResult, time.Duration) {
-	if raw.BackendFormat != attestation.FormatTinfoil || prov.SigstoreRepo == "" {
+	if raw.BackendFormat != attestation.FormatTinfoil || prov.SigstoreRepoForModel == nil {
+		return nil, 0
+	}
+	sigstoreRepo := prov.SigstoreRepoForModel(upstreamModel)
+	if sigstoreRepo == "" {
 		return nil, 0
 	}
 	start := time.Now()
@@ -1136,15 +1147,15 @@ func (s *Server) verifyTinfoilSupplyChain(
 
 	// Sigstore DSSE bundle verification.
 	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(s.cfg.Offline))
-	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, prov.SigstoreRepo)
+	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, sigstoreRepo)
 	if err != nil {
 		result.SigstoreErr = err
 		slog.WarnContext(ctx, "Tinfoil Sigstore verification failed",
-			"repo", prov.SigstoreRepo, "err", err)
+			"repo", sigstoreRepo, "err", err)
 		return result, time.Since(start)
 	}
 	result.SigstoreVerified = true
-	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", prov.SigstoreRepo, predicateType)
+	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", sigstoreRepo, predicateType)
 
 	// Parse code measurements from the verified predicate.
 	if predicateType != tinfoil.PredicateMultiPlatform {
@@ -2302,7 +2313,16 @@ func (s *Server) doUpstreamRoundtrip(
 	contentType string,
 	endpoint e2ee.EndpointType,
 ) (*upstreamResult, error) {
-	upstreamURL := prov.BaseURL + endpointPath
+	baseURL := prov.BaseURL
+	if prov.BaseURLForModel != nil {
+		resolved, err := prov.BaseURLForModel(ctx, upstreamModel)
+		if err != nil {
+			return &upstreamResult{}, &httpError{http.StatusBadGateway, "model_resolution_failed",
+				fmt.Errorf("resolve upstream URL for model %q: %w", upstreamModel, err)}
+		}
+		baseURL = resolved
+	}
+	upstreamURL := baseURL + endpointPath
 	upstreamTimeout := upstreamStreamTimeout
 	if !stream {
 		upstreamTimeout = upstreamNonStreamTimeout

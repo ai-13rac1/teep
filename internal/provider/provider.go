@@ -212,10 +212,15 @@ type Provider struct {
 	// determined (the proxy must fail closed in that case).
 	SPKIDomainForModel func(ctx context.Context, model string) (string, bool)
 
-	// SigstoreRepo is the GitHub repo for Tinfoil Sigstore supply chain
-	// verification (e.g. "tinfoilsh/confidential-model-router"). Empty for
-	// non-Sigstore providers.
-	SigstoreRepo string
+	// BaseURLForModel resolves the upstream base URL for a specific model.
+	// When set, overrides BaseURL for upstream requests. Nil means use BaseURL.
+	BaseURLForModel func(ctx context.Context, model string) (string, error)
+
+	// SigstoreRepoForModel returns the GitHub repo for Tinfoil Sigstore
+	// supply chain verification of a specific model. Nil for non-Sigstore
+	// providers. For cloud (router) providers, returns a static repo.
+	// For direct providers, returns a per-model repo.
+	SigstoreRepoForModel func(model string) string
 
 	// SupplyChainPolicy defines the allowed container image repos for this
 	// provider. May be nil if the provider has no policy.

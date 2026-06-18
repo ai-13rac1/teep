@@ -46,9 +46,48 @@ func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
 // SetClient replaces the HTTP client used for attestation fetches.
 func (a *Attester) SetClient(c *http.Client) { a.client = c }
 
-// FetchAttestation fetches a V3 attestation document from Tinfoil.
+// FetchAttestation fetches a V3 attestation document from the static base URL.
 func (a *Attester) FetchAttestation(ctx context.Context, _ string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
-	u, err := url.Parse(a.baseURL + attestationPath)
+	return fetchAndVerifyAttestation(ctx, a.client, a.baseURL, a.apiKey, nonce)
+}
+
+// DirectAttester fetches attestation from per-model inference enclaves,
+// resolving each model to its dedicated domain via the DirectResolver.
+type DirectAttester struct {
+	resolver *DirectResolver
+	apiKey   string
+	client   *http.Client
+}
+
+// NewDirectAttester returns an attester that resolves per-model domains via
+// the DirectResolver and fetches attestation from the resolved enclave.
+func NewDirectAttester(resolver *DirectResolver, apiKey string, offline ...bool) *DirectAttester {
+	return &DirectAttester{
+		resolver: resolver,
+		apiKey:   apiKey,
+		client:   config.NewAttestationClient(len(offline) > 0 && offline[0]),
+	}
+}
+
+// SetClient replaces the HTTP client used for attestation fetches.
+func (a *DirectAttester) SetClient(c *http.Client) { a.client = c }
+
+// FetchAttestation resolves the model to a per-model domain and fetches
+// attestation from that enclave's well-known endpoint.
+func (a *DirectAttester) FetchAttestation(ctx context.Context, model string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
+	domain, err := a.resolver.Resolve(ctx, model)
+	if err != nil {
+		return nil, fmt.Errorf("tinfoil direct: resolve model %q: %w", model, err)
+	}
+	baseURL := "https://" + domain
+	slog.DebugContext(ctx, "tinfoil direct: resolved model domain", "model", model, "domain", domain)
+	return fetchAndVerifyAttestation(ctx, a.client, baseURL, a.apiKey, nonce)
+}
+
+// fetchAndVerifyAttestation fetches a V3 attestation document from the given
+// base URL, parses it, verifies the nonce and envelope signature.
+func fetchAndVerifyAttestation(ctx context.Context, client *http.Client, baseURL, apiKey string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
+	u, err := url.Parse(baseURL + attestationPath)
 	if err != nil {
 		return nil, fmt.Errorf("tinfoil: parse attestation URL: %w", err)
 	}
@@ -56,8 +95,8 @@ func (a *Attester) FetchAttestation(ctx context.Context, _ string, nonce attesta
 	q.Set("nonce", nonce.Hex())
 	u.RawQuery = q.Encode()
 
-	slog.DebugContext(ctx, "tinfoil: fetching attestation", "url_path", u.Path)
-	body, err := provider.FetchAttestationJSON(ctx, a.client, u.String(), a.apiKey, maxBodySize)
+	slog.DebugContext(ctx, "tinfoil: fetching attestation", "url", u.String())
+	body, err := provider.FetchAttestationJSON(ctx, client, u.String(), apiKey, maxBodySize)
 	if err != nil {
 		return nil, fmt.Errorf("tinfoil: fetch attestation: %w", err)
 	}
