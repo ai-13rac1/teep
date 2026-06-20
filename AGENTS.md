@@ -86,7 +86,7 @@ Failing closed is a FEATURE, not a BUG. It is more important to protect confiden
 
 ### Always Ensure Concurrency Safety
 
-- **No mutable package-level variables.** State that varies per-request or per-provider must live on a struct or be passed as a parameter. A global that is written during request handling will race under concurrent load.
+- **No package-level variables written after init.** State that varies per-request or per-provider must live on a struct or be passed as a parameter.
 - Exported package-level `var` declarations holding security policy or runtime state are forbidden unless they are truly immutable and callers cannot mutate the underlying value. Do not expose maps, slices, or pointers that callers can modify.
 - Prefer dependency injection (constructor parameters, struct fields, function arguments) over globals for anything that could differ between callers.
 - Use `sync.Mutex`/`sync.RWMutex` for protecting shared data structures (caches, maps). Prefer channels for coordination between goroutines. Use `sync.Once` for safe lazy initialization.
