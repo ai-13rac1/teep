@@ -38,6 +38,7 @@ go install github.com/13rac1/teep/cmd/teep@latest
 export VENICE_API_KEY="your-key-here"
 export NEARAI_API_KEY="your-key-here"
 export CHUTES_API_KEY="your-key-here"
+export TINFOIL_API_KEY="your-key-here"
 
 # Start the proxy — all providers with a configured key are active simultaneously
 teep serve
@@ -50,6 +51,7 @@ curl http://127.0.0.1:8337/v1/models | jq '.data[].id'
 # "venice:e2ee-qwen3-5-122b-a10b"
 # "neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct"
 # "chutes:deepseek-ai/DeepSeek-V3-0324-TEE"
+# "tinfoil_v3_cloud:llama3-3-70b"
 # ...
 ```
 
@@ -63,6 +65,7 @@ resp = client.chat.completions.create(
     model="venice:e2ee-qwen3-5-122b-a10b",
     # model="neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct",
     # model="chutes:deepseek-ai/DeepSeek-V3-0324-TEE",
+    # model="tinfoil_v3_cloud:llama3-3-70b",
     messages=[{"role": "user", "content": "Hello from a TEE"}],
 )
 print(resp.choices[0].message.content)
@@ -72,7 +75,7 @@ print(resp.choices[0].message.content)
 
 Before forwarding your request, teep asks three questions:
 
-1. **Is the hardware real?** — The server proves it's running on genuine Intel and NVIDIA hardware. A fake server can't forge this proof.
+1. **Is the hardware real?** — The server proves it's running on genuine Intel TDX or AMD SEV-SNP hardware. A fake server can't forge this proof.
 
 2. **Is the encryption real?** — The encryption key was generated inside the verified hardware. The provider cannot intercept it.
 
@@ -88,7 +91,7 @@ Run a standalone check against any configured provider:
 teep verify venice --model e2ee-qwen3-5-122b-a10b
 ```
 
-Teep checks up to 29 factors across hardware, encryption, and supply chain, then prints which pass, fail, or skip. Factors that skip are typically optional policy checks not configured for your setup. Factors that fail are known current limitations — see [attestation gaps](docs/attestation_gaps/) for details.
+Teep checks up to 44 factors across hardware, encryption, and supply chain, then prints which pass, fail, or skip. Factors that skip are typically optional policy checks not configured for your setup. Factors that fail are known current limitations — see [attestation gaps](docs/attestation_gaps/) for details.
 
 Exits with code 1 if any enforced factor fails. For the full factor list, see [Verification Factors](#verification-factors).
 
@@ -119,6 +122,8 @@ Yes. Teep is open source under AGPL-3.0. Dual licensing is available for commerc
 | [NanoGPT](https://nano-gpt.com) | TEE attestation with Intel TDX + NVIDIA GPU |
 | [Chutes](https://chutes.ai) | End-to-end encryption (ML-KEM-768 + ChaCha20-Poly1305) with multi-instance failover |
 | [Phala Cloud](https://phala.network) | Format-agnostic gateway supporting Chutes and dStack attestation backends |
+| [Tinfoil](https://tinfoil.sh) (Cloud) | End-to-end encryption (HPKE X25519 + AES-256-GCM) via Tinfoil's model router |
+| [Tinfoil](https://tinfoil.sh) (Direct) | End-to-end encryption (HPKE X25519 + AES-256-GCM) directly to per-model enclaves |
 
 See [README_ADVANCED.md](README_ADVANCED.md) for cryptographic details.
 
@@ -126,7 +131,7 @@ See [README_ADVANCED.md](README_ADVANCED.md) for cryptographic details.
 
 ### Tier 1: Core Attestation
 
-Is the hardware genuine? These checks verify the TDX quote is present, properly signed by Intel, and not from a debug enclave.
+Is the hardware genuine? These checks verify the TDX quote (or SEV-SNP report) is present, properly signed, and not from a debug enclave.
 
 <details>
 <summary>10 factors</summary>
@@ -134,9 +139,9 @@ Is the hardware genuine? These checks verify the TDX quote is present, properly 
 | # | Factor | Description |
 |---|--------|-------------|
 | 1 | `nonce_match` | Attestation response nonce matches submitted nonce |
-| 2 | `tee_quote_present` | Attestation includes an Intel TDX quote |
-| 3 | `tee_quote_structure` | TDX quote parses as valid QuoteV4 |
-| 4 | `tee_cert_chain` | Certificate chain verifies against Intel root CA |
+| 2 | `tee_quote_present` | Attestation includes a hardware quote (Intel TDX or AMD SEV-SNP) |
+| 3 | `tee_quote_structure` | Hardware quote parses as valid QuoteV4 or SEV-SNP report |
+| 4 | `tee_cert_chain` | Certificate chain verifies against Intel or AMD root CA |
 | 5 | `tee_quote_signature` | Quote signature valid under attestation key |
 | 6 | `tee_debug_disabled` | TD_ATTRIBUTES debug bit is 0 (production enclave) |
 | 7 | `tee_measurement` | MRTD and MRSEAM match configured measurement policy allowlists |
@@ -174,18 +179,20 @@ Is the encryption bound to the hardware? These checks verify the encryption key 
 Is the software what it claims to be? These checks verify container provenance, deployment manifests, TLS binding, and runtime integrity.
 
 <details>
-<summary>8 factors</summary>
+<summary>10 factors</summary>
 
 | # | Factor | Description |
 |---|--------|-------------|
 | 22 | `tls_key_binding` | TLS certificate key matches attestation document |
 | 23 | `cpu_gpu_chain` | CPU attestation cryptographically binds GPU attestation |
-| 24 | `measured_model_weights` | Attestation proves specific model weights by hash |
-| 25 | `build_transparency_log` | Runtime measurements match an immutable transparency log |
-| 26 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
-| 27 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
-| 28 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
-| 29 | `event_log_integrity` | Event log replayed against TDX RTMRs — proves log is authentic and complete |
+| 24 | `nvswitch_binding` | NVSwitch fabric evidence hash verified in REPORTDATA (multi-GPU NVLink nodes) |
+| 25 | `measured_model_weights` | Attestation proves specific model weights by hash |
+| 26 | `build_transparency_log` | Runtime measurements match an immutable transparency log |
+| 27 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
+| 28 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
+| 29 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
+| 30 | `sigstore_code_verified` | Sigstore DSSE bundle code measurements match live enclave (Tinfoil-specific) |
+| 31 | `event_log_integrity` | Event log replayed against TDX RTMRs — proves log is authentic and complete |
 
 </details>
 
@@ -200,19 +207,19 @@ to the model inference node.
 
 | # | Factor | Description |
 |---|--------|-------------|
-| 30 | `gateway_nonce_match` | Gateway request nonce matches the client nonce |
-| 31 | `gateway_tee_quote_present` | Gateway TDX quote is present |
-| 32 | `gateway_tee_quote_structure` | Gateway TDX quote parses as valid QuoteV4 |
-| 33 | `gateway_tee_cert_chain` | Gateway cert chain verifies against Intel root CA |
-| 34 | `gateway_tee_quote_signature` | Gateway quote signature valid |
-| 35 | `gateway_tee_debug_disabled` | Gateway debug bit is 0 (production enclave) |
-| 36 | `gateway_tee_measurement` | Gateway MRTD and MRSEAM match measurement policy allowlists |
-| 37 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
-| 38 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists |
-| 39 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binding verified |
-| 40 | `gateway_compose_binding` | Gateway sha256(app_compose) matches TDX MRConfigID |
-| 41 | `gateway_cpu_id_registry` | Gateway CPU PPID verified in Proof of Cloud registry |
-| 42 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match quote |
+| 32 | `gateway_nonce_match` | Gateway request nonce matches the client nonce |
+| 33 | `gateway_tee_quote_present` | Gateway TDX quote is present |
+| 34 | `gateway_tee_quote_structure` | Gateway TDX quote parses as valid QuoteV4 |
+| 35 | `gateway_tee_cert_chain` | Gateway cert chain verifies against Intel root CA |
+| 36 | `gateway_tee_quote_signature` | Gateway quote signature valid |
+| 37 | `gateway_tee_debug_disabled` | Gateway debug bit is 0 (production enclave) |
+| 38 | `gateway_tee_measurement` | Gateway MRTD and MRSEAM match measurement policy allowlists |
+| 39 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
+| 40 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists |
+| 41 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binding verified |
+| 42 | `gateway_compose_binding` | Gateway sha256(app_compose) matches TDX MRConfigID |
+| 43 | `gateway_cpu_id_registry` | Gateway CPU PPID verified in Proof of Cloud registry |
+| 44 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match quote |
 
 </details>
 
@@ -229,6 +236,7 @@ For full factor descriptions, run `teep help factors` or see [README_ADVANCED.md
 | `NANOGPT_API_KEY` | NanoGPT API key |
 | `CHUTES_API_KEY` | Chutes API key |
 | `PHALA_API_KEY` | Phala Cloud API key |
+| `TINFOIL_API_KEY` | Tinfoil API key |
 | `TEEP_LISTEN_ADDR` | Listen address (default `127.0.0.1:8337`) |
 | `TEEP_CONFIG` | Path to optional TOML config file |
 

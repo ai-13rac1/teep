@@ -4,7 +4,7 @@ Detailed cryptographic and attestation documentation for security engineers. For
 
 ## Attestation Architecture
 
-Both providers use Intel TDX for CPU attestation and NVIDIA confidential computing for GPU attestation. They differ in how the secure channel between client and TEE is established.
+Most providers use Intel TDX for CPU attestation and NVIDIA confidential computing for GPU attestation. Tinfoil uses AMD SEV-SNP. Providers differ in how the secure channel between client and TEE is established.
 
 ### Venice AI (E2EE)
 
@@ -78,6 +78,33 @@ Phala Cloud's RedPill gateway accepts traffic destined for multiple underlying T
 
 Channel security depends on the detected backend. Chutes backends use ML-KEM-768 E2EE; dStack backends use TLS only.
 
+### Tinfoil Cloud (EHBP via Router)
+
+Tinfoil Cloud routes traffic through a model router at `inference.tinfoil.sh` that runs in an AMD SEV-SNP enclave. The proxy:
+
+1. Fetches attestation from the router's `/enclave/attestation` endpoint with the model name and a client nonce.
+2. Verifies the SEV-SNP attestation report: checks the AMD certificate chain, debug policy, REPORTDATA binding, and TCB version.
+3. Extracts the HPKE X25519 public key from the attestation's `report_data.hpke_key`.
+4. Optionally verifies Sigstore code measurements: fetches the DSSE bundle from the model's GitHub repo and compares the signed code measurement against the live enclave's SEV-SNP MEASUREMENT register.
+5. Creates an EHBP session: generates an ephemeral X25519 keypair, encapsulates against the router's public key.
+6. Encrypts the entire request body using AES-256-GCM with the derived shared secret, framed as chunked EHBP frames (`[4-byte length][AEAD ciphertext]`).
+7. Sends the request with `Ehbp-Encapsulated-Key` header carrying the encapsulated key.
+8. Decrypts the response using `Ehbp-Response-Nonce` header for key derivation.
+
+The router decrypts, forwards to the per-model inference enclave internally, and re-encrypts the response. The EHBP key belongs to the router, not the per-model enclave.
+
+### Tinfoil Direct (EHBP to Enclave)
+
+Tinfoil Direct connects to per-model inference enclaves at `{model-slug}.inference.tinfoil.sh`. The proxy:
+
+1. Resolves the model's enclave domain via the `/v1/models` discovery API.
+2. Fetches attestation directly from the enclave.
+3. Verifies the SEV-SNP report and Sigstore code measurements (same as Cloud).
+4. The EHBP key belongs to the inference enclave itself — no router intermediary.
+5. Encrypts and decrypts using the same EHBP protocol as Cloud.
+
+This provides true end-to-end encryption: the shared secret is derived between the client and the inference enclave, with no intermediary capable of decryption.
+
 ## Provider Comparison
 
 | Provider | Attestation | Channel Security | REPORTDATA Binding |
@@ -88,6 +115,8 @@ Channel security depends on the detected backend. Chutes backends use ML-KEM-768
 | NanoGPT | TDX (dStack) | TLS only | None (dStack format) |
 | Chutes | TDX + GPU evidence | E2EE (ML-KEM-768 + ChaCha20-Poly1305) | `sha256(nonce_hex + e2e_pubkey_base64)` |
 | Phala Cloud | Backend-dependent | Backend-dependent | Backend-dependent |
+| Tinfoil Cloud | SEV-SNP | E2EE (HPKE X25519 + AES-256-GCM) | `sha256(nonce ‖ hpke_key ‖ tls_fp ‖ gpu_hash)` in REPORTDATA |
+| Tinfoil Direct | SEV-SNP | E2EE (HPKE X25519 + AES-256-GCM) | `sha256(nonce ‖ hpke_key ‖ tls_fp ‖ gpu_hash)` in REPORTDATA |
 
 ## Verification Factor Reference
 
@@ -98,9 +127,9 @@ Each factor produces PASS, FAIL, or SKIP. Factors marked `[ENFORCED]` cause the 
 | # | Factor | Description |
 |---|--------|-------------|
 | 1 | `nonce_match` | Attestation response nonce matches submitted nonce. Prevents replay attacks. |
-| 2 | `tee_quote_present` | Attestation includes an Intel TDX quote — the hardware proof. |
-| 3 | `tee_quote_structure` | TDX quote parses as valid QuoteV4. Displays MRTD (SHA-384 hash of VM image). |
-| 4 | `tee_cert_chain` | Certificate chain verifies against Intel SGX/TDX root CA. Proves genuine Intel hardware. |
+| 2 | `tee_quote_present` | Attestation includes a hardware quote (Intel TDX or AMD SEV-SNP). |
+| 3 | `tee_quote_structure` | Hardware quote parses as valid QuoteV4 or SEV-SNP report. Displays MRTD or MEASUREMENT. |
+| 4 | `tee_cert_chain` | Certificate chain verifies against Intel or AMD root CA. Proves genuine hardware. |
 | 5 | `tee_quote_signature` | ECDSA signature over the TDX quote body is valid. Proves the quote hasn't been tampered with. |
 | 6 | `tee_debug_disabled` | TD_ATTRIBUTES debug bit is 0. A debug enclave lets the host read enclave memory. |
 | 7 | `tee_measurement` | MRTD and MRSEAM match configured measurement policy allowlists. Skipped when no allowlist is configured. |
@@ -130,12 +159,14 @@ Each factor produces PASS, FAIL, or SKIP. Factors marked `[ENFORCED]` cause the 
 |---|--------|-------------|
 | 22 | `tls_key_binding` | TLS certificate public key matches attestation document. Without this, a MITM at the provider's load balancer can intercept traffic. |
 | 23 | `cpu_gpu_chain` | CPU (TDX) and GPU (NVIDIA) attestations are cryptographically bound. Without this, attestations could come from different machines. |
-| 24 | `measured_model_weights` | Attestation includes hashes of model weight files. Without this, a compromised provider could load a backdoored model. |
-| 25 | `build_transparency_log` | Runtime measurements match an immutable transparency log. Proves the running code matches an audited source revision. |
-| 26 | `cpu_id_registry` | CPU PPID verified against the Proof of Cloud registry — a vendor-neutral, append-only log of hardware identities verified by alliance members. Uses threshold multisig across Secret Labs, Nillion, and iEx.ec. |
-| 27 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID (encoded as `0x01 + sha256`). Binds the docker-compose deployment manifest to hardware attestation. |
-| 28 | `sigstore_verification` | Container image sha256 digests from docker-compose found in Sigstore transparency log. Proves verifiable CI/CD provenance. |
-| 29 | `event_log_integrity` | TDX event log replayed: `RTMR_new = SHA384(RTMR_old ‖ digest)` starting from 48 zero bytes. All 4 replayed RTMRs match quote. Proves the log is authentic and complete. |
+| 24 | `nvswitch_binding` | NVSwitch fabric evidence hash verified in REPORTDATA. On multi-GPU NVLink nodes, authenticates the inter-GPU communication fabric. Skips when topology does not use NVSwitch. |
+| 25 | `measured_model_weights` | Attestation includes hashes of model weight files. Without this, a compromised provider could load a backdoored model. |
+| 26 | `build_transparency_log` | Runtime measurements match an immutable transparency log. Proves the running code matches an audited source revision. |
+| 27 | `cpu_id_registry` | CPU PPID verified against the Proof of Cloud registry — a vendor-neutral, append-only log of hardware identities verified by alliance members. Uses threshold multisig across Secret Labs, Nillion, and iEx.ec. |
+| 28 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID (encoded as `0x01 + sha256`). Binds the docker-compose deployment manifest to hardware attestation. |
+| 29 | `sigstore_verification` | Container image sha256 digests from docker-compose found in Sigstore transparency log. Proves verifiable CI/CD provenance. |
+| 30 | `sigstore_code_verified` | Tinfoil-specific: Sigstore DSSE bundle code measurements match live enclave's SEV-SNP MEASUREMENT or TDX RTMRs. Skipped for non-Tinfoil providers. |
+| 31 | `event_log_integrity` | TDX event log replayed: `RTMR_new = SHA384(RTMR_old ‖ digest)` starting from 48 zero bytes. All 4 replayed RTMRs match quote. Proves the log is authentic and complete. |
 
 ### Tier 4: Gateway Attestation (nearcloud only)
 
@@ -143,19 +174,19 @@ Verifies the TEE gateway itself (`cloud-api.near.ai`), in addition to the model 
 
 | # | Factor | Description |
 |---|--------|-------------|
-| 30 | `gateway_nonce_match` | Gateway `request_nonce` matches the client nonce. Prevents replay attacks against the gateway. |
-| 31 | `gateway_tee_quote_present` | Gateway TDX quote is present in the attestation response. |
-| 32 | `gateway_tee_quote_structure` | Gateway TDX quote parses as valid QuoteV4. |
-| 33 | `gateway_tee_cert_chain` | Gateway certificate chain verifies against Intel SGX/TDX root CA. |
-| 34 | `gateway_tee_quote_signature` | ECDSA signature over the gateway TDX quote body is valid. |
-| 35 | `gateway_tee_debug_disabled` | Gateway TD_ATTRIBUTES debug bit is 0 (production enclave). |
-| 36 | `gateway_tee_measurement` | Gateway MRTD and MRSEAM match configured measurement policy allowlists. |
-| 37 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches the hardware config allowlist. |
-| 38 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match the boot config allowlists. |
-| 39 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binds `sha256(signing_address ‖ tls_fingerprint)` — same scheme as NEAR AI Direct. |
-| 40 | `gateway_compose_binding` | Gateway `sha256(app_compose)` matches TDX MRConfigID. |
-| 41 | `gateway_cpu_id_registry` | Gateway CPU PPID verified against the Proof of Cloud registry. |
-| 42 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match the gateway TDX quote. |
+| 32 | `gateway_nonce_match` | Gateway `request_nonce` matches the client nonce. Prevents replay attacks against the gateway. |
+| 33 | `gateway_tee_quote_present` | Gateway TDX quote is present in the attestation response. |
+| 34 | `gateway_tee_quote_structure` | Gateway TDX quote parses as valid QuoteV4. |
+| 35 | `gateway_tee_cert_chain` | Gateway certificate chain verifies against Intel SGX/TDX root CA. |
+| 36 | `gateway_tee_quote_signature` | ECDSA signature over the gateway TDX quote body is valid. |
+| 37 | `gateway_tee_debug_disabled` | Gateway TD_ATTRIBUTES debug bit is 0 (production enclave). |
+| 38 | `gateway_tee_measurement` | Gateway MRTD and MRSEAM match configured measurement policy allowlists. |
+| 39 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches the hardware config allowlist. |
+| 40 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match the boot config allowlists. |
+| 41 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binds `sha256(signing_address ‖ tls_fingerprint)` — same scheme as NEAR AI Direct. |
+| 42 | `gateway_compose_binding` | Gateway `sha256(app_compose)` matches TDX MRConfigID. |
+| 43 | `gateway_cpu_id_registry` | Gateway CPU PPID verified against the Proof of Cloud registry. |
+| 44 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match the gateway TDX quote. |
 
 ## TOML Configuration
 
@@ -181,6 +212,15 @@ e2ee = false
 base_url = "https://nano-gpt.com/api"
 api_key_env = "NANOGPT_API_KEY"
 e2ee = false
+
+[providers.tinfoil_v3_cloud]
+base_url = "https://inference.tinfoil.sh"
+api_key_env = "TINFOIL_API_KEY"
+e2ee = true
+
+[providers.tinfoil_v3_direct]
+api_key_env = "TINFOIL_API_KEY"
+e2ee = true
 
 [policy]
 enforce = [
