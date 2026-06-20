@@ -26,6 +26,10 @@ Teep works with any OpenAI-compatible app. Change the base URL to `http://127.0.
 
 [Aider](https://aider.chat) · [Cline](https://cline.bot) · [Opencode](https://opencode.ai)
 
+## Supported Providers
+
+[Venice AI](https://venice.ai) · [NEAR AI](https://near.ai) · [Chutes](https://chutes.ai) · [Tinfoil](https://tinfoil.sh) · [Phala Cloud](https://phala.network) · [NanoGPT](https://nano-gpt.com)
+
 ## Quick Start
 
 Binary releases coming soon. For now, requires Go 1.25+.
@@ -112,7 +116,7 @@ Teep runs entirely on your machine. Your prompts never pass through a teep serve
 **Is this free?**
 Yes. Teep is open source under AGPL-3.0. Dual licensing is available for commercial use.
 
-## Supported Providers
+## Provider Details
 
 | Provider | What teep does |
 |----------|---------------|
