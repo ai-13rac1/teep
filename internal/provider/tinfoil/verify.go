@@ -318,11 +318,12 @@ func isAllZeros(b []byte) bool {
 
 // tcbSVNGTE returns true if a >= b byte-by-byte (each byte is an independent component).
 func tcbSVNGTE(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
 	result := 1
 	for i := range a {
-		if a[i] < b[i] {
-			result = 0
-		}
+		result &= subtle.ConstantTimeLessOrEq(int(b[i]), int(a[i]))
 	}
 	return result == 1
 }
