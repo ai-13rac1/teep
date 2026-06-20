@@ -126,6 +126,19 @@ func supplyChainPolicy(name string) *attestation.SupplyChainPolicy {
 	}
 }
 
+func inapplicableFactors(providerName string) attestation.InapplicableFactors {
+	switch providerName {
+	case "venice", "neardirect", "nearcloud", "nanogpt", "phalacloud":
+		return attestation.DefaultInapplicableFactors()
+	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
+		return tinfoil.InapplicableFactors()
+	case "chutes":
+		return chutes.InapplicableFactors()
+	default:
+		return attestation.DefaultInapplicableFactors()
+	}
+}
+
 // e2eeEnabledByDefault reports whether the named provider has E2EE enabled
 // by default in config.go's applyAPIKeyEnv.
 func e2eeEnabledByDefault(name string) bool {

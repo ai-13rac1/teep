@@ -50,7 +50,7 @@ func buildVerifyTestReport(provider, model string) *attestation.VerificationRepo
 		{Name: "cpu_id_registry", Status: attestation.Fail, Detail: "no CPU ID registry check", Tier: attestation.TierSupplyChain},
 	}
 
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	enforcedFailed, allowedFailed := 0, 0
 	for _, f := range factors {
 		switch f.Status {
@@ -65,19 +65,22 @@ func buildVerifyTestReport(provider, model string) *attestation.VerificationRepo
 			}
 		case attestation.Skip:
 			skipped++
+		case attestation.NotApplicable:
+			notApplicable++
 		}
 	}
 
 	return &attestation.VerificationReport{
-		Provider:       provider,
-		Model:          model,
-		Timestamp:      time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
-		Factors:        factors,
-		Passed:         passed,
-		Failed:         failed,
-		Skipped:        skipped,
-		EnforcedFailed: enforcedFailed,
-		AllowedFailed:  allowedFailed,
+		Provider:           provider,
+		Model:              model,
+		Timestamp:          time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		Factors:            factors,
+		Passed:             passed,
+		Failed:             failed,
+		Skipped:            skipped,
+		NotApplicableCount: notApplicable,
+		EnforcedFailed:     enforcedFailed,
+		AllowedFailed:      allowedFailed,
 	}
 }
 
@@ -124,8 +127,8 @@ func TestFormatReport_StatusIcons(t *testing.T) {
 	if !strings.Contains(out, "\u2717") { // ✗ fail
 		t.Error("fail icon ✗ not found in output")
 	}
-	if !strings.Contains(out, "?") { // ? skip
-		t.Error("skip icon ? not found in output")
+	if !strings.Contains(out, "- ") { // - skip (hyphen followed by space)
+		t.Error("skip icon - not found in output")
 	}
 }
 
@@ -302,7 +305,8 @@ func TestStatusIcon(t *testing.T) {
 	}{
 		{attestation.Pass, "\u2713"},
 		{attestation.Fail, "\u2717"},
-		{attestation.Skip, "?"},
+		{attestation.Skip, "-"},
+		{attestation.NotApplicable, "\u2014"},
 		{attestation.Status(99), "?"},
 	}
 	for _, tc := range tests {

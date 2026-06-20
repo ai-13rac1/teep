@@ -166,6 +166,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		GatewayCompose:    gatewayCompose,
 		GatewayEventLog:   raw.GatewayEventLog,
 		E2EETest:          e2eeResult,
+		Inapplicable:      inapplicableFactors(opts.ProviderName),
 	})
 
 	return report, nil
@@ -325,9 +326,12 @@ func FormatReport(r *attestation.VerificationReport) string {
 		}
 		icon := statusIcon(f.Status)
 		line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
-		if f.Enforced {
+		switch {
+		case f.Status == attestation.NotApplicable:
+			// no enforcement tag for N/A factors
+		case f.Enforced:
 			line += "  [ENFORCED]"
-		} else {
+		default:
 			line += "  [ALLOWED]"
 		}
 		b.WriteString(line)
@@ -335,10 +339,14 @@ func FormatReport(r *attestation.VerificationReport) string {
 	}
 	b.WriteString("\n")
 
+	total := r.Passed + r.Failed + r.Skipped
 	fmt.Fprintf(&b, "Score: %d/%d passed, %d skipped, %d failed",
-		r.Passed, r.Passed+r.Failed+r.Skipped, r.Skipped, r.Failed)
+		r.Passed, total, r.Skipped, r.Failed)
 	if r.Failed > 0 {
 		fmt.Fprintf(&b, " (%d enforced, %d allowed)", r.EnforcedFailed, r.AllowedFailed)
+	}
+	if r.NotApplicableCount > 0 {
+		fmt.Fprintf(&b, ", %d n/a", r.NotApplicableCount)
 	}
 	b.WriteString("\n")
 	b.WriteString("\nRun 'teep help tiers' for scoring or 'teep help factors' for details.\n")
@@ -353,9 +361,12 @@ func statusIcon(s attestation.Status) string {
 		return "\u2713" // ✓
 	case attestation.Fail:
 		return "\u2717" // ✗
-	default:
-		return "?"
+	case attestation.Skip:
+		return "-"
+	case attestation.NotApplicable:
+		return "\u2014" // — (em dash)
 	}
+	return "?"
 }
 
 // metadataDisplayOrder defines the order and labels for the metadata block.

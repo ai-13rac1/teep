@@ -280,6 +280,18 @@ var factorRegistry = []factorInfo{
 			"the TDX quote.",
 	},
 	{
+		Name:    "nvswitch_binding",
+		Tier:    3,
+		Summary: "NVSwitch fabric verification",
+		Description: "On multi-GPU nodes with NVLink (e.g. 8x Hopper), NVSwitch " +
+			"authenticates the inter-GPU communication fabric. When present, " +
+			"the NVSwitch evidence hash is verified in REPORTDATA alongside " +
+			"GPU evidence. This factor passes when NVSwitch evidence hash is " +
+			"bound in REPORTDATA, skips when the GPU topology does not use " +
+			"NVSwitch, and is N/A for providers that do not expose NVSwitch " +
+			"evidence.",
+	},
+	{
 		Name:    "measured_model_weights",
 		Tier:    3,
 		Summary: "No model weight hashes",

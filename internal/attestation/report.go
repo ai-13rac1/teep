@@ -25,6 +25,10 @@ const (
 	Fail
 	// Skip means the factor was not applicable or data was unavailable.
 	Skip
+	// NotApplicable means the factor does not apply to this provider's
+	// attestation format. Distinct from Skip: NotApplicable factors are
+	// excluded from the score denominator and never promoted to Fail.
+	NotApplicable
 )
 
 // String returns a human-readable label for the status.
@@ -36,6 +40,8 @@ func (s Status) String() string {
 		return "FAIL"
 	case Skip:
 		return "SKIP"
+	case NotApplicable:
+		return "N/A"
 	default:
 		return "UNKNOWN"
 	}
@@ -68,17 +74,18 @@ type FactorResult struct {
 // VerificationReport holds the factor-by-factor results of an attestation
 // verification run. Produced by BuildReport.
 type VerificationReport struct {
-	Title          string            `json:"title,omitempty"` // header label; defaults to "Attestation Report"
-	Provider       string            `json:"provider"`
-	Model          string            `json:"model"`
-	Timestamp      time.Time         `json:"timestamp"`
-	Factors        []FactorResult    `json:"factors"`
-	Passed         int               `json:"passed"`
-	Failed         int               `json:"failed"`
-	Skipped        int               `json:"skipped"`
-	EnforcedFailed int               `json:"enforced_failed"`
-	AllowedFailed  int               `json:"allowed_failed"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	Title              string            `json:"title,omitempty"` // header label; defaults to "Attestation Report"
+	Provider           string            `json:"provider"`
+	Model              string            `json:"model"`
+	Timestamp          time.Time         `json:"timestamp"`
+	Factors            []FactorResult    `json:"factors"`
+	Passed             int               `json:"passed"`
+	Failed             int               `json:"failed"`
+	Skipped            int               `json:"skipped"`
+	EnforcedFailed     int               `json:"enforced_failed"`
+	AllowedFailed      int               `json:"allowed_failed"`
+	NotApplicableCount int               `json:"not_applicable"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
 }
 
 // Blocked returns true if any enforced factor has failed. When Blocked is true,
@@ -173,7 +180,7 @@ func (r *VerificationReport) MarkE2EEFailed(detail string) {
 // recomputeCounters recalculates all summary counters from the Factors slice.
 // Called after any post-build factor mutation to prevent counter desync.
 func (r *VerificationReport) recomputeCounters() {
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	enforcedFailed, allowedFailed := 0, 0
 	for _, f := range r.Factors {
 		switch f.Status {
@@ -188,6 +195,8 @@ func (r *VerificationReport) recomputeCounters() {
 			}
 		case Skip:
 			skipped++
+		case NotApplicable:
+			notApplicable++
 		}
 	}
 	r.Passed = passed
@@ -195,6 +204,7 @@ func (r *VerificationReport) recomputeCounters() {
 	r.Skipped = skipped
 	r.EnforcedFailed = enforcedFailed
 	r.AllowedFailed = allowedFailed
+	r.NotApplicableCount = notApplicable
 }
 
 // DefaultAllowFail lists the factor names that are allowed to fail without
@@ -270,11 +280,7 @@ var ChutesDefaultAllowFail = []string{
 	"tls_key_binding",
 	"cpu_gpu_chain",
 	"measured_model_weights",
-	"build_transparency_log",
 	"cpu_id_registry",
-	"compose_binding",
-	"sigstore_verification",
-	"event_log_integrity",
 }
 
 // TinfoilDefaultAllowFail is the tinfoil-specific default allow_fail list.
@@ -299,7 +305,7 @@ var KnownFactors = []string{
 	"signing_key_present",
 	"tee_reportdata_binding", "intel_pcs_collateral", "tee_tcb_current",
 	"tee_tcb_not_revoked", "nvidia_payload_present", "nvidia_signature", "nvidia_claims",
-	"nvidia_nonce_client_bound", "nvidia_nras_verified", FactorE2EECapable, FactorE2EEUsable, "tls_key_binding", "cpu_gpu_chain",
+	"nvidia_nonce_client_bound", "nvidia_nras_verified", FactorE2EECapable, FactorE2EEUsable, "tls_key_binding", "cpu_gpu_chain", "nvswitch_binding",
 	"measured_model_weights", "build_transparency_log", "cpu_id_registry",
 	"compose_binding", "sigstore_verification", "sigstore_code_verified", "event_log_integrity",
 	// Gateway factors (nearcloud only).
@@ -440,6 +446,10 @@ type TinfoilSupplyChainResult struct {
 	// GPUHashBound is true when GPU evidence hash was verified in REPORTDATA.
 	GPUHashBound bool
 
+	// NVSwitchHashBound is true when NVSwitch evidence hash was verified in
+	// REPORTDATA. Only set for multi-GPU Hopper configs with NVLink.
+	NVSwitchHashBound bool
+
 	// TDXPolicyErr is the combined error from Tinfoil-specific TDX policy checks.
 	// Nil when platform is SEV-SNP or all checks pass.
 	TDXPolicyErr    error
@@ -501,6 +511,10 @@ type ReportInput struct {
 	// for actual requests. When true and E2EETest is nil, e2ee_usable
 	// reports "pending live test" instead of "not configured".
 	E2EEConfigured bool
+
+	// Inapplicable maps factor names to reasons they don't apply to this
+	// provider's attestation format. Nil means all factors are applicable.
+	Inapplicable InapplicableFactors
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +549,14 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		}
 	}
 
+	// Override inapplicable factors before Skip→Fail promotion.
+	for i := range factors {
+		if reason, ok := in.Inapplicable[factors[i].Name]; ok {
+			factors[i].Status = NotApplicable
+			factors[i].Detail = reason
+		}
+	}
+
 	// Promote Skip → Fail for enforced factors.
 	// Deferred factors (e.g. e2ee_usable) stay Skip because they can only
 	// be evaluated via a live roundtrip — promoting them to Fail would
@@ -547,7 +569,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		}
 	}
 
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	enforcedFailed, allowedFailed := 0, 0
 	for _, f := range factors {
 		switch f.Status {
@@ -562,20 +584,23 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			}
 		case Skip:
 			skipped++
+		case NotApplicable:
+			notApplicable++
 		}
 	}
 
 	return &VerificationReport{
-		Provider:       in.Provider,
-		Model:          in.Model,
-		Timestamp:      time.Now(),
-		Factors:        factors,
-		Passed:         passed,
-		Failed:         failed,
-		Skipped:        skipped,
-		EnforcedFailed: enforcedFailed,
-		AllowedFailed:  allowedFailed,
-		Metadata:       buildMetadata(in),
+		Provider:           in.Provider,
+		Model:              in.Model,
+		Timestamp:          time.Now(),
+		Factors:            factors,
+		Passed:             passed,
+		Failed:             failed,
+		Skipped:            skipped,
+		EnforcedFailed:     enforcedFailed,
+		AllowedFailed:      allowedFailed,
+		NotApplicableCount: notApplicable,
+		Metadata:           buildMetadata(in),
 	}
 }
 
@@ -606,6 +631,7 @@ func buildEvaluators(includeGateway bool) []evaluatorFunc {
 		// Tier 3: Supply Chain & Channel Integrity
 		evalTLSKeyBinding,
 		evalCPUGPUChain,
+		evalNVSwitchBinding,
 		evalMeasuredModelWeights,
 		evalBuildTransparencyLog,
 		evalCPUIDRegistry,
@@ -1328,6 +1354,24 @@ func evalCPUGPUChain(in *ReportInput) []FactorResult {
 	}
 	return factor(TierSupplyChain, "cpu_gpu_chain", Fail, "CPU-GPU attestation not bound")
 }
+func evalNVSwitchBinding(in *ReportInput) []FactorResult {
+	if in.TinfoilSC == nil {
+		return factor(TierSupplyChain, "nvswitch_binding", Skip,
+			"Tinfoil supply chain not verified")
+	}
+	if !in.TinfoilSC.GPUHashBound {
+		return factor(TierSupplyChain, "nvswitch_binding", Skip,
+			"no GPU evidence; NVSwitch check not applicable")
+	}
+	if in.TinfoilSC.NVSwitchHashBound {
+		return factor(TierSupplyChain, "nvswitch_binding", Pass,
+			"NVSwitch evidence hash verified in REPORTDATA")
+	}
+	// GPUHashBound but no NVSwitch — topology doesn't require it (< 8 GPUs
+	// or Blackwell-only). This is expected, not a failure.
+	return factor(TierSupplyChain, "nvswitch_binding", Skip,
+		"NVSwitch not expected for this GPU topology")
+}
 func evalMeasuredModelWeights(in *ReportInput) []FactorResult {
 	// Tinfoil: dm-verity root hash is part of the Sigstore-verified code
 	// measurement. If Sigstore + code measurements pass, model weights are
@@ -1404,10 +1448,6 @@ func buildTransparencyNoRekor(in *ReportInput, scPolicy *SupplyChainPolicy) Fact
 		}
 		return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Skip,
 			Detail: fmt.Sprintf("compose hash present (%s) but no Rekor provenance fetched", hashPreview)}
-	}
-	if in.Raw.BackendFormat == FormatChutes {
-		return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Skip,
-			Detail: "chutes attestation does not include container image metadata; supply chain verification is validator-side only"}
 	}
 	return FactorResult{Tier: TierSupplyChain, Name: "build_transparency_log", Status: Fail,
 		Detail: "no build transparency log"}
@@ -1639,9 +1679,6 @@ func evalCPUIDRegistry(in *ReportInput) []FactorResult {
 func evalComposeBinding(in *ReportInput) []FactorResult {
 	switch {
 	case in.Compose == nil || !in.Compose.Checked:
-		if in.Raw.BackendFormat == FormatChutes {
-			return factor(TierSupplyChain, "compose_binding", Skip, "chutes uses cosign image admission + IMA, not docker-compose; compose binding not applicable")
-		}
 		return factor(TierSupplyChain, "compose_binding", Skip, "no app_compose in attestation response")
 	case in.Compose.Err != nil:
 		return factor(TierSupplyChain, "compose_binding", Fail, fmt.Sprintf("compose binding failed: %v", in.Compose.Err))
@@ -1651,9 +1688,6 @@ func evalComposeBinding(in *ReportInput) []FactorResult {
 }
 func evalSigstoreVerification(in *ReportInput) []FactorResult {
 	if len(in.Sigstore) == 0 {
-		if in.Raw.BackendFormat == FormatChutes {
-			return factor(TierSupplyChain, "sigstore_verification", Skip, "chutes attestation does not include container image digests; cosign verification is validator-side only")
-		}
 		return factor(TierSupplyChain, "sigstore_verification", Skip, "no image digests to verify")
 	}
 
@@ -1692,7 +1726,7 @@ func evalSigstoreVerification(in *ReportInput) []FactorResult {
 func evalSigstoreCodeVerified(in *ReportInput) []FactorResult {
 	if in.TinfoilSC == nil {
 		return factor(TierSupplyChain, "sigstore_code_verified", Skip,
-			"not a Tinfoil provider; Sigstore code verification not applicable")
+			"Tinfoil supply chain verification not performed")
 	}
 	if in.TinfoilSC.SigstoreErr != nil {
 		return factor(TierSupplyChain, "sigstore_code_verified", Fail,
@@ -1719,9 +1753,6 @@ func evalSigstoreCodeVerified(in *ReportInput) []FactorResult {
 
 func evalEventLogIntegrity(in *ReportInput) []FactorResult {
 	if len(in.Raw.EventLog) == 0 {
-		if in.Raw.BackendFormat == FormatChutes {
-			return factor(TierSupplyChain, "event_log_integrity", Skip, "chutes performs RTMR verification validator-side against a golden baseline; event log not exposed to clients")
-		}
 		return factor(TierSupplyChain, "event_log_integrity", Skip, "no event log entries in attestation response")
 	}
 	if in.TDX == nil || in.TDX.ParseErr != nil {

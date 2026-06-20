@@ -939,6 +939,21 @@ func checkProxyWiring(r *result, providers []string) {
 	checkFromConfigFieldAssignment(r, fd, providers, "Attester")
 	checkFromConfigFieldAssignment(r, fd, providers, "ReportDataVerifier")
 	checkFromConfigFieldAssignment(r, fd, providers, "SupplyChainPolicy")
+
+	// inapplicableForProvider() switch has case for each provider.
+	inapFunc := findFunc(f, "inapplicableForProvider")
+	if inapFunc == nil {
+		r.failf("inapplicableForProvider function not found in %s", path)
+	} else {
+		cases := collectSwitchCases(inapFunc.Body)
+		for _, prov := range providers {
+			if hasPrefixMatch(cases, prov) {
+				r.passf("inapplicableForProvider switch includes %q", prov)
+			} else {
+				r.failf("inapplicableForProvider switch missing %q", prov)
+			}
+		}
+	}
 	fmt.Println()
 }
 
@@ -1003,6 +1018,21 @@ func checkCLIMain(r *result, providers []string) {
 				r.passf("supplyChainPolicy switch includes %q", prov)
 			} else {
 				r.failf("supplyChainPolicy switch missing %q", prov)
+			}
+		}
+	}
+
+	// inapplicableFactors() switch has case for each provider.
+	inapFunc := findFunc(f, "inapplicableFactors")
+	if inapFunc == nil {
+		r.failf("inapplicableFactors function not found")
+	} else {
+		cases := collectSwitchCases(inapFunc.Body)
+		for _, prov := range providers {
+			if hasPrefixMatch(cases, prov) {
+				r.passf("inapplicableFactors switch includes %q", prov)
+			} else {
+				r.failf("inapplicableFactors switch missing %q", prov)
 			}
 		}
 	}

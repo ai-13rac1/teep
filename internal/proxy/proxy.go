@@ -912,6 +912,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Rekor:             sc.Rekor,
 		TinfoilSC:         tinfoilSC,
 		E2EEConfigured:    prov.E2EE,
+		Inapplicable:      inapplicableForProvider(prov.Name),
 	})
 	return report, raw
 }
@@ -987,7 +988,7 @@ func verifyNVIDIA(
 	}
 	if len(raw.GPUEvidence) > 0 {
 		slog.DebugContext(ctx, "NVIDIA GPU direct verification starting", "provider", provName, "gpus", len(raw.GPUEvidence))
-		serverNonce, err := attestation.ParseNonce(raw.Nonce)
+		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
 		if err != nil {
 			return &attestation.NvidiaVerifyResult{
 				SignatureErr: fmt.Errorf("parse server nonce: %w", err),
@@ -1029,6 +1030,19 @@ func (s *Server) verifyNVIDIAOnline(
 		return result, dur
 	}
 	return nil, 0
+}
+
+func inapplicableForProvider(provName string) attestation.InapplicableFactors {
+	switch provName {
+	case "venice", "neardirect", "nearcloud", "nanogpt", "phalacloud":
+		return attestation.DefaultInapplicableFactors()
+	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
+		return tinfoil.InapplicableFactors()
+	case "chutes":
+		return chutesProvider.InapplicableFactors()
+	default:
+		return attestation.DefaultInapplicableFactors()
+	}
 }
 
 // verifyPoC runs the Proof of Cloud check against quorum peers.
@@ -1134,6 +1148,7 @@ func (s *Server) verifyTinfoilSupplyChain(
 		bindingDetail = sevResult.ReportDataBindingDetail
 	}
 	result.GPUHashBound = strings.Contains(bindingDetail, "gpu_bound=true")
+	result.NVSwitchHashBound = strings.Contains(bindingDetail, "nvswitch_bound=true")
 
 	// TDX policy checks.
 	if tdxResult != nil && tdxResult.ParseErr == nil {

@@ -78,6 +78,7 @@ func buildSelfCheckReport(info *debug.BuildInfo, ok bool) *attestation.Verificat
 
 	passed, failed, skipped := 0, 0, 0
 	enforcedFailed, allowedFailed := 0, 0
+	notApplicable := 0
 	for _, f := range factors {
 		switch f.Status {
 		case attestation.Pass:
@@ -91,6 +92,8 @@ func buildSelfCheckReport(info *debug.BuildInfo, ok bool) *attestation.Verificat
 			}
 		case attestation.Skip:
 			skipped++
+		case attestation.NotApplicable:
+			notApplicable++
 		}
 	}
 
@@ -100,17 +103,18 @@ func buildSelfCheckReport(info *debug.BuildInfo, ok bool) *attestation.Verificat
 	}
 
 	return &attestation.VerificationReport{
-		Title:          "Self-Check Report",
-		Provider:       "teep",
-		Model:          model,
-		Timestamp:      time.Now(),
-		Factors:        factors,
-		Passed:         passed,
-		Failed:         failed,
-		Skipped:        skipped,
-		EnforcedFailed: enforcedFailed,
-		AllowedFailed:  allowedFailed,
-		Metadata:       buildSelfCheckMetadata(info, ok),
+		Title:              "Self-Check Report",
+		Provider:           "teep",
+		Model:              model,
+		Timestamp:          time.Now(),
+		Factors:            factors,
+		Passed:             passed,
+		Failed:             failed,
+		Skipped:            skipped,
+		NotApplicableCount: notApplicable,
+		EnforcedFailed:     enforcedFailed,
+		AllowedFailed:      allowedFailed,
+		Metadata:           buildSelfCheckMetadata(info, ok),
 	}
 }
 

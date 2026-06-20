@@ -126,8 +126,8 @@ func TestBuildReportFactorCount(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	if len(report.Factors) != 30 {
-		t.Errorf("factor count: got %d, want 30", len(report.Factors))
+	if len(report.Factors) != 31 {
+		t.Errorf("factor count: got %d, want 31", len(report.Factors))
 	}
 }
 
@@ -137,13 +137,13 @@ func TestBuildReportTotals(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	total := report.Passed + report.Failed + report.Skipped
+	total := report.Passed + report.Failed + report.Skipped + report.NotApplicableCount
 	if total != len(report.Factors) {
 		t.Errorf("tallies sum to %d, want %d", total, len(report.Factors))
 	}
 
 	// Recount manually.
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	for _, f := range report.Factors {
 		switch f.Status {
 		case Pass:
@@ -152,12 +152,71 @@ func TestBuildReportTotals(t *testing.T) {
 			failed++
 		case Skip:
 			skipped++
+		case NotApplicable:
+			notApplicable++
 		}
 	}
-	if report.Passed != passed || report.Failed != failed || report.Skipped != skipped {
-		t.Errorf("tally mismatch: got P=%d/F=%d/S=%d, manual count P=%d/F=%d/S=%d",
-			report.Passed, report.Failed, report.Skipped, passed, failed, skipped)
+	if report.Passed != passed || report.Failed != failed || report.Skipped != skipped || report.NotApplicableCount != notApplicable {
+		t.Errorf("tally mismatch: got P=%d/F=%d/S=%d/NA=%d, manual count P=%d/F=%d/S=%d/NA=%d",
+			report.Passed, report.Failed, report.Skipped, report.NotApplicableCount,
+			passed, failed, skipped, notApplicable)
 	}
+}
+
+// TestBuildReportInapplicableOverride verifies the applicability override.
+func TestBuildReportInapplicableOverride(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+
+	inapplicable := InapplicableFactors{
+		"nvidia_payload_present":    "test: not applicable",
+		"nvidia_signature":          "test: not applicable",
+		"nvidia_claims":             "test: not applicable",
+		"nvidia_nonce_client_bound": "test: not applicable",
+		"nvidia_nras_verified":      "test: not applicable",
+	}
+
+	report := BuildReport(&ReportInput{
+		Provider:     "venice",
+		Model:        "test-model",
+		Raw:          raw,
+		Nonce:        nonce,
+		AllowFail:    DefaultAllowFail,
+		Inapplicable: inapplicable,
+	})
+
+	// All 5 nvidia factors must be NotApplicable.
+	for _, name := range []string{
+		"nvidia_payload_present", "nvidia_signature", "nvidia_claims",
+		"nvidia_nonce_client_bound", "nvidia_nras_verified",
+	} {
+		f := findFactor(t, report, name)
+		if f.Status != NotApplicable {
+			t.Errorf("factor %s: got %s, want NotApplicable", name, f.Status)
+		}
+		if f.Detail != "test: not applicable" {
+			t.Errorf("factor %s detail: got %q, want %q", name, f.Detail, "test: not applicable")
+		}
+	}
+
+	// NotApplicable factors must not appear in the score denominator.
+	scoreDenom := report.Passed + report.Failed + report.Skipped
+	if report.NotApplicableCount != 5 {
+		t.Errorf("NotApplicableCount: got %d, want 5", report.NotApplicableCount)
+	}
+	if scoreDenom+report.NotApplicableCount != len(report.Factors) {
+		t.Errorf("score denominator (%d) + N/A (%d) != total factors (%d)",
+			scoreDenom, report.NotApplicableCount, len(report.Factors))
+	}
+
+	// Non-inapplicable factors must retain their original status.
+	f := findFactor(t, report, "nonce_match")
+	if f.Status != Pass {
+		t.Errorf("nonce_match: got %s, want Pass (should not be overridden)", f.Status)
+	}
+
+	// The above assertions prove NotApplicable factors cannot contribute to
+	// Blocked() — Blocked() checks Status == Fail && Enforced, and N/A != Fail.
 }
 
 // TestBuildReportEnforcedFlags verifies Enforced is set for factors NOT in AllowFail.
@@ -1446,11 +1505,10 @@ func TestEvalMeasuredModelWeights(t *testing.T) {
 }
 
 func TestEvalComposeBinding_ChutesFormat(t *testing.T) {
+	// Chutes-specific detail removed — handled by applicability layer.
+	// Evaluator now returns generic message for absent compose data.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
-	f := assertSingleFactor(t, evalComposeBinding(&ReportInput{Raw: raw, Compose: nil}), Skip)
-	if !strings.Contains(f.Detail, "chutes") {
-		t.Errorf("detail %q should mention 'chutes'", f.Detail)
-	}
+	assertSingleFactor(t, evalComposeBinding(&ReportInput{Raw: raw, Compose: nil}), Skip)
 }
 
 func TestEvalComposeBinding(t *testing.T) {
@@ -1524,11 +1582,9 @@ func TestEvalSigstoreVerification(t *testing.T) {
 }
 
 func TestEvalSigstoreVerification_ChutesFormat(t *testing.T) {
+	// Chutes-specific detail removed — handled by applicability layer.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
-	f := assertSingleFactor(t, evalSigstoreVerification(&ReportInput{Raw: raw}), Skip)
-	if !strings.Contains(f.Detail, "chutes") {
-		t.Errorf("detail %q should mention 'chutes'", f.Detail)
-	}
+	assertSingleFactor(t, evalSigstoreVerification(&ReportInput{Raw: raw}), Skip)
 }
 
 func TestEvalSigstoreVerification_FailWithErr(t *testing.T) {
@@ -2355,6 +2411,8 @@ func TestEvalCPUIDRegistry_Fallthrough(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestEvalEventLogIntegrity_ChutesSkip(t *testing.T) {
+	// Chutes-specific check removed — handled by applicability layer.
+	// Without event log entries, evaluator returns generic Skip.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
 	assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw}), Skip)
 }
@@ -2442,14 +2500,14 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 		GatewayNonce:    gatewayNonce,
 	})
 
-	// Base 30 + 13 gateway factors = 43
+	// Base 31 + 13 gateway factors = 44
 	// Gateway factors: gateway_nonce_match, gateway_tee_quote_present,
 	// gateway_tee_quote_structure, gateway_tee_cert_chain, gateway_tee_quote_signature,
 	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
 	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 43 {
-		t.Errorf("factor count with gateway: got %d, want 43", len(report.Factors))
+	if len(report.Factors) != 44 {
+		t.Errorf("factor count with gateway: got %d, want 44", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}
@@ -3163,12 +3221,14 @@ func TestBuildTransparencyNoRekor_WithComposeHash(t *testing.T) {
 }
 
 func TestBuildTransparencyNoRekor_Chutes(t *testing.T) {
+	// Chutes format check removed from evaluator — handled by applicability layer.
+	// Without applicability, the evaluator returns Fail for no Rekor data.
 	in := &ReportInput{
 		Raw: &RawAttestation{BackendFormat: FormatChutes},
 	}
 	result := buildTransparencyNoRekor(in, nil)
-	if result.Status != Skip {
-		t.Errorf("status = %v, want Skip", result.Status)
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
 	}
 	t.Logf("detail: %s", result.Detail)
 }

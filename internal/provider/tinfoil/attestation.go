@@ -151,6 +151,34 @@ func parseV3Response(body []byte) (*attestation.RawAttestation, *v3Response, err
 		TinfoilNVSwitchEvidenceHash: resp.ReportData.NVSwitchEvidenceHash,
 	}
 
+	// Parse GPU evidence for independent per-GPU SPDM verification.
+	if len(resp.GPU) > 0 {
+		var gpuEvs v3GPUEvidences
+		if err := json.Unmarshal(resp.GPU, &gpuEvs); err != nil {
+			return nil, nil, fmt.Errorf("parse GPU evidences: %w", err)
+		}
+		if len(gpuEvs.Evidences) > 0 {
+			// Validate all evidence entries share the same SPDM nonce.
+			nonce := gpuEvs.Evidences[0].Nonce
+			for i := 1; i < len(gpuEvs.Evidences); i++ {
+				if gpuEvs.Evidences[i].Nonce != nonce {
+					return nil, nil, fmt.Errorf("GPU evidence nonce mismatch: gpu[0]=%s, gpu[%d]=%s",
+						truncate(nonce, 16), i, truncate(gpuEvs.Evidences[i].Nonce, 16))
+				}
+			}
+			evidence := make([]attestation.GPUEvidence, len(gpuEvs.Evidences))
+			for i, e := range gpuEvs.Evidences {
+				evidence[i] = attestation.GPUEvidence{
+					Arch:        e.Arch,
+					Certificate: e.Certificate,
+					Evidence:    e.Evidence,
+				}
+			}
+			raw.GPUEvidence = evidence
+			raw.GPUNonce = nonce
+		}
+	}
+
 	// Dispatch CPU platform.
 	switch resp.CPU.Platform {
 	case PlatformTDX:

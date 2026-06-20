@@ -46,6 +46,7 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 		Policy:         modelPolicy,
 		AllowFail:      attestation.TinfoilDefaultAllowFail,
 		E2EEConfigured: true,
+		Inapplicable:   tinfoil.InapplicableFactors(),
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
@@ -102,15 +103,21 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 	assertMustFail(t, report, []string{
 		"cpu_gpu_chain",
 		"measured_model_weights",
-	}, "not implemented")
-
-	// Fail: no compose/sigstore/event_log data in SEV-SNP fixture.
-	assertMustFail(t, report, []string{
-		"compose_binding",
-		"sigstore_verification",
 		"sigstore_code_verified",
+		"nvswitch_binding",
+	}, "not implemented / no supply chain data")
+
+	// Not Applicable: factors handled by Tinfoil's applicability layer.
+	for _, name := range []string{
+		"compose_binding",
+		"build_transparency_log",
+		"sigstore_verification",
 		"event_log_integrity",
-	}, "no data in SEV-SNP fixture")
+		"nvidia_nonce_client_bound",
+		"nvidia_nras_verified",
+	} {
+		assertFactorStatus(t, report, name, attestation.NotApplicable)
+	}
 
 	if report.Passed < 13 {
 		t.Errorf("expected at least 13 passing factors, got %d", report.Passed)
