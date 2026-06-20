@@ -314,7 +314,7 @@ func TestNewPreparer(t *testing.T) {
 
 func TestPreparer_PrepareRequest(t *testing.T) {
 	p := NewPreparer("test-key-123")
-	req, _ := http.NewRequest(http.MethodPost, "http://localhost/v1/chat/completions", nil)
+	req, _ := http.NewRequest(http.MethodPost, "http://localhost/v1/chat/completions", http.NoBody)
 	if err := p.PrepareRequest(req, nil, nil, false, ""); err != nil {
 		t.Fatalf("PrepareRequest: %v", err)
 	}

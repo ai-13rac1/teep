@@ -1856,7 +1856,7 @@ func TestRewriteModelInBody_Audio_InvalidBoundaryIsBadRequest(t *testing.T) {
 func TestRequestNormalizationError_Unwrap(t *testing.T) {
 	inner := errors.New("bad input")
 	e := requestNormalizationError{statusCode: http.StatusBadRequest, err: inner}
-	if got := e.Unwrap(); got != inner {
+	if got := e.Unwrap(); !errors.Is(got, inner) {
 		t.Errorf("Unwrap() = %v, want %v", got, inner)
 	}
 }

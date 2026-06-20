@@ -3621,7 +3621,7 @@ func TestDecryptNonStreamResponse_AudioPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(result) != string(body) {
+	if !bytes.Equal(result, body) {
 		t.Errorf("audio endpoint should passthrough, got %s", result)
 	}
 }
