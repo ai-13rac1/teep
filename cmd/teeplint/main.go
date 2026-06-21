@@ -605,6 +605,7 @@ func checkProjectWideBans(r *result) {
 	checkNoJSONUnmarshalCLI(r, files, names, fset)
 	checkNoCryptoTLSImport(r, files, names)
 	checkNoHTTPClientLiteral(r, files, names)
+	checkNoPlainHTTPTestServer(r, fset)
 	fmt.Println()
 }
 
@@ -732,6 +733,110 @@ func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
 	}
 	for _, v := range violations {
 		r.failf("http.Client{} literal in %s (use tlsct.NewHTTPClient)", v)
+	}
+}
+
+// plainHTTPTestServerAllowlist lists _test.go files that are permitted to use
+// httptest.NewServer. Each entry was audited to confirm it does not exercise
+// attestation-fetch TLS channel binding (the class of bug that caused the
+// tinfoil fallback).
+//
+// THIS LIST IS FROZEN. No additions are permitted — only subtractions as
+// files are converted to httptest.NewTLSServer. New test files MUST use
+// httptest.NewTLSServer.
+//
+// To use httptest.NewTLSServer correctly:
+//  1. Create the server with httptest.NewTLSServer(handler).
+//  2. Configure the HTTP client with the test server's certificate pool:
+//     client := srv.Client()
+//     The returned *http.Client trusts the server's self-signed
+//     certificate automatically.
+//  3. If the test needs the live peer SPKI (e.g. attestation channel binding),
+//     extract it from srv.Certificate() and compute SHA-256(SPKI DER) to
+//     match against the attested tls_key_fp / tls_cert_fingerprint.
+//  4. If a custom tls.Config is needed (e.g. custom certificate), use
+//     httptest.NewUnstartedServer, set srv.TLS = &tls.Config{...}, then
+//     call srv.StartTLS().
+//
+// Categories of allowlisted files:
+//   - Attestation metadata fetchers (Rekor, NRAS, JWKS, PoC, SEV, TDX) — no
+//     live TLS peer state to compare.
+//   - Model listers / resolvers — gateway metadata, not attestation endpoints.
+//   - Proxy integration tests — the proxy server itself is HTTP; upstream
+//     mock returns canned JSON.
+var plainHTTPTestServerAllowlist = []string{
+	"internal/attestation/nvidia_test.go",
+	"internal/attestation/poc_test.go",
+	"internal/attestation/rekor_test.go",
+	"internal/attestation/sev_test.go",
+	"internal/attestation/sigstore_test.go",
+	"internal/attestation/tdx_test.go",
+	"internal/provider/chutes/chutes_test.go",
+	"internal/provider/chutes/models_test.go",
+	"internal/provider/chutes/noncepool_test.go",
+	"internal/provider/chutes/resolve_test.go",
+	"internal/provider/fetch_test.go",
+	"internal/provider/models_test.go",
+	"internal/provider/nanogpt/nanogpt_test.go",
+	"internal/provider/nearcloud/nearcloud_test.go",
+	"internal/provider/nearcloud/pinned_test.go",
+	"internal/provider/neardirect/endpoints_test.go",
+	"internal/provider/neardirect/nearai_test.go",
+	"internal/provider/neardirect/pinned_test.go",
+	"internal/provider/phalacloud/phalacloud_test.go",
+	"internal/provider/tinfoil/resolver_test.go",
+	"internal/provider/tinfoil/sigstore_test.go",
+	"internal/provider/venice/models_test.go",
+	"internal/provider/venice/venice_test.go",
+	"internal/proxy/mock_near_pinned_test.go",
+	"internal/proxy/proxy_test.go",
+	"internal/proxy/relay_internal_test.go",
+	"internal/verify/attest_test.go",
+	"internal/verify/e2ee_test.go",
+}
+
+// checkNoPlainHTTPTestServer walks all _test.go files under internal/ and cmd/
+// and flags httptest.NewServer calls that are not in the allowlist. This
+// enforces a blanket ban on plain-HTTP test servers with an escape hatch for
+// audited files. New test files must use httptest.NewTLSServer or be added to
+// the allowlist with justification.
+func checkNoPlainHTTPTestServer(r *result, fset *token.FileSet) {
+	dirs := []string{"internal", "cmd"}
+	var violations []string
+
+	for _, root := range dirs {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			if isAllowedPath(path, plainHTTPTestServerAllowlist) {
+				return nil
+			}
+			f, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				r.failf("parse %s: %v", path, parseErr)
+				return nil
+			}
+			if containsCall(f, "httptest", "NewServer") {
+				violations = append(violations, path)
+			}
+			return nil
+		})
+		if err != nil {
+			r.failf("walk %s: %v", root, err)
+			return
+		}
+	}
+
+	if len(violations) == 0 {
+		r.passf("no httptest.NewServer in non-allowlisted test files (use NewTLSServer)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("httptest.NewServer in %s (use NewTLSServer or add to allowlist with justification)", v)
 	}
 }
 

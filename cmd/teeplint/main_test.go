@@ -1306,6 +1306,48 @@ func TestCheckProjectWideBans_Pass(t *testing.T) {
 	}
 }
 
+func TestCheckNoPlainHTTPTestServer_PassOnRepoRoot(t *testing.T) {
+	repoRoot(t)
+	fset := token.NewFileSet()
+	r := newResult()
+	checkNoPlainHTTPTestServer(r, fset)
+	if r.failed != 0 {
+		t.Errorf("expected no failures on repo root, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoPlainHTTPTestServer_AllowlistContainsKnownFiles(t *testing.T) {
+	// Verify that every _test.go file in the repo that uses httptest.NewServer
+	// is in the allowlist. This is a sanity check — the real enforcement is
+	// checkNoPlainHTTPTestServer itself.
+	repoRoot(t)
+	dirs := []string{"internal", "cmd"}
+	fset := token.NewFileSet()
+	for _, root := range dirs {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			f, perr := parser.ParseFile(fset, path, nil, 0)
+			if perr != nil {
+				return nil //nolint:nilerr // skip unparseable files; don't abort the walk
+			}
+			if containsCall(f, "httptest", "NewServer") {
+				if !isAllowedPath(path, plainHTTPTestServerAllowlist) {
+					t.Errorf("file %s uses httptest.NewServer but is not in allowlist", path)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
 func TestCheckMakefile_Pass(t *testing.T) {
 	repoRoot(t)
 	providers, err := discoverProviders()
