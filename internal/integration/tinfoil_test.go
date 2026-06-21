@@ -38,15 +38,16 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 	// Build report via the full pipeline.
 	modelPolicy, _ := defaults.MeasurementDefaults("tinfoil_v3_cloud")
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:       "tinfoil_v3_cloud",
-		Model:          env.manifest.Model,
-		Raw:            raw,
-		Nonce:          env.nonce,
-		SEV:            sevResult,
-		Policy:         modelPolicy,
-		AllowFail:      attestation.TinfoilDefaultAllowFail,
-		E2EEConfigured: true,
-		Inapplicable:   tinfoil.InapplicableFactors(),
+		Provider:               "tinfoil_v3_cloud",
+		Model:                  env.manifest.Model,
+		Raw:                    raw,
+		Nonce:                  env.nonce,
+		SEV:                    sevResult,
+		Policy:                 modelPolicy,
+		AllowFail:              attestation.TinfoilDefaultAllowFail,
+		E2EEConfigured:         true,
+		Inapplicable:           tinfoil.InapplicableFactors(),
+		ProviderUsesTLSBinding: true,
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
@@ -92,15 +93,16 @@ func TestIntegration_TinfoilDirect_Fixture(t *testing.T) {
 	// Build report via the full pipeline.
 	modelPolicy, _ := defaults.MeasurementDefaults("tinfoil_v3_direct")
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:       "tinfoil_v3_direct",
-		Model:          env.manifest.Model,
-		Raw:            raw,
-		Nonce:          env.nonce,
-		SEV:            sevResult,
-		Policy:         modelPolicy,
-		AllowFail:      attestation.TinfoilDefaultAllowFail,
-		E2EEConfigured: true,
-		Inapplicable:   tinfoil.InapplicableFactors(),
+		Provider:               "tinfoil_v3_direct",
+		Model:                  env.manifest.Model,
+		Raw:                    raw,
+		Nonce:                  env.nonce,
+		SEV:                    sevResult,
+		Policy:                 modelPolicy,
+		AllowFail:              attestation.TinfoilDefaultAllowFail,
+		E2EEConfigured:         true,
+		Inapplicable:           tinfoil.InapplicableFactors(),
+		ProviderUsesTLSBinding: true,
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)

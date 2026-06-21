@@ -222,6 +222,13 @@ type Provider struct {
 	// For direct providers, returns a per-model repo.
 	SigstoreRepoForModel func(model string) string
 
+	// UsesTLSBinding declares that this provider performs live TLS channel
+	// binding (comparing the live peer SPKI against an attested fingerprint).
+	// When true, evalTLSKeyBinding fails closed if the attestation's
+	// TLSFingerprint is empty, preventing a future provider from silently
+	// skipping TLS binding. Tinfoil sets this; E2EE-only providers do not.
+	UsesTLSBinding bool
+
 	// SupplyChainPolicy defines the allowed container image repos for this
 	// provider. May be nil if the provider has no policy.
 	SupplyChainPolicy *attestation.SupplyChainPolicy

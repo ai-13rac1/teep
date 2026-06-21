@@ -139,6 +139,19 @@ func inapplicableFactors(providerName string) attestation.InapplicableFactors {
 	}
 }
 
+// providerUsesTLSBinding returns true for providers that perform live TLS
+// channel binding (comparing the live peer SPKI against an attested
+// fingerprint). Tinfoil uses FetchAttestationWithTLS and verifies the live
+// peer SPKI; other providers use E2EE signing-key binding or pinned TLS.
+func providerUsesTLSBinding(providerName string) bool {
+	switch providerName {
+	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
+		return true
+	default:
+		return false
+	}
+}
+
 // e2eeEnabledByDefault reports whether the named provider has E2EE enabled
 // by default in config.go's applyAPIKeyEnv.
 func e2eeEnabledByDefault(name string) bool {

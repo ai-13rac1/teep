@@ -515,6 +515,11 @@ type ReportInput struct {
 	// Inapplicable maps factor names to reasons they don't apply to this
 	// provider's attestation format. Nil means all factors are applicable.
 	Inapplicable InapplicableFactors
+
+	// ProviderUsesTLSBinding declares that the provider performs live TLS
+	// channel binding. When true, evalTLSKeyBinding fails closed if
+	// TLSFingerprint is empty (instead of skipping for E2EE providers).
+	ProviderUsesTLSBinding bool
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1344,12 @@ func evalTLSKeyBinding(in *ReportInput) []FactorResult {
 		}
 		return factor(TierSupplyChain, "tls_key_binding", Pass,
 			fmt.Sprintf("TLS certificate SPKI bound to attestation (%s)", fpPreview))
+	case in.ProviderUsesTLSBinding:
+		// Provider declares live TLS channel binding but the attestation
+		// has no TLSFingerprint. This is a hard failure — a provider that
+		// should bind TLS must not silently skip it.
+		return factor(TierSupplyChain, "tls_key_binding", Fail,
+			"provider declares TLS binding but attestation has no TLS fingerprint")
 	case in.Raw.SigningKey != "":
 		return factor(TierSupplyChain, "tls_key_binding", Skip,
 			"provider uses E2EE key exchange; TLS binding not applicable")

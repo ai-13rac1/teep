@@ -1496,6 +1496,41 @@ func TestEvalTLSKeyBinding(t *testing.T) {
 	}
 }
 
+func TestEvalTLSKeyBinding_ProviderUsesTLSBinding(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+
+	t.Run("fail_when_provider_declares_binding_but_no_fingerprint", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = ""
+		f := assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: true,
+		}), Fail)
+		if !strings.Contains(f.Detail, "declares TLS binding") {
+			t.Errorf("detail %q should mention TLS binding declaration", f.Detail)
+		}
+	})
+
+	t.Run("skip_when_provider_does_not_declare_binding", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = ""
+		assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: false,
+		}), Skip)
+	})
+
+	t.Run("pass_when_provider_declares_binding_and_has_fingerprint", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = "aabbccddee112233445566778899aabb"
+		assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: true,
+		}), Pass)
+	})
+}
+
 func TestEvalCPUGPUChain(t *testing.T) {
 	assertSingleFactor(t, evalCPUGPUChain(&ReportInput{Raw: &RawAttestation{}}), Fail)
 }

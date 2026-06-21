@@ -764,6 +764,7 @@ func fromConfig(
 		p.AudioPath = "/v1/audio/transcriptions"
 		p.ResponsesPath = "/v1/responses"
 		p.SpeechPath = "/v1/audio/speech"
+		p.UsesTLSBinding = true
 		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
@@ -784,6 +785,7 @@ func fromConfig(
 		p.AudioPath = "/v1/audio/transcriptions"
 		p.ResponsesPath = "/v1/responses"
 		p.SpeechPath = "/v1/audio/speech"
+		p.UsesTLSBinding = true
 		p.Attester = tinfoil.NewDirectAttester(resolver, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
@@ -892,27 +894,28 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	ms.lastVerifyMs.Store(totalDur.Milliseconds())
 
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:          prov.Name,
-		Model:             upstreamModel,
-		Raw:               raw,
-		Nonce:             nonce,
-		AllowFail:         config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
-		Policy:            prov.MeasurementPolicy,
-		GatewayPolicy:     prov.GatewayMeasurementPolicy,
-		SupplyChainPolicy: prov.SupplyChainPolicy,
-		ImageRepos:        sc.ImageRepos,
-		DigestToRepo:      sc.DigestToRepo,
-		TDX:               tdxResult,
-		SEV:               sevResult,
-		Nvidia:            nvidiaResult,
-		NvidiaNRAS:        nrasResult,
-		PoC:               pocResult,
-		Compose:           sc.Compose,
-		Sigstore:          sc.Sigstore,
-		Rekor:             sc.Rekor,
-		TinfoilSC:         tinfoilSC,
-		E2EEConfigured:    prov.E2EE,
-		Inapplicable:      inapplicableForProvider(prov.Name),
+		Provider:               prov.Name,
+		Model:                  upstreamModel,
+		Raw:                    raw,
+		Nonce:                  nonce,
+		AllowFail:              config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
+		Policy:                 prov.MeasurementPolicy,
+		GatewayPolicy:          prov.GatewayMeasurementPolicy,
+		SupplyChainPolicy:      prov.SupplyChainPolicy,
+		ImageRepos:             sc.ImageRepos,
+		DigestToRepo:           sc.DigestToRepo,
+		TDX:                    tdxResult,
+		SEV:                    sevResult,
+		Nvidia:                 nvidiaResult,
+		NvidiaNRAS:             nrasResult,
+		PoC:                    pocResult,
+		Compose:                sc.Compose,
+		Sigstore:               sc.Sigstore,
+		Rekor:                  sc.Rekor,
+		TinfoilSC:              tinfoilSC,
+		E2EEConfigured:         prov.E2EE,
+		Inapplicable:           inapplicableForProvider(prov.Name),
+		ProviderUsesTLSBinding: prov.UsesTLSBinding,
 	})
 	return report, raw
 }
