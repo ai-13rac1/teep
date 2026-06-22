@@ -45,6 +45,7 @@ func (l *genericModelLister) ListModels(ctx context.Context) ([]json.RawMessage,
 		return nil, fmt.Errorf("models: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+l.apiKey)
+	SetUserAgent(req)
 
 	resp, err := l.client.Do(req)
 	if err != nil {

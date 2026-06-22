@@ -162,6 +162,7 @@ func (v *NVIDIAVerifier) VerifyNRAS(ctx context.Context, eatPayload string, clie
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	tlsct.SetUserAgent(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -266,6 +267,7 @@ func (v *NVIDIAVerifier) fetchAndCacheJWKS(ctx context.Context, jwksURL string, 
 	if err != nil {
 		return nil, fmt.Errorf("build JWKS request for %s: %w", jwksURL, err)
 	}
+	tlsct.SetUserAgent(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch JWKS from %s: %w", jwksURL, err)

@@ -101,6 +101,7 @@ func testE2EEVenice(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header.Set("X-Venice-Tee-Signing-Algo", "ecdsa")
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEStreamTest(req, session, "venice")
 }
@@ -156,6 +157,7 @@ func testE2EENearAI(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header.Set("X-Encrypt-All-Fields", "true")
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEStreamTest(req, session, label)
 }
@@ -209,6 +211,7 @@ func testE2EEChutes(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header["X-E2E-Path"] = []string{chatPathForProvider("chutes")}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEChutesStreamTest(req, session)
 }
@@ -572,6 +575,7 @@ func testE2EETinfoil(ctx context.Context, raw *attestation.RawAttestation, cp *c
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")
 	req.ContentLength = -1 // force chunked transfer encoding
+	tlsct.SetUserAgent(req)
 
 	return doEHBPStreamTest(req, session)
 }

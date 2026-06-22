@@ -146,6 +146,7 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 	if r.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.apiKey)
 	}
+	provider.SetUserAgent(req)
 
 	resp, err := client.Do(req)
 	if err != nil {

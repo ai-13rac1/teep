@@ -53,6 +53,7 @@ func (l *ModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error)
 		return nil, fmt.Errorf("venice: build models request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+l.apiKey)
+	provider.SetUserAgent(req)
 
 	resp, err := l.client.Do(req)
 	if err != nil {

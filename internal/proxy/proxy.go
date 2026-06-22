@@ -2408,6 +2408,7 @@ func (s *Server) doUpstreamRoundtrip(
 				&httpError{http.StatusInternalServerError, "e2ee_failed", fmt.Errorf("build upstream request: %w", reqErr)}
 		}
 		upstreamReq.Header.Set("Content-Type", contentType)
+		provider.SetUserAgent(upstreamReq)
 
 		if ehbp != nil {
 			upstreamReq.Header.Set("Ehbp-Encapsulated-Key", ehbp.EncapKeyHex())

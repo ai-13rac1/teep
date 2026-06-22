@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/13rac1/teep/internal/tlsct"
 	tdxabi "github.com/google/go-tdx-guest/abi"
 	"github.com/google/go-tdx-guest/pcs"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
@@ -34,6 +35,7 @@ func (g *clientHTTPSGetter) GetContext(ctx context.Context, url string) (header 
 	if err != nil {
 		return nil, nil, err
 	}
+	tlsct.SetUserAgent(req)
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, nil, err

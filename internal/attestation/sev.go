@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/13rac1/teep/internal/tlsct"
 	sevabi "github.com/google/go-sev-guest/abi"
 	"github.com/google/go-sev-guest/kds"
 	pb "github.com/google/go-sev-guest/proto/sevsnp"
@@ -35,6 +36,7 @@ func (g *sevClientHTTPSGetter) GetContext(ctx context.Context, url string) ([]by
 	if err != nil {
 		return nil, err
 	}
+	tlsct.SetUserAgent(req)
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, err

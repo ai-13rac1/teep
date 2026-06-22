@@ -19,6 +19,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/13rac1/teep/internal/tlsct"
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
@@ -26,13 +27,6 @@ import (
 
 // defaultRekorBase is the production Rekor transparency log API URL.
 const defaultRekorBase = "https://rekor.sigstore.dev"
-
-// attestationUserAgent is the User-Agent header sent on outbound requests to
-// external APIs (Rekor, etc.). Rekor may rate-limit or block requests
-// without a User-Agent, causing confusing 403/blocked responses.
-// For example, GitHub requires user agents:
-// https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api?apiVersion=2026-03-10#user-agent
-const attestationUserAgent = "teep/1.0 (+https://github.com/13rac1/teep)"
 
 // rekorLogPublicKeyPEM is the production Rekor transparency log's signing key.
 // This key signs the Signed Entry Timestamp (SET) and checkpoints.
@@ -295,7 +289,7 @@ func (rc *RekorClient) fetchRekorUUIDs(ctx context.Context, digest string) ([]st
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", attestationUserAgent)
+	tlsct.SetUserAgent(req)
 
 	resp, err := rc.httpClient.Do(req)
 	if err != nil {
@@ -331,7 +325,7 @@ func (rc *RekorClient) fetchRekorEntry(ctx context.Context, uuid string) (*rekor
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", attestationUserAgent)
+	tlsct.SetUserAgent(req)
 
 	resp, err := rc.httpClient.Do(req)
 	if err != nil {

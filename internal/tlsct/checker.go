@@ -302,6 +302,7 @@ func (c *Checker) loadLogList(parentCtx context.Context) (*loglist3.LogList, err
 	if err != nil {
 		return nil, err
 	}
+	SetUserAgent(req)
 	resp, err := c.logListHTTP.Do(req)
 	if err != nil {
 		return nil, err
