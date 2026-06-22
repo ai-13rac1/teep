@@ -1,0 +1,12 @@
+{
+  "provider": "tinfoil_v3_direct",
+  "model": "gemma4-31b",
+  "nonce_hex": "a8c5455663ef4951c4a6fef8de2a079934c8e93c67626e7311bf385ba6724c9e",
+  "captured_at": "2026-06-22T23:54:12.647939Z",
+  "duration_ms": 5642,
+  "e2ee": {
+    "attempted": true,
+    "detail": "EHBP X25519: 4 chunks decrypted",
+    "key_type": "x25519-hpke"
+  }
+}

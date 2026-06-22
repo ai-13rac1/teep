@@ -358,7 +358,7 @@ func TestInapplicableFactors(t *testing.T) {
 }
 
 func TestNewDirectAttester(t *testing.T) {
-	resolver := newTestResolver(t, `{"data":[{"id":"test-model"}]}`)
+	resolver := newTestResolver(t, `{"models":{"test-model":{"enclaves":{"test-model.inf10.tinfoil.sh":{"hpke_key":"abc","predicate":"x","tls_key_fp":"def"}}}}}`)
 	da := NewDirectAttester(resolver, "key")
 	if da == nil {
 		t.Fatal("NewDirectAttester returned nil")
@@ -366,7 +366,7 @@ func TestNewDirectAttester(t *testing.T) {
 }
 
 func TestDirectAttester_SetClient(t *testing.T) {
-	resolver := newTestResolver(t, `{"data":[{"id":"test-model"}]}`)
+	resolver := newTestResolver(t, `{"models":{"test-model":{"enclaves":{"test-model.inf10.tinfoil.sh":{"hpke_key":"abc","predicate":"x","tls_key_fp":"def"}}}}}`)
 	da := NewDirectAttester(resolver, "key")
 	client := &http.Client{}
 	da.SetClient(client)
@@ -377,7 +377,7 @@ func TestDirectAttester_SetClient(t *testing.T) {
 
 func TestDirectAttester_FetchAttestation_ResolveFails(t *testing.T) {
 	// Empty model list — no model to resolve.
-	resolver := newTestResolver(t, `{"data":[]}`)
+	resolver := newTestResolver(t, `{"models":{}}`)
 	da := NewDirectAttester(resolver, "key")
 	nonce := attestation.NewNonce()
 	_, err := da.FetchAttestation(context.Background(), "nonexistent-model", nonce)
@@ -387,15 +387,15 @@ func TestDirectAttester_FetchAttestation_ResolveFails(t *testing.T) {
 }
 
 // newTestResolver creates a DirectResolver backed by a TLS test server.
-func newTestResolver(t *testing.T, modelsResponse string) *DirectResolver {
+func newTestResolver(t *testing.T, proxyResponse string) *DirectResolver {
 	t.Helper()
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(modelsResponse))
+		w.Write([]byte(proxyResponse))
 	}))
 	t.Cleanup(ts.Close)
 	r := NewDirectResolver("key", true)
-	r.modelsURL = ts.URL + "/v1/models"
+	r.proxyURL = ts.URL + "/.well-known/tinfoil-proxy"
 	r.client = ts.Client()
 	return r
 }

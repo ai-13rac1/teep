@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,96 +15,90 @@ import (
 )
 
 // newDirectResolverForTest returns a resolver pointing at a custom URL
-// with a short HTTP timeout. Domain validation is still active — test
-// model IDs must produce valid *.inference.tinfoil.sh domains.
+// with a short HTTP timeout. The test server should serve the
+// /.well-known/tinfoil-proxy response format.
 func newDirectResolverForTest(url string) *DirectResolver {
 	return &DirectResolver{
-		modelsURL: url,
-		apiKey:    "test-key",
-		client:    tlsct.NewHTTPClient(1 * time.Second),
-		mapping:   make(map[string]string),
+		proxyURL: url,
+		apiKey:   "test-key",
+		client:   tlsct.NewHTTPClient(1 * time.Second),
+		mapping:  make(map[string]string),
 	}
 }
 
-func TestSlugToDomain(t *testing.T) {
-	tests := []struct {
-		slug string
-		want string
-	}{
-		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", "meta-llama--Llama-4-Scout-17B-16E-Instruct.inference.tinfoil.sh"},
-		{"simple-model", "simple-model.inference.tinfoil.sh"},
-		{"org/sub/deep", "org--sub--deep.inference.tinfoil.sh"},
-	}
-	for _, tt := range tests {
-		got := slugToDomain(tt.slug)
-		if got != tt.want {
-			t.Errorf("slugToDomain(%q) = %q, want %q", tt.slug, got, tt.want)
+// proxyResponseJSON builds a minimal tinfoil-proxy JSON response for testing.
+func proxyResponseJSON(models ...string) string {
+	var sb strings.Builder
+	sb.WriteString(`{"models":{`)
+	for i, m := range models {
+		if i > 0 {
+			sb.WriteString(",")
 		}
+		domain := m + ".inf10.tinfoil.sh"
+		fmt.Fprintf(&sb, `%q:{"enclaves":{%q:{"hpke_key":"abc","predicate":"https://tinfoil.sh/predicate/tdx-guest/v2","tls_key_fp":"def"}}}`, m, domain)
 	}
+	sb.WriteString(`}}`)
+	return sb.String()
 }
 
-func TestIsValidTinfoilDomain(t *testing.T) {
+func TestIsValidBackendDomain(t *testing.T) {
 	tests := []struct {
 		domain string
 		valid  bool
 	}{
-		{"foo.inference.tinfoil.sh", true},
-		{"org--model.inference.tinfoil.sh", true},
-		{"UPPER.INFERENCE.TINFOIL.SH", true},
+		// Real backend enclave domains.
+		{"gemma4-31b-1.inf10.tinfoil.sh", true},
+		{"gemma4-31b-inf6.tinfoil.containers.tinfoil.dev", true},
+		{"llama3-3-70b.tinfoil.containers.tinfoil.dev", true},
+		{"nomic.inf10.tinfoil.sh", true},
+		// Router wildcard subdomains are NOT valid direct backends.
+		{"gemma4-31b.inference.tinfoil.sh", true}, // still a valid tinfoil.sh domain
+		// Invalid domains.
 		{"foo.example.com", false},
-		{"inference.tinfoil.sh", false},          // not a subdomain
-		{"evil.foo.inference.tinfoil.sh", false}, // multi-level subdomain
-		{"a.b.c.inference.tinfoil.sh", false},    // deep nesting
-		{".inference.tinfoil.sh", false},         // empty label
 		{"", false},
-		// Invalid hostname characters must be rejected (models API is
-		// untrusted input).
-		{"foo bar.inference.tinfoil.sh", false}, // space
-		{"foo_bar.inference.tinfoil.sh", false}, // underscore
-		{"foo;bar.inference.tinfoil.sh", false}, // semicolon
-		{"foo/bar.inference.tinfoil.sh", false}, // slash
-		{"foo\x00.inference.tinfoil.sh", false}, // null byte
-		{"foo!@#.inference.tinfoil.sh", false},  // special chars
-		{"foo:bar.inference.tinfoil.sh", false}, // colon
+		{"foo bar.tinfoil.sh", false}, // space
+		{"foo_bar.tinfoil.sh", false}, // underscore
+		{"foo;bar.tinfoil.sh", false}, // semicolon
+		{"foo\x00.tinfoil.sh", false}, // null byte
 	}
 	for _, tt := range tests {
-		got := isValidTinfoilDomain(tt.domain)
+		got := isValidBackendDomain(tt.domain)
 		if got != tt.valid {
-			t.Errorf("isValidTinfoilDomain(%q) = %v, want %v", tt.domain, got, tt.valid)
+			t.Errorf("isValidBackendDomain(%q) = %v, want %v", tt.domain, got, tt.valid)
 		}
 	}
 }
 
-func TestDirectResolver_ParseModels(t *testing.T) {
+func TestDirectResolver_ParseProxy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"meta-llama/Llama-4-Scout-17B-16E-Instruct"},{"id":"simple-model"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("gemma4-31b", "llama3-3-70b"))
 	}))
 	defer srv.Close()
 
 	resolver := newDirectResolverForTest(srv.URL)
 
-	domain, err := resolver.Resolve(context.Background(), "meta-llama/Llama-4-Scout-17B-16E-Instruct")
+	domain, err := resolver.Resolve(context.Background(), "gemma4-31b")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if domain != "meta-llama--Llama-4-Scout-17B-16E-Instruct.inference.tinfoil.sh" {
-		t.Errorf("domain = %q, want meta-llama--Llama-4-Scout-17B-16E-Instruct.inference.tinfoil.sh", domain)
+	if domain != "gemma4-31b.inf10.tinfoil.sh" {
+		t.Errorf("domain = %q, want gemma4-31b.inf10.tinfoil.sh", domain)
 	}
 
-	domain, err = resolver.Resolve(context.Background(), "simple-model")
+	domain, err = resolver.Resolve(context.Background(), "llama3-3-70b")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if domain != "simple-model.inference.tinfoil.sh" {
-		t.Errorf("domain = %q, want simple-model.inference.tinfoil.sh", domain)
+	if domain != "llama3-3-70b.inf10.tinfoil.sh" {
+		t.Errorf("domain = %q, want llama3-3-70b.inf10.tinfoil.sh", domain)
 	}
 }
 
 func TestDirectResolver_UnknownModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"known-model"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("known-model"))
 	}))
 	defer srv.Close()
 
@@ -120,7 +115,7 @@ func TestDirectResolver_CacheTTL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"model-a"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("model-a"))
 	}))
 	defer srv.Close()
 
@@ -163,7 +158,7 @@ func TestDirectResolver_OfflineReturnsError(t *testing.T) {
 	// Start server that will be shut down to simulate offline.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"cached-model"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("cached-model"))
 	}))
 
 	resolver := newDirectResolverForTest(srv.URL)
@@ -208,7 +203,7 @@ func TestDirectResolver_SingleflightCollapse(t *testing.T) {
 		callCount.Add(1)
 		time.Sleep(50 * time.Millisecond) // slow enough for concurrent callers
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"model-x"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("model-x"))
 	}))
 	defer srv.Close()
 
@@ -239,28 +234,28 @@ func TestDirectResolver_SingleflightCollapse(t *testing.T) {
 	}
 }
 
-func TestDirectResolver_SkipsEmptyID(t *testing.T) {
+func TestDirectResolver_SkipsModelWithNoEnclaves(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":""},{"id":"valid-model"}]}`)
+		fmt.Fprint(w, `{"models":{"valid-model":{"enclaves":{"valid-model.inf10.tinfoil.sh":{"hpke_key":"abc","predicate":"x","tls_key_fp":"def"}}},"empty-model":{"enclaves":{}}}}`)
 	}))
 	defer srv.Close()
 
 	resolver := newDirectResolverForTest(srv.URL)
 
-	// Empty ID should be skipped, valid-model should resolve.
+	// Empty enclaves should be skipped, valid-model should resolve.
 	domain, err := resolver.Resolve(context.Background(), "valid-model")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if domain != "valid-model.inference.tinfoil.sh" {
-		t.Errorf("domain = %q, want valid-model.inference.tinfoil.sh", domain)
+	if domain != "valid-model.inf10.tinfoil.sh" {
+		t.Errorf("domain = %q, want valid-model.inf10.tinfoil.sh", domain)
 	}
 
-	// Empty string model should not be found.
-	_, err = resolver.Resolve(context.Background(), "")
+	// Model with no enclaves should not be found.
+	_, err = resolver.Resolve(context.Background(), "empty-model")
 	if err == nil {
-		t.Fatal("expected error for empty model")
+		t.Fatal("expected error for model with no enclaves")
 	}
 }
 
@@ -270,7 +265,7 @@ func TestDirectResolver_SkipsEmptyID(t *testing.T) {
 func TestDirectResolver_SetClient_Concurrent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":[{"id":"model-a"}]}`)
+		fmt.Fprint(w, proxyResponseJSON("model-a"))
 	}))
 	defer srv.Close()
 

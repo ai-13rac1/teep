@@ -194,8 +194,9 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 	env := loadFixture(t, "tinfoil_v3_direct")
 
-	// Direct mode uses the models API base URL (inference.tinfoil.sh) for
-	// both resolver discovery and as the default BaseURL in config.
+	// Direct mode uses the proxy discovery endpoint on inference.tinfoil.sh
+	// to resolve model → backend enclave domain, then fetches attestation
+	// from the resolved enclave.
 	cfg, cp := buildVerifyRunConfig(env.manifest.Provider, "https://inference.tinfoil.sh")
 
 	report, err := verify.Run(context.Background(), &verify.Options{
@@ -214,8 +215,10 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		report.Passed, report.Passed+report.Failed+report.Skipped,
 		report.Passed, report.Failed, report.Skipped)
 
-	// Tinfoil direct fixture is SEV-SNP with AMD KDS responses captured.
-	// verify.Run resolves model via /v1/models, fetches per-enclave attestation.
+	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
+	// GPU evidence captured. verify.Run resolves model via the proxy
+	// discovery endpoint, fetches per-enclave attestation from the real
+	// backend enclave (e.g. gemma4-31b-1.inf10.tinfoil.sh).
 	assertMustPass(t, report, []string{
 		"nonce_match",
 		"tee_quote_present",
@@ -223,16 +226,22 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		"tee_cert_chain",
 		"tee_quote_signature",
 		"tee_debug_disabled",
+		"tee_measurement",
 		"tee_reportdata_binding",
-		"tee_hardware_config",
 		"tee_tcb_current",
 		"tee_tcb_not_revoked",
 		"signing_key_present",
 		"e2ee_capable",
 		"tls_key_binding",
+		"nvidia_payload_present",
+		"nvidia_signature",
+		"nvidia_claims",
+		"cpu_gpu_chain",
+		"sigstore_code_verified",
+		"measured_model_weights",
 	})
 
-	if report.Passed < 13 {
-		t.Errorf("expected at least 13 passing factors, got %d", report.Passed)
+	if report.Passed < 18 {
+		t.Errorf("expected at least 18 passing factors, got %d", report.Passed)
 	}
 }

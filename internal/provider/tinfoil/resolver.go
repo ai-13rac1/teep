@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,39 +22,49 @@ const (
 	// provider construction and direct provider model discovery.
 	DefaultBaseURL = "https://inference.tinfoil.sh"
 
-	// defaultModelsURL is the Tinfoil model discovery URL.
-	defaultModelsURL = DefaultBaseURL + "/v1/models"
+	// defaultProxyURL is the Tinfoil router's proxy discovery endpoint,
+	// which maps model names to their actual backend inference enclave
+	// domains. This is the authoritative source for direct provider
+	// model-to-domain resolution.
+	defaultProxyURL = DefaultBaseURL + "/.well-known/tinfoil-proxy"
 
 	// resolverTTL is how long model mappings are cached before refresh.
 	resolverTTL = 5 * time.Minute
 
 	// refreshTimeout bounds how long a singleflight refresh can take.
 	refreshTimeout = 30 * time.Second
-
-	// tinfoilDomainSuffix is the required domain suffix for Tinfoil backends.
-	tinfoilDomainSuffix = ".inference.tinfoil.sh"
 )
 
-// modelsResponse is the OpenAI-compatible JSON response from /v1/models.
-type modelsResponse struct {
-	Data []modelEntry `json:"data"`
+// proxyResponse is the JSON response from /.well-known/tinfoil-proxy.
+type proxyResponse struct {
+	Models map[string]proxyModel `json:"models"`
 }
 
-// modelEntry is one element of the models data array.
-type modelEntry struct {
-	ID string `json:"id"`
+// proxyModel is a single model entry in the proxy response.
+type proxyModel struct {
+	Enclaves map[string]proxyEnclave `json:"enclaves"`
 }
 
-// DirectResolver maps model names to backend domains via the Tinfoil
-// model discovery API. Model slug "foo/bar" maps to domain
-// "foo--bar.inference.tinfoil.sh". Results are cached with a 5-minute TTL
-// and refreshed lazily on the next Resolve call after expiry.
+// proxyEnclave is a single backend enclave for a model.
+type proxyEnclave struct {
+	HPKEKey   string `json:"hpke_key"`
+	Predicate string `json:"predicate"`
+	TLSKeyFP  string `json:"tls_key_fp"`
+}
+
+// DirectResolver maps model names to backend inference enclave domains via
+// the Tinfoil router's proxy discovery endpoint
+// (/.well-known/tinfoil-proxy). The proxy endpoint returns the actual
+// backend enclave domains (e.g. "gemma4-31b-1.inf10.tinfoil.sh"), not the
+// router's wildcard subdomains (*.inference.tinfoil.sh). Results are cached
+// with a 5-minute TTL and refreshed lazily on the next Resolve call after
+// expiry.
 //
 // Thread-safe for concurrent use.
 type DirectResolver struct {
-	modelsURL string
-	apiKey    string
-	client    *http.Client
+	proxyURL string
+	apiKey   string
+	client   *http.Client
 
 	mu        sync.RWMutex
 	mapping   map[string]string // model → domain
@@ -62,15 +73,15 @@ type DirectResolver struct {
 	sf singleflight.Group
 }
 
-// NewDirectResolver returns a resolver that discovers models from the
-// default Tinfoil URL (https://inference.tinfoil.sh/v1/models).
+// NewDirectResolver returns a resolver that discovers backend enclave
+// domains from the Tinfoil router's proxy discovery endpoint.
 func NewDirectResolver(apiKey string, offline ...bool) *DirectResolver {
 	ctEnabled := len(offline) == 0 || !offline[0]
 	return &DirectResolver{
-		modelsURL: defaultModelsURL,
-		apiKey:    apiKey,
-		client:    tlsct.NewHTTPClient(30*time.Second, ctEnabled),
-		mapping:   make(map[string]string),
+		proxyURL: defaultProxyURL,
+		apiKey:   apiKey,
+		client:   tlsct.NewHTTPClient(30*time.Second, ctEnabled),
+		mapping:  make(map[string]string),
 	}
 }
 
@@ -83,9 +94,10 @@ func (r *DirectResolver) SetClient(c *http.Client) {
 	r.client = c
 }
 
-// Resolve returns the backend domain for the given model. If the cached
-// mapping is stale (older than 5 minutes), it refreshes from the models
-// API first. Returns an error if the model is not found after refresh.
+// Resolve returns the backend enclave domain for the given model. If the
+// cached mapping is stale (older than 5 minutes), it refreshes from the
+// proxy discovery endpoint first. Returns an error if the model is not
+// found after refresh.
 func (r *DirectResolver) Resolve(ctx context.Context, model string) (string, error) {
 	r.mu.RLock()
 	domain, ok := r.mapping[model]
@@ -126,20 +138,21 @@ func (r *DirectResolver) Resolve(ctx context.Context, model string) (string, err
 	r.mu.RUnlock()
 
 	if !ok {
-		return "", fmt.Errorf("unknown model %q (not in tinfoil model discovery)", model)
+		return "", fmt.Errorf("unknown model %q (not in tinfoil proxy discovery)", model)
 	}
 	return domain, nil
 }
 
-// refresh fetches the model list from the discovery URL and rebuilds
-// the cached mapping. Holds the write lock only for the swap.
+// refresh fetches the model-to-enclave mapping from the proxy discovery
+// endpoint and rebuilds the cached mapping. Holds the write lock only for
+// the swap.
 func (r *DirectResolver) refresh(ctx context.Context) error {
 	// Snapshot the client under the lock to avoid racing with SetClient.
 	r.mu.RLock()
 	client := r.client
 	r.mu.RUnlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.modelsURL, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.proxyURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -150,11 +163,11 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", r.modelsURL, err)
+		return fmt.Errorf("GET %s: %w", r.proxyURL, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
@@ -163,25 +176,35 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 256))
 	}
 
-	var mr modelsResponse
-	if unknown, err := jsonstrict.Unmarshal(body, &mr); err != nil {
+	var pr proxyResponse
+	if unknown, err := jsonstrict.Unmarshal(body, &pr); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	} else if len(unknown) > 0 {
-		slog.Warn("unexpected JSON fields", "fields", unknown, "context", "tinfoil model discovery")
+		slog.Warn("unexpected JSON fields", "fields", unknown, "context", "tinfoil proxy discovery")
 	}
 
-	mapping := make(map[string]string, len(mr.Data))
-	for _, m := range mr.Data {
-		if m.ID == "" {
+	mapping := make(map[string]string, len(pr.Models))
+	for model, pm := range pr.Models {
+		if model == "" {
 			continue
 		}
-		domain := slugToDomain(m.ID)
-		if !isValidTinfoilDomain(domain) {
-			slog.WarnContext(ctx, "tinfoil: model discovery: skipping invalid domain",
-				"model", m.ID, "domain", domain)
+		// Pick the first available enclave for this model. The proxy
+		// endpoint may list multiple enclaves for load balancing; we
+		// select the first one deterministically. The attestation
+		// verification will confirm the enclave's identity regardless
+		// of which backend is selected.
+		domain := firstEnclaveDomain(pm.Enclaves)
+		if domain == "" {
+			slog.WarnContext(ctx, "tinfoil: proxy discovery: model has no enclaves",
+				"model", model)
 			continue
 		}
-		mapping[m.ID] = domain
+		if !isValidBackendDomain(domain) {
+			slog.WarnContext(ctx, "tinfoil: proxy discovery: skipping invalid enclave domain",
+				"model", model, "domain", domain)
+			continue
+		}
+		mapping[model] = domain
 	}
 
 	r.mu.Lock()
@@ -192,40 +215,66 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 	return nil
 }
 
-// slugToDomain converts a model slug like "org/model-name" to a domain
-// like "org--model-name.inference.tinfoil.sh".
-func slugToDomain(slug string) string {
-	// Replace "/" with "--" per Tinfoil convention.
-	domain := strings.ReplaceAll(slug, "/", "--")
-	return domain + tinfoilDomainSuffix
+// firstEnclaveDomain returns the lexicographically smallest enclave domain
+// from the map, or empty string if none. Deterministic selection ensures
+// capture/replay consistency: the same proxy response always resolves to
+// the same backend enclave. The attestation verification will confirm the
+// enclave's identity regardless of which backend is selected.
+func firstEnclaveDomain(enclaves map[string]proxyEnclave) string {
+	if len(enclaves) == 0 {
+		return ""
+	}
+	domains := make([]string, 0, len(enclaves))
+	for domain := range enclaves {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains[0]
 }
 
-// isValidTinfoilDomain checks that a domain is exactly one label under
-// .inference.tinfoil.sh (e.g., "foo.inference.tinfoil.sh" but not
-// "evil.foo.inference.tinfoil.sh" or bare "inference.tinfoil.sh"). The label
-// must also contain only valid DNS hostname characters (letters, digits,
-// hyphens) since the models API is untrusted input.
-func isValidTinfoilDomain(d string) bool {
+// isValidBackendDomain validates that a backend enclave domain is a
+// legitimate Tinfoil infrastructure domain. Backend enclaves are hosted on
+// domains like:
+//   - *.inf10.tinfoil.sh (TDX enclaves)
+//   - *.inf6.tinfoil.sh (SEV-SNP enclaves)
+//   - *.tinfoil.containers.tinfoil.dev
+//
+// The domain must be a valid DNS hostname and end with a known Tinfoil
+// suffix. This prevents the proxy endpoint from directing clients to
+// arbitrary hosts.
+func isValidBackendDomain(d string) bool {
 	lower := strings.ToLower(d)
-	if !strings.HasSuffix(lower, tinfoilDomainSuffix) {
+	if lower == "" {
 		return false
 	}
-	// Extract the subdomain label before the suffix.
-	label := strings.TrimSuffix(lower, tinfoilDomainSuffix)
-	if label == "" || strings.Contains(label, ".") {
+
+	// Must end with a known Tinfoil infrastructure suffix.
+	allowedSuffixes := []string{
+		".tinfoil.sh",
+		".tinfoil.containers.tinfoil.dev",
+	}
+	matched := false
+	for _, suffix := range allowedSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return false
 	}
-	// Reject labels with invalid DNS hostname characters. The models API is
-	// untrusted input; allowing spaces, underscores, etc. could produce
-	// confusing downstream failures or unsafe hostnames.
-	for _, c := range label {
+
+	// Must be a valid DNS hostname: letters, digits, hyphens, dots.
+	for _, c := range d {
 		switch {
 		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
 		case c >= '0' && c <= '9':
-		case c == '-':
+		case c == '-', c == '.':
 		default:
 			return false
 		}
 	}
+
 	return true
 }
