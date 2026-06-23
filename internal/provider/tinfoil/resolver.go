@@ -37,12 +37,20 @@ const (
 
 // proxyResponse is the JSON response from /.well-known/tinfoil-proxy.
 type proxyResponse struct {
-	Models map[string]proxyModel `json:"models"`
+	Attempted string                `json:"attempted"`
+	Errors    any                   `json:"errors"`
+	Models    map[string]proxyModel `json:"models"`
+	Updated   string                `json:"updated"`
+	Version   string                `json:"version"`
 }
 
 // proxyModel is a single model entry in the proxy response.
 type proxyModel struct {
-	Enclaves map[string]proxyEnclave `json:"enclaves"`
+	Repo        string                  `json:"repo"`
+	Tag         string                  `json:"tag"`
+	Measurement any                     `json:"measurement"`
+	Enclaves    map[string]proxyEnclave `json:"enclaves"`
+	Overload    any                     `json:"overload"`
 }
 
 // proxyEnclave is a single backend enclave for a model.
