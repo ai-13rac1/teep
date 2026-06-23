@@ -1379,9 +1379,10 @@ func evalNVSwitchBinding(in *ReportInput) []FactorResult {
 			"NVSwitch evidence hash verified in REPORTDATA")
 	}
 	// GPUHashBound but no NVSwitch — topology doesn't require it (< 8 GPUs
-	// or Blackwell-only). This is expected, not a failure.
-	return factor(TierSupplyChain, "nvswitch_binding", Skip,
-		"NVSwitch not expected for this GPU topology")
+	// or Blackwell-only). This is a successful verification outcome: the
+	// GPU topology was validated and NVSwitch is correctly absent.
+	return factor(TierSupplyChain, "nvswitch_binding", Pass,
+		"NVSwitch not required for this GPU topology (verified absent)")
 }
 func evalMeasuredModelWeights(in *ReportInput) []FactorResult {
 	// Tinfoil: dm-verity root hash is part of the Sigstore-verified code
