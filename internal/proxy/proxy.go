@@ -2317,6 +2317,23 @@ type upstreamResult struct {
 	UpstreamDur time.Duration
 }
 
+// setUpstreamConnectionHeaders sets Connection and EHBP headers on the
+// upstream request. For TLS-binding providers, Connection: close is set
+// when a fresh attestation was fetched (cache miss) to prevent TLS
+// connection reuse across attestation boundaries. On cache hits, the
+// connection is reusable — the per-response SPKI verification in
+// verifyUpstreamTLSBinding ensures the connection remains bound to the
+// attested enclave.
+func setUpstreamConnectionHeaders(req *http.Request, prov *provider.Provider, raw *attestation.RawAttestation, ehbp *e2ee.EHBPSession) {
+	if prov.UsesTLSBinding && raw != nil {
+		req.Header.Set("Connection", "close")
+	}
+	if ehbp != nil {
+		req.Header.Set("Ehbp-Encapsulated-Key", ehbp.EncapKeyHex())
+		req.ContentLength = -1 // force chunked transfer encoding
+	}
+}
+
 // verifyUpstreamTLSBinding checks that the live upstream TLS peer SPKI
 // matches the attested tls_key_fp from the attestation report. This
 // prevents MITM attacks between teep and the enclave after attestation
@@ -2449,11 +2466,7 @@ func (s *Server) doUpstreamRoundtrip(
 		}
 		upstreamReq.Header.Set("Content-Type", contentType)
 		provider.SetUserAgent(upstreamReq)
-
-		if ehbp != nil {
-			upstreamReq.Header.Set("Ehbp-Encapsulated-Key", ehbp.EncapKeyHex())
-			upstreamReq.ContentLength = -1 // force chunked transfer encoding
-		}
+		setUpstreamConnectionHeaders(upstreamReq, prov, raw, ehbp)
 
 		if prepErr := prepareUpstreamHeaders(upstreamReq, prov, session, meta, stream, endpointPath); prepErr != nil {
 			cancel()
