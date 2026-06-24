@@ -150,7 +150,7 @@ When reviewing proxy or provider selection logic, verify all of the following:
 
 ## Plan Compliance Review
 
-If the requested review contains a removed plan file along with code changes, then the code changes are meant to implement the removed plan.
+If the requested review contains a plan file along with code changes, then the code changes are meant to implement the removed plan.
 
 In addition to ensuring that the code meets the above review requirements, verify:
 
