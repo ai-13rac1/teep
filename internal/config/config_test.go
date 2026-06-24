@@ -1253,6 +1253,44 @@ func TestMergedAllowFailNeardirectGoDefaults(t *testing.T) {
 	}
 }
 
+func TestMergedAllowFailTinfoilDirectAllowsNVSwitchByDefault(t *testing.T) {
+	unsetenv(t, "TEEP_CONFIG")
+	unsetenv(t, "TEEP_LISTEN_ADDR")
+	unsetenv(t, "TINFOIL_API_KEY")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	af := MergedAllowFail("tinfoil_v3_direct", cfg, false)
+	afSet := make(map[string]bool, len(af))
+	for _, name := range af {
+		afSet[name] = true
+	}
+	if !afSet["nvswitch_binding"] {
+		t.Errorf("nvswitch_binding should be in allow_fail for tinfoil_v3_direct: got %v", af)
+	}
+}
+
+func TestMergedAllowFailTinfoilCloudEnforcesNVSwitchByDefault(t *testing.T) {
+	unsetenv(t, "TEEP_CONFIG")
+	unsetenv(t, "TEEP_LISTEN_ADDR")
+	unsetenv(t, "TINFOIL_API_KEY")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	af := MergedAllowFail("tinfoil_v3_cloud", cfg, false)
+	for _, name := range af {
+		if name == "nvswitch_binding" {
+			t.Errorf("nvswitch_binding should remain enforced for tinfoil_v3_cloud: got %v", af)
+		}
+	}
+}
+
 // --- Offline mode ---
 
 func TestMergedAllowFailOfflineAddsOnlineFactors(t *testing.T) {

@@ -283,7 +283,8 @@ var ChutesDefaultAllowFail = []string{
 	"cpu_id_registry",
 }
 
-// TinfoilDefaultAllowFail is the tinfoil-specific default allow_fail list.
+// TinfoilDefaultAllowFail is the tinfoil-specific default allow_fail list for
+// the router-backed tinfoil_v3_cloud provider.
 // Tinfoil runs its own TEE stack (TDX or SEV-SNP) with Sigstore supply chain
 // verification instead of compose-based binding. Core TDX/SEV-SNP quote
 // integrity, REPORTDATA binding, and Sigstore code verification are enforced.
@@ -295,6 +296,15 @@ var ChutesDefaultAllowFail = []string{
 var TinfoilDefaultAllowFail = []string{
 	"cpu_id_registry",
 	"intel_pcs_collateral",
+}
+
+// TinfoilDirectDefaultAllowFail is the tinfoil_v3_direct default allow_fail
+// list. Direct inference attests per-model enclaves; NVSwitch binding is
+// reported but currently allowed to fail by default.
+var TinfoilDirectDefaultAllowFail = []string{
+	"cpu_id_registry",
+	"intel_pcs_collateral",
+	"nvswitch_binding",
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.

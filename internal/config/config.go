@@ -59,7 +59,7 @@ var providerDefaultAllowFail = map[string][]string{
 	"nearcloud":         attestation.NearcloudDefaultAllowFail,
 	"neardirect":        attestation.NeardirectDefaultAllowFail,
 	"tinfoil_v3_cloud":  attestation.TinfoilDefaultAllowFail,
-	"tinfoil_v3_direct": attestation.TinfoilDefaultAllowFail,
+	"tinfoil_v3_direct": attestation.TinfoilDirectDefaultAllowFail,
 }
 
 // ProviderDefaultAllowFail returns a defensive copy of the provider-specific
