@@ -44,7 +44,7 @@ func TestVerifyRun_Venice_Fixture(t *testing.T) {
 		report.Passed, report.Passed+report.Failed+report.Skipped,
 		report.Passed, report.Failed, report.Skipped)
 
-	assertMustPass(t, report, []string{"nonce_match", "tdx_quote_present", "signing_key_present"})
+	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present", "signing_key_present"})
 
 	if report.Passed < 5 {
 		t.Errorf("expected at least 5 passing factors, got %d", report.Passed)
@@ -74,7 +74,7 @@ func TestVerifyRun_NearDirect_Fixture(t *testing.T) {
 		report.Passed, report.Passed+report.Failed+report.Skipped,
 		report.Passed, report.Failed, report.Skipped)
 
-	assertMustPass(t, report, []string{"nonce_match", "tdx_quote_present"})
+	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 
 	if report.Passed < 5 {
 		t.Errorf("expected at least 5 passing factors, got %d", report.Passed)
@@ -107,7 +107,7 @@ func TestVerifyReplay_Venice_Fixture(t *testing.T) {
 	}
 	t.Logf("Score: %d/%d", report.Passed, report.Passed+report.Failed+report.Skipped)
 
-	assertMustPass(t, report, []string{"nonce_match", "tdx_quote_present"})
+	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 }
 
 func TestVerifyRun_WithCapture_Venice(t *testing.T) {
@@ -143,4 +143,105 @@ func TestVerifyRun_WithCapture_Venice(t *testing.T) {
 		t.Error("expected at least one capture subdirectory")
 	}
 	t.Logf("capture dir: %d subdirectory(ies)", len(dirs))
+}
+
+func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
+	env := loadFixture(t, "tinfoil_v3_cloud")
+	baseURL := extractBaseURL(t, env.entries)
+	t.Logf("base URL: %s", baseURL)
+
+	cfg, cp := buildVerifyRunConfig(env.manifest.Provider, baseURL)
+
+	report, err := verify.Run(context.Background(), &verify.Options{
+		Config:       cfg,
+		Provider:     cp,
+		ProviderName: env.manifest.Provider,
+		ModelName:    env.manifest.Model,
+		Offline:      false,
+		Client:       env.client,
+		Nonce:        env.nonce,
+	})
+	if err != nil {
+		t.Fatalf("verify.Run: %v", err)
+	}
+	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
+		report.Passed, report.Passed+report.Failed+report.Skipped,
+		report.Passed, report.Failed, report.Skipped)
+
+	// Tinfoil fixture is SEV-SNP with AMD KDS responses captured.
+	// verify.Run uses online SEV verifier; replay client serves KDS certs.
+	assertMustPass(t, report, []string{
+		"nonce_match",
+		"tee_quote_present",
+		"tee_quote_structure",
+		"tee_cert_chain",
+		"tee_quote_signature",
+		"tee_debug_disabled",
+		"tee_reportdata_binding",
+		"tee_hardware_config",
+		"tee_tcb_current",
+		"tee_tcb_not_revoked",
+		"signing_key_present",
+		"e2ee_capable",
+		"tls_key_binding",
+	})
+
+	if report.Passed < 13 {
+		t.Errorf("expected at least 13 passing factors, got %d", report.Passed)
+	}
+}
+
+func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
+	env := loadFixture(t, "tinfoil_v3_direct")
+
+	// Direct mode uses the proxy discovery endpoint on inference.tinfoil.sh
+	// to resolve model → backend enclave domain, then fetches attestation
+	// from the resolved enclave.
+	cfg, cp := buildVerifyRunConfig(env.manifest.Provider, "https://inference.tinfoil.sh")
+
+	report, err := verify.Run(context.Background(), &verify.Options{
+		Config:       cfg,
+		Provider:     cp,
+		ProviderName: env.manifest.Provider,
+		ModelName:    env.manifest.Model,
+		Offline:      false,
+		Client:       env.client,
+		Nonce:        env.nonce,
+	})
+	if err != nil {
+		t.Fatalf("verify.Run: %v", err)
+	}
+	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
+		report.Passed, report.Passed+report.Failed+report.Skipped,
+		report.Passed, report.Failed, report.Skipped)
+
+	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
+	// GPU evidence captured. verify.Run resolves model via the proxy
+	// discovery endpoint, fetches per-enclave attestation from the real
+	// backend enclave (e.g. gemma4-31b-1.inf10.tinfoil.sh).
+	assertMustPass(t, report, []string{
+		"nonce_match",
+		"tee_quote_present",
+		"tee_quote_structure",
+		"tee_cert_chain",
+		"tee_quote_signature",
+		"tee_debug_disabled",
+		"tee_measurement",
+		"tee_reportdata_binding",
+		"tee_tcb_current",
+		"tee_tcb_not_revoked",
+		"signing_key_present",
+		"e2ee_capable",
+		"tls_key_binding",
+		"nvidia_payload_present",
+		"nvidia_signature",
+		"nvidia_claims",
+		"cpu_gpu_chain",
+		"sigstore_code_verified",
+		"measured_model_weights",
+	})
+
+	if report.Passed < 18 {
+		t.Errorf("expected at least 18 passing factors, got %d", report.Passed)
+	}
 }

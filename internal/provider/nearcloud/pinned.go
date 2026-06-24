@@ -177,7 +177,7 @@ func (h *PinnedHandler) encryptBody(
 
 	// E2EE providers must never downgrade to plaintext.
 	if report != nil && !report.ReportDataBindingPassed() {
-		return nil, nil, nil, errors.New("E2EE required but tdx_reportdata_binding not passed; refusing plaintext")
+		return nil, nil, nil, errors.New("E2EE required but tee_reportdata_binding not passed; refusing plaintext")
 	}
 
 	sk := signingKey
@@ -207,17 +207,17 @@ func (h *PinnedHandler) encryptBody(
 func encryptNearCloudBody(body []byte, signingKey string, endpoint e2ee.EndpointType) ([]byte, *e2ee.NearCloudSession, error) {
 	raw := &attestation.RawAttestation{SigningKey: signingKey}
 	enc := neardirect.NewE2EE()
-	result, sess, _, err := enc.EncryptRequest(body, raw, endpoint)
+	er, err := enc.EncryptRequest(body, raw, endpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("NearCloud E2EE encrypt: %w", err)
 	}
 
-	ncSess, ok := sess.(*e2ee.NearCloudSession)
+	ncSess, ok := er.Session.(*e2ee.NearCloudSession)
 	if !ok {
-		sess.Zero()
+		er.Session.Zero()
 		return nil, nil, errors.New("NearCloud E2EE: unexpected session type")
 	}
-	return result, ncSess, nil
+	return er.Body, ncSess, nil
 }
 
 func nearCloudE2EEHeaders(session *e2ee.NearCloudSession) http.Header {

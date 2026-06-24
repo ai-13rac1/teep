@@ -107,6 +107,7 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 		SupplyChainPolicy: nil,
 		AllowFail:         attestation.ChutesDefaultAllowFail,
 		E2EEConfigured:    true, // Chutes always uses E2EE
+		Inapplicable:      chutes.InapplicableFactors(),
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
@@ -122,21 +123,29 @@ func assertChutesReport(t *testing.T, report *attestation.VerificationReport) {
 
 	assertMustPass(t, report, []string{
 		"nonce_match",
-		"tdx_quote_present",
-		"tdx_quote_structure",
-		"tdx_cert_chain",
-		"tdx_quote_signature",
-		"tdx_debug_disabled",
-		"tdx_mrseam_mrtd",
+		"tee_quote_present",
+		"tee_quote_structure",
+		"tee_cert_chain",
+		"tee_quote_signature",
+		"tee_debug_disabled",
+		"tee_measurement",
 		"signing_key_present",
-		"tdx_reportdata_binding",
+		"tee_reportdata_binding",
 		"nvidia_payload_present",
 		"e2ee_capable",
 	})
 
-	assertFactorStatus(t, report, "compose_binding", attestation.Skip)
-	assertFactorStatus(t, report, "sigstore_verification", attestation.Skip)
-	assertFactorStatus(t, report, "event_log_integrity", attestation.Skip)
+	// Not Applicable: factors handled by Chutes' applicability layer.
+	for _, name := range []string{
+		"compose_binding",
+		"build_transparency_log",
+		"sigstore_verification",
+		"event_log_integrity",
+		"sigstore_code_verified",
+		"nvswitch_binding",
+	} {
+		assertFactorStatus(t, report, name, attestation.NotApplicable)
+	}
 
 	// Chutes uses whole-body E2EE and does not use pinned TLS key binding.
 	assertFactorStatus(t, report, "tls_key_binding", attestation.Skip)

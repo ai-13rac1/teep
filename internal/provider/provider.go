@@ -54,19 +54,14 @@ type RequestPreparer interface {
 
 // RequestEncryptor encrypts an outgoing request body for a provider's E2EE
 // protocol. The endpoint identifies the canonical route kind (chat,
-// embeddings, images, etc.) used to select field-encryption policy. Returns
-// the encrypted body, a Decryptor for response decryption, optional Chutes
-// metadata, and any error.
+// embeddings, images, etc.) used to select field-encryption policy.
 //
-// For Chutes, Decryptor is nil; crypto state is carried in *e2ee.ChutesE2EE
-// instead (the Chutes protocol uses a different relay path).
-// For Venice and NearCloud, *e2ee.ChutesE2EE is nil.
+// Exactly one of EncryptResult.Session, .Chutes, or .EHBP is non-nil:
+//   - Venice/NearCloud: Session (field-level Decryptor)
+//   - Chutes: Chutes (full-body relay state)
+//   - Tinfoil/EHBP: EHBP (full-body state, decrypted before relay)
 type RequestEncryptor interface {
-	// EncryptRequest encrypts the request body for the given endpoint type
-	// and provider attestation. The endpoint parameter identifies the proxy route kind
-	// (chat, embeddings, images, etc.); actual provider paths are documented
-	// in each provider's EncryptRequest implementation.
-	EncryptRequest(body []byte, raw *attestation.RawAttestation, endpoint e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error)
+	EncryptRequest(body []byte, raw *attestation.RawAttestation, endpoint e2ee.EndpointType) (e2ee.EncryptResult, error)
 }
 
 // PinnedHandler handles chat requests on a connection-pinned TLS connection
@@ -167,6 +162,14 @@ type Provider struct {
 	// (e.g. "/v1/score"). Empty means unsupported.
 	ScorePath string
 
+	// ResponsesPath is the upstream API path for responses
+	// (e.g. "/v1/responses"). Empty means unsupported.
+	ResponsesPath string
+
+	// SpeechPath is the upstream API path for text-to-speech
+	// (e.g. "/v1/audio/speech"). Empty means unsupported.
+	SpeechPath string
+
 	// E2EE indicates whether this provider supports end-to-end encryption.
 	E2EE bool
 
@@ -208,6 +211,35 @@ type Provider struct {
 	// report cache expires. Returns ("", false) if the domain cannot be
 	// determined (the proxy must fail closed in that case).
 	SPKIDomainForModel func(ctx context.Context, model string) (string, bool)
+
+	// BaseURLForModel resolves the upstream base URL for a specific model.
+	// When set, overrides BaseURL for upstream requests. Nil means use BaseURL.
+	// Implementations should read prompt_cache_key from context (via
+	// tinfoil.PromptCacheKeyFromContext) to support cache-aware backend
+	// selection for providers with multiple enclave domains.
+	BaseURLForModel func(ctx context.Context, model string) (string, error)
+
+	// CacheKeySuffix returns a per-backend suffix for attestation cache keys.
+	// When non-empty, the proxy appends it to the model name in cache
+	// operations (attestation report, signing key, negative cache, e2ee
+	// failure tracker). This allows per-domain caching for providers that
+	// route to different backends based on prompt_cache_key, preventing
+	// cache key collisions between enclaves with different TLS keys.
+	// Nil means cache by model name only (default, single-backend behavior).
+	CacheKeySuffix func(ctx context.Context, model string) string
+
+	// SigstoreRepoForModel returns the GitHub repo for Tinfoil Sigstore
+	// supply chain verification of a specific model. Nil for non-Sigstore
+	// providers. For cloud (router) providers, returns a static repo.
+	// For direct providers, returns a per-model repo.
+	SigstoreRepoForModel func(model string) string
+
+	// UsesTLSBinding declares that this provider performs live TLS channel
+	// binding (comparing the live peer SPKI against an attested fingerprint).
+	// When true, evalTLSKeyBinding fails closed if the attestation's
+	// TLSFingerprint is empty, preventing a future provider from silently
+	// skipping TLS binding. Tinfoil sets this; E2EE-only providers do not.
+	UsesTLSBinding bool
 
 	// SupplyChainPolicy defines the allowed container image repos for this
 	// provider. May be nil if the provider has no policy.

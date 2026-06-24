@@ -47,6 +47,8 @@ Flag any code that:
 - Allows an unattested or partially-attested request to be forwarded.
 - Serves stale or cached data when re-validation fails, without blocking.
 - Accepts unknown, ambiguous, or semantically invalid configuration that should have been rejected at startup.
+- Uses special cases to handle the tests or test environment.
+- Adds exemptions to teeplint for new code.
 
 If an error path does anything other than return/propagate an error, it is a
 defect. There are NO acceptable workarounds, fallbacks, or error recoveries for
@@ -61,6 +63,7 @@ security validation.
 - Encryption MUST be used when requested; plaintext fallback is unacceptable!
 - Nonce generation MUST use `crypto/rand`. If randomness fails, the code MUST
   panic or return an error — never use a weak source.
+- New tests must ALWAYS use `httptest.NewTLSServer()`
 
 ## Sensitive Data Handling
 
@@ -147,7 +150,7 @@ When reviewing proxy or provider selection logic, verify all of the following:
 
 ## Plan Compliance Review
 
-If the requested review contains a removed plan file along with code changes, then the code changes are meant to implement the removed plan.
+If the requested review contains a plan file along with code changes, then the code changes are meant to implement the removed plan.
 
 In addition to ensuring that the code meets the above review requirements, verify:
 

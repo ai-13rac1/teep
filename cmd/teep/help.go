@@ -35,7 +35,7 @@ var factorRegistry = []factorInfo{
 			"from a previous session.",
 	},
 	{
-		Name:    "tdx_quote_present",
+		Name:    "tee_quote_present",
 		Tier:    1,
 		Summary: "TDX quote is present in response",
 		Description: "Checks that the intel_quote field exists in the attestation " +
@@ -45,7 +45,7 @@ var factorRegistry = []factorInfo{
 			"is possible.",
 	},
 	{
-		Name:    "tdx_quote_structure",
+		Name:    "tee_quote_structure",
 		Tier:    1,
 		Summary: "TDX quote parses as valid QuoteV4/V5",
 		Description: "Parses the TDX quote binary and verifies it conforms to the " +
@@ -57,7 +57,7 @@ var factorRegistry = []factorInfo{
 			"non-genuine attestation source.",
 	},
 	{
-		Name:    "tdx_cert_chain",
+		Name:    "tee_cert_chain",
 		Tier:    1,
 		Summary: "Intel root CA certificate chain valid",
 		Description: "Verifies the X.509 certificate chain embedded in the TDX " +
@@ -66,7 +66,7 @@ var factorRegistry = []factorInfo{
 			"spoofed.",
 	},
 	{
-		Name:    "tdx_quote_signature",
+		Name:    "tee_quote_signature",
 		Tier:    1,
 		Summary: "TDX quote signature verified",
 		Description: "Verifies the ECDSA signature over the TDX quote body using " +
@@ -74,7 +74,7 @@ var factorRegistry = []factorInfo{
 			"quote has not been tampered with since generation.",
 	},
 	{
-		Name:    "tdx_debug_disabled",
+		Name:    "tee_debug_disabled",
 		Tier:    1,
 		Summary: "Debug bit is 0 (production enclave)",
 		Description: "Checks that the TD_ATTRIBUTES debug bit in the TDX quote is " +
@@ -83,18 +83,18 @@ var factorRegistry = []factorInfo{
 			"workloads must never run in debug mode.",
 	},
 	{
-		Name:    "tdx_mrseam_mrtd",
+		Name:    "tee_measurement",
 		Tier:    1,
-		Summary: "MRSEAM/MRTD match measurement policy",
-		Description: "Checks that the TDX MRSEAM and MRTD values from the quote " +
-			"match the configured measurement policy allowlists. MRSEAM " +
-			"identifies the Intel TDX module version; MRTD is a SHA-384 " +
-			"hash of the initial TD image. Both are verifiable from Intel " +
+		Summary: "TEE measurement matches policy",
+		Description: "Checks that the TEE measurement values match the configured " +
+			"measurement policy allowlists. For TDX: MRSEAM identifies the " +
+			"Intel TDX module version, MRTD is a SHA-384 hash of the initial " +
+			"TD image. For SEV-SNP: the launch measurement. Values are verifiable from " +
 			"releases and dstack build artifacts. Skipped when no " +
 			"MRSEAM/MRTD policy is configured.",
 	},
 	{
-		Name:    "tdx_hardware_config",
+		Name:    "tee_hardware_config",
 		Tier:    1,
 		Summary: "RTMR0 matches measurement policy",
 		Description: "Checks that RTMR0 from the TDX quote matches the configured " +
@@ -105,7 +105,7 @@ var factorRegistry = []factorInfo{
 			"no RTMR0 policy is configured.",
 	},
 	{
-		Name:    "tdx_boot_config",
+		Name:    "tee_boot_config",
 		Tier:    1,
 		Summary: "RTMR1/RTMR2 match measurement policy",
 		Description: "Checks that RTMR1 and RTMR2 from the TDX quote match the " +
@@ -126,7 +126,7 @@ var factorRegistry = []factorInfo{
 	},
 	// Tier 2: Binding & Crypto
 	{
-		Name:    "tdx_reportdata_binding",
+		Name:    "tee_reportdata_binding",
 		Tier:    2,
 		Summary: "REPORTDATA binds enclave key to quote",
 		Description: "Verifies that the TDX REPORTDATA field contains a " +
@@ -147,7 +147,7 @@ var factorRegistry = []factorInfo{
 			"Skipped in --offline mode or when the Intel PCS is unreachable.",
 	},
 	{
-		Name:    "tdx_tcb_current",
+		Name:    "tee_tcb_current",
 		Tier:    2,
 		Summary: "TEE TCB status from Intel PCS",
 		Description: "Evaluates the TCB status returned by Intel PCS collateral " +
@@ -158,11 +158,11 @@ var factorRegistry = []factorInfo{
 			"mode, shows only the raw TEE_TCB_SVN bytes.",
 	},
 	{
-		Name:    "tdx_tcb_not_revoked",
+		Name:    "tee_tcb_not_revoked",
 		Tier:    2,
 		Summary: "TCB firmware not revoked by Intel",
 		Description: "Checks that the TDX TCB status from Intel PCS collateral is " +
-			"not Revoked. Unlike tdx_tcb_current (which also fails on " +
+			"not Revoked. Unlike tee_tcb_current (which also fails on " +
 			"SWHardeningNeeded or OutOfDate), this factor only blocks on " +
 			"Revoked — meaning Intel has determined the firmware is " +
 			"fundamentally compromised with no available mitigation. This " +
@@ -280,6 +280,18 @@ var factorRegistry = []factorInfo{
 			"the TDX quote.",
 	},
 	{
+		Name:    "nvswitch_binding",
+		Tier:    3,
+		Summary: "NVSwitch fabric verification",
+		Description: "On multi-GPU nodes with NVLink (e.g. 8x Hopper), NVSwitch " +
+			"authenticates the inter-GPU communication fabric. When present, " +
+			"the NVSwitch evidence hash is verified in REPORTDATA alongside " +
+			"GPU evidence. This factor passes when NVSwitch evidence hash is " +
+			"bound in REPORTDATA, skips when the GPU topology does not use " +
+			"NVSwitch, and is N/A for providers that do not expose NVSwitch " +
+			"evidence.",
+	},
+	{
 		Name:    "measured_model_weights",
 		Tier:    3,
 		Summary: "No model weight hashes",
@@ -338,6 +350,17 @@ var factorRegistry = []factorInfo{
 			"signed provenance. Skipped when no image digests are found.",
 	},
 	{
+		Name:    "sigstore_code_verified",
+		Tier:    3,
+		Summary: "Sigstore code measurements verified",
+		Description: "Tinfoil-specific: fetches the Sigstore DSSE bundle from the " +
+			"provider's GitHub repo, cryptographically verifies it against the " +
+			"Sigstore trusted root, then compares the code measurements in the " +
+			"predicate against the live enclave's TDX RTMRs or SEV-SNP launch " +
+			"measurement. Passes when both the Sigstore bundle is valid and " +
+			"code measurements match. Skipped for non-Tinfoil providers.",
+	},
+	{
 		Name:    "event_log_integrity",
 		Tier:    3,
 		Summary: "Event log replays to match quote RTMRs",
@@ -359,7 +382,7 @@ var factorRegistry = []factorInfo{
 			"own TDX enclave and has a separate nonce from the model attestation.",
 	},
 	{
-		Name:    "gateway_tdx_quote_present",
+		Name:    "gateway_tee_quote_present",
 		Tier:    4,
 		Summary: "Gateway TDX quote present and parsed",
 		Description: "Checks that the gateway's intel_quote field exists in the " +
@@ -368,7 +391,7 @@ var factorRegistry = []factorInfo{
 			"TDX enclave.",
 	},
 	{
-		Name:    "gateway_tdx_quote_structure",
+		Name:    "gateway_tee_quote_structure",
 		Tier:    4,
 		Summary: "Gateway TDX quote valid QuoteV4/V5",
 		Description: "Parses the gateway's TDX quote and verifies it conforms to " +
@@ -376,7 +399,7 @@ var factorRegistry = []factorInfo{
 			"prefix for comparison against published reference values.",
 	},
 	{
-		Name:    "gateway_tdx_cert_chain",
+		Name:    "gateway_tee_cert_chain",
 		Tier:    4,
 		Summary: "Gateway Intel root CA chain valid",
 		Description: "Verifies the X.509 certificate chain in the gateway's TDX quote " +
@@ -384,7 +407,7 @@ var factorRegistry = []factorInfo{
 			"attestation comes from genuine Intel hardware.",
 	},
 	{
-		Name:    "gateway_tdx_quote_signature",
+		Name:    "gateway_tee_quote_signature",
 		Tier:    4,
 		Summary: "Gateway TDX quote signature verified",
 		Description: "Verifies the ECDSA signature on the gateway's TDX quote body " +
@@ -392,7 +415,7 @@ var factorRegistry = []factorInfo{
 			"gateway quote has not been tampered with.",
 	},
 	{
-		Name:    "gateway_tdx_debug_disabled",
+		Name:    "gateway_tee_debug_disabled",
 		Tier:    4,
 		Summary: "Gateway debug bit is 0 (production)",
 		Description: "Checks that the gateway's TD_ATTRIBUTES debug bit is not set. " +
@@ -400,7 +423,7 @@ var factorRegistry = []factorInfo{
 			"passing through the API gateway.",
 	},
 	{
-		Name:    "gateway_tdx_mrseam_mrtd",
+		Name:    "gateway_tee_measurement",
 		Tier:    4,
 		Summary: "Gateway MRSEAM/MRTD match policy",
 		Description: "Checks that the gateway TDX MRSEAM and MRTD values match " +
@@ -409,7 +432,7 @@ var factorRegistry = []factorInfo{
 			"image. Skipped when no gateway MRSEAM/MRTD policy is configured.",
 	},
 	{
-		Name:    "gateway_tdx_hardware_config",
+		Name:    "gateway_tee_hardware_config",
 		Tier:    4,
 		Summary: "Gateway RTMR0 matches policy",
 		Description: "Checks that the gateway RTMR0 from the TDX quote matches the " +
@@ -418,7 +441,7 @@ var factorRegistry = []factorInfo{
 			"RTMR0 policy is configured.",
 	},
 	{
-		Name:    "gateway_tdx_boot_config",
+		Name:    "gateway_tee_boot_config",
 		Tier:    4,
 		Summary: "Gateway RTMR1/RTMR2 match policy",
 		Description: "Checks that the gateway RTMR1 and RTMR2 from the TDX quote " +
@@ -427,7 +450,7 @@ var factorRegistry = []factorInfo{
 			"when no gateway RTMR1/RTMR2 policy is configured.",
 	},
 	{
-		Name:    "gateway_tdx_reportdata_binding",
+		Name:    "gateway_tee_reportdata_binding",
 		Tier:    4,
 		Summary: "Gateway REPORTDATA binds TLS fingerprint + nonce",
 		Description: "Verifies the gateway TDX quote REPORTDATA field. " +
@@ -580,6 +603,7 @@ Environment variables:
   NANOGPT_API_KEY    NanoGPT API key.
   PHALA_API_KEY      Phala Cloud API key.
   CHUTES_API_KEY     Chutes API key.
+  TINFOIL_API_KEY    Tinfoil API key (used by tinfoil_v3_cloud and tinfoil_v3_direct).
 `)
 }
 
@@ -592,8 +616,8 @@ Usage:
 
 The proxy activates every provider whose API key is configured (via TOML or
 environment variable). Supported providers: venice, neardirect, nearcloud,
-nanogpt, phalacloud, chutes. All active providers are served simultaneously
-from a single proxy instance.
+nanogpt, phalacloud, chutes, tinfoil_v3_cloud, tinfoil_v3_direct. All active
+providers are served simultaneously from a single proxy instance.
 
 Clients send requests to http://127.0.0.1:8337/v1/chat/completions (or the
 address set by TEEP_LISTEN_ADDR) using the same format as the OpenAI API.
@@ -602,6 +626,7 @@ Model names must include the provider prefix: provider:model
   venice:e2ee-qwen3-5-122b-a10b
   neardirect:Qwen/Qwen3-VL-30B-A3B-Instruct
   chutes:deepseek-ai/DeepSeek-V3-0324-TEE
+  tinfoil_v3_cloud:meta-llama/Llama-4-Scout-17B-16E-Instruct
 
 The proxy:
   1. Parses the model prefix to determine the upstream provider.
@@ -639,7 +664,8 @@ Usage:
   teep verify PROVIDER --model MODEL [flags]
 
 PROVIDER:
-  venice, neardirect, nearcloud, nanogpt, phalacloud, chutes
+  venice, neardirect, nearcloud, nanogpt, phalacloud, chutes,
+  tinfoil_v3_cloud, tinfoil_v3_direct
 
 Connects to the specified provider's attestation endpoint, fetches the TEE
 attestation for the given model, and runs all verification factors. The

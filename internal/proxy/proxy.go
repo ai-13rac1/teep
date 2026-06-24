@@ -9,7 +9,7 @@
 //  3. Check negative cache. Blocked → 503.
 //  4. Check attestation cache. On miss, fetch + verify + cache.
 //  5. Any enforced factor Fail (not in allow_fail) → 502 with report JSON.
-//  6. If E2EE and tdx_reportdata_binding Pass: encrypt messages, set headers.
+//  6. If E2EE and tee_reportdata_binding Pass: encrypt messages, set headers.
 //     If E2EE required but binding fails: block request (no plaintext fallback).
 //  7. Forward to upstream. Parse streaming SSE or buffer non-streaming body.
 //  8. Decrypt each chunk (E2EE). Abort on any decryption failure.
@@ -51,6 +51,7 @@ import (
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
 	"github.com/13rac1/teep/internal/provider/phalacloud"
+	"github.com/13rac1/teep/internal/provider/tinfoil"
 	"github.com/13rac1/teep/internal/provider/venice"
 	"github.com/13rac1/teep/internal/reqid"
 	"github.com/13rac1/teep/internal/tlsct"
@@ -335,28 +336,65 @@ func respStatusCode(resp *http.Response) int {
 // for the retry loop's MarkFailed calls.
 type upstreamBody struct {
 	Body       []byte
+	BodyReader io.Reader // EHBP streaming encrypted body (used instead of Body when set)
 	Session    e2ee.Decryptor
 	Meta       *e2ee.ChutesE2EE
+	EHBP       *e2ee.EHBPSession
 	ChuteID    string // For MarkFailed (from raw attestation, not meta)
 	InstanceID string // For MarkFailed (from raw attestation, not meta)
 }
 
-// zeroE2EESessions zeroes crypto material from a failed E2EE attempt.
-func zeroE2EESessions(session e2ee.Decryptor, meta *e2ee.ChutesE2EE) {
+// zeroE2EE zeroes crypto material from all E2EE session types.
+func zeroE2EE(session e2ee.Decryptor, meta *e2ee.ChutesE2EE, ehbp *e2ee.EHBPSession) {
 	if session != nil {
 		session.Zero()
 	}
 	if meta != nil && meta.Session != nil {
 		meta.Session.Zero()
 	}
+	if ehbp != nil {
+		ehbp.Zero()
+	}
 }
 
 // chatRequest is a minimal parse of an OpenAI chat completions request.
 // Only fields the proxy needs to inspect or rewrite are decoded here.
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model          string        `json:"model"`
+	Messages       []chatMessage `json:"messages"`
+	Stream         bool          `json:"stream"`
+	PromptCacheKey string        `json:"prompt_cache_key,omitempty"`
+}
+
+// extractPromptCacheKey extracts the prompt_cache_key field from a JSON body.
+// Returns empty string if the field is absent or the body is not valid JSON.
+func extractPromptCacheKey(body []byte) string {
+	var v struct {
+		PromptCacheKey string `json:"prompt_cache_key"`
+	}
+	_ = json.Unmarshal(body, &v) // best-effort; ignore errors
+	return v.PromptCacheKey
+}
+
+// cacheModelCtxKey is the context key for the per-backend cache model name.
+// When set, cache operations use this value instead of the upstream model
+// name, preventing cache key collisions between enclaves with different
+// TLS keys. See [Provider.CacheKeySuffix].
+type cacheModelCtxKey struct{}
+
+// withCacheModel stores the per-backend cache model name in the context.
+func withCacheModel(ctx context.Context, model string) context.Context {
+	return context.WithValue(ctx, cacheModelCtxKey{}, model)
+}
+
+// cacheModelFor returns the cache model name from the context, or falls back
+// to the given model if not set. Used for attestation report cache, signing
+// key cache, negative cache, and e2ee failure tracker keying.
+func cacheModelFor(ctx context.Context, model string) string {
+	if cm, _ := ctx.Value(cacheModelCtxKey{}).(string); cm != "" {
+		return cm
+	}
+	return model
 }
 
 // chatMessage is one message in the chat history.
@@ -387,6 +425,7 @@ type Server struct {
 	attestClient    *http.Client            // for attestation fetches
 	collateral      trust.HTTPSGetter       // for Intel PCS collateral fetches
 	verifyQuote     attestation.TDXVerifier // constructed from cfg.Offline + collateral
+	sevVerifier     attestation.SEVVerifier // constructed from cfg.Offline + AMD KDS getter
 	upstreamClient  *http.Client            // for chat completions forwards
 	sseConns        atomic.Int64            // active SSE /events connections
 	e2eeFailed      sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
@@ -402,6 +441,7 @@ func New(cfg *config.Config) (*Server, error) {
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	}, !cfg.Offline)
+	attestClient.Transport = tlsct.NewTLS12FallbackTransport(attestClient.Transport, attestation.AMDKDSHost)
 
 	s := &Server{
 		cfg:             cfg,
@@ -435,6 +475,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.nvidiaVerifier = attestation.DefaultNVIDIAVerifier()
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral)
+	s.sevVerifier = attestation.NewSEVVerifier(cfg.Offline, attestation.NewSEVCertGetter(s.attestClient))
 
 	for name, cp := range cfg.Providers {
 		if cp == nil {
@@ -480,6 +521,8 @@ func New(cfg *config.Config) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/images/generations", s.handleEndpoint(&imagesEndpoint))
 	s.mux.HandleFunc("POST /v1/rerank", s.handleEndpoint(&rerankEndpoint))
 	s.mux.HandleFunc("POST /v1/score", s.handleEndpoint(&scoreEndpoint))
+	s.mux.HandleFunc("POST /v1/responses", s.handleEndpoint(&responsesEndpoint))
+	s.mux.HandleFunc("POST /v1/audio/speech", s.handleEndpoint(&speechEndpoint))
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
 
@@ -747,8 +790,76 @@ func fromConfig(
 		p.E2EEMaterialFetcher = chutesProvider.NewNoncePool(
 			cp.BaseURL, cp.APIKey, attester.Resolver(), config.NewAttestationClient(offline),
 		)
+	case "tinfoil_v3_cloud":
+		p.ChatPath = "/v1/chat/completions"
+		p.EmbeddingsPath = "/v1/embeddings"
+		p.AudioPath = "/v1/audio/transcriptions"
+		p.ResponsesPath = "/v1/responses"
+		p.SpeechPath = "/v1/audio/speech"
+		p.UsesTLSBinding = true
+		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
+		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
+		p.Encryptor = tinfoil.NewE2EE()
+		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
+		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		p.SigstoreRepoForModel = func(_ string) string {
+			return "tinfoilsh/confidential-model-router"
+		}
+		p.ModelLister = provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
+		p.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+			return "inference.tinfoil.sh", true
+		}
+	case "tinfoil_v3_direct":
+		resolver := tinfoil.NewDirectResolver(cp.APIKey, offline)
+		p.BaseURL = tinfoil.DefaultBaseURL // fallback for model discovery
+		p.ChatPath = "/v1/chat/completions"
+		p.EmbeddingsPath = "/v1/embeddings"
+		p.AudioPath = "/v1/audio/transcriptions"
+		p.ResponsesPath = "/v1/responses"
+		p.SpeechPath = "/v1/audio/speech"
+		p.UsesTLSBinding = true
+		p.Attester = tinfoil.NewDirectAttester(resolver, cp.APIKey, offline)
+		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
+		p.Encryptor = tinfoil.NewE2EE()
+		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
+		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		p.SigstoreRepoForModel = func(model string) string {
+			m, err := resolver.ResolveMapping(context.Background(), model)
+			if err != nil || m.Repo == "" {
+				return tinfoil.RepoForModel(model)
+			}
+			return m.Repo
+		}
+		p.BaseURLForModel = func(ctx context.Context, model string) (string, error) {
+			m, err := resolver.ResolveMapping(ctx, model)
+			if err != nil {
+				return "", fmt.Errorf("tinfoil direct: resolve model %q: %w", model, err)
+			}
+			promptCacheKey := tinfoil.PromptCacheKeyFromContext(ctx)
+			domain := m.SelectDomain(promptCacheKey)
+			return "https://" + domain, nil
+		}
+		p.ModelLister = provider.NewModelLister(tinfoil.DefaultBaseURL, cp.APIKey, config.NewAttestationClient(offline))
+		p.SPKIDomainForModel = func(ctx context.Context, model string) (string, bool) {
+			m, err := resolver.ResolveMapping(ctx, model)
+			if err != nil {
+				slog.WarnContext(ctx, "tinfoil direct: SPKI domain resolution failed",
+					"model", model, "err", err)
+				return "", false
+			}
+			promptCacheKey := tinfoil.PromptCacheKeyFromContext(ctx)
+			return m.SelectDomain(promptCacheKey), true
+		}
+		p.CacheKeySuffix = func(ctx context.Context, model string) string {
+			m, err := resolver.ResolveMapping(ctx, model)
+			if err != nil {
+				return ""
+			}
+			promptCacheKey := tinfoil.PromptCacheKeyFromContext(ctx)
+			return m.SelectDomain(promptCacheKey)
+		}
 	default:
-		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt, phalacloud, chutes)", cp.Name)
+		return nil, fmt.Errorf("unknown provider %q (supported: venice, neardirect, nearcloud, nanogpt, phalacloud, chutes, tinfoil_v3_cloud, tinfoil_v3_direct)", cp.Name)
 	}
 
 	// Invariant: any provider with a PinnedHandler must have SPKIDomainForModel
@@ -787,7 +898,7 @@ func (s *Server) resolveModel(clientModel string) (*provider.Provider, string, b
 func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, upstreamModel string) (*attestation.VerificationReport, *attestation.RawAttestation) {
 	if prov.Attester == nil {
 		slog.ErrorContext(ctx, "provider has no Attester", "provider", prov.Name, "model", upstreamModel)
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		return nil, nil
 	}
 
@@ -799,17 +910,19 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	raw, err := prov.Attester.FetchAttestation(ctx, upstreamModel, nonce)
 	if err != nil {
 		slog.ErrorContext(ctx, "attestation fetch failed", "provider", prov.Name, "model", upstreamModel, "err", err)
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		return nil, nil
 	}
 	fetchDur := time.Since(fetchStart)
 	slog.DebugContext(ctx, "attestation fetch complete", "provider", prov.Name, "elapsed", fetchDur)
 
 	tdxResult, tdxDur := s.verifyTDX(ctx, raw, nonce, prov)
+	sevResult, sevDur := s.verifySEV(ctx, raw, nonce, prov)
 	nvidiaResult, nvidiaDur := verifyNVIDIA(ctx, raw, nonce, prov.Name)
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
 	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult)
+	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov, upstreamModel)
 
 	totalDur := time.Since(totalStart)
 	slog.InfoContext(ctx, "verification complete",
@@ -818,34 +931,40 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		"total", fmtDur(totalDur),
 		"fetch", fmtDur(fetchDur),
 		"tdx", fmtDur(tdxDur),
+		"sev", fmtDur(sevDur),
 		"nvidia", fmtDur(nvidiaDur),
 		"nras", fmtDur(nrasDur),
 		"poc", fmtDur(pocDur),
 		"compose", fmtDur(composeDur),
+		"tinfoil_sc", fmtDur(tinfoilSCDur),
 	)
 
 	ms := s.stats.getModelStats(prov.Name, upstreamModel)
 	ms.lastVerifyMs.Store(totalDur.Milliseconds())
 
 	report := attestation.BuildReport(&attestation.ReportInput{
-		Provider:          prov.Name,
-		Model:             upstreamModel,
-		Raw:               raw,
-		Nonce:             nonce,
-		AllowFail:         config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
-		Policy:            prov.MeasurementPolicy,
-		GatewayPolicy:     prov.GatewayMeasurementPolicy,
-		SupplyChainPolicy: prov.SupplyChainPolicy,
-		ImageRepos:        sc.ImageRepos,
-		DigestToRepo:      sc.DigestToRepo,
-		TDX:               tdxResult,
-		Nvidia:            nvidiaResult,
-		NvidiaNRAS:        nrasResult,
-		PoC:               pocResult,
-		Compose:           sc.Compose,
-		Sigstore:          sc.Sigstore,
-		Rekor:             sc.Rekor,
-		E2EEConfigured:    prov.E2EE,
+		Provider:               prov.Name,
+		Model:                  upstreamModel,
+		Raw:                    raw,
+		Nonce:                  nonce,
+		AllowFail:              config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
+		Policy:                 prov.MeasurementPolicy,
+		GatewayPolicy:          prov.GatewayMeasurementPolicy,
+		SupplyChainPolicy:      prov.SupplyChainPolicy,
+		ImageRepos:             sc.ImageRepos,
+		DigestToRepo:           sc.DigestToRepo,
+		TDX:                    tdxResult,
+		SEV:                    sevResult,
+		Nvidia:                 nvidiaResult,
+		NvidiaNRAS:             nrasResult,
+		PoC:                    pocResult,
+		Compose:                sc.Compose,
+		Sigstore:               sc.Sigstore,
+		Rekor:                  sc.Rekor,
+		TinfoilSC:              tinfoilSC,
+		E2EEConfigured:         prov.E2EE,
+		Inapplicable:           inapplicableForProvider(prov.Name),
+		ProviderUsesTLSBinding: prov.UsesTLSBinding,
 	})
 	return report, raw
 }
@@ -877,6 +996,33 @@ func (s *Server) verifyTDX(
 	return result, dur
 }
 
+// verifySEV runs SEV-SNP report verification and REPORTDATA binding.
+func (s *Server) verifySEV(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	nonce attestation.Nonce,
+	prov *provider.Provider,
+) (*attestation.SEVVerifyResult, time.Duration) {
+	if len(raw.SEVReportBytes) == 0 {
+		return nil, 0
+	}
+	slog.DebugContext(ctx, "SEV-SNP verification starting", "provider", prov.Name)
+	start := time.Now()
+	result := s.sevVerifier(ctx, raw.SEVReportBytes)
+	if prov.ReportDataVerifier != nil && result.ParseErr == nil {
+		detail, err := prov.ReportDataVerifier.VerifyReportData(result.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.DebugContext(ctx, "no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			result.ReportDataBindingErr = err
+			result.ReportDataBindingDetail = detail
+		}
+	}
+	dur := time.Since(start)
+	slog.DebugContext(ctx, "SEV-SNP verification complete", "provider", prov.Name, "elapsed", dur)
+	return result, dur
+}
+
 // verifyNVIDIA runs offline NVIDIA payload or GPU direct verification.
 func verifyNVIDIA(
 	ctx context.Context,
@@ -894,7 +1040,7 @@ func verifyNVIDIA(
 	}
 	if len(raw.GPUEvidence) > 0 {
 		slog.DebugContext(ctx, "NVIDIA GPU direct verification starting", "provider", provName, "gpus", len(raw.GPUEvidence))
-		serverNonce, err := attestation.ParseNonce(raw.Nonce)
+		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
 		if err != nil {
 			return &attestation.NvidiaVerifyResult{
 				SignatureErr: fmt.Errorf("parse server nonce: %w", err),
@@ -936,6 +1082,19 @@ func (s *Server) verifyNVIDIAOnline(
 		return result, dur
 	}
 	return nil, 0
+}
+
+func inapplicableForProvider(provName string) attestation.InapplicableFactors {
+	switch provName {
+	case "venice", "neardirect", "nearcloud", "nanogpt", "phalacloud":
+		return attestation.DefaultInapplicableFactors()
+	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
+		return tinfoil.InapplicableFactors()
+	case "chutes":
+		return chutesProvider.InapplicableFactors()
+	default:
+		return attestation.DefaultInapplicableFactors()
+	}
 }
 
 // verifyPoC runs the Proof of Cloud check against quorum peers.
@@ -1010,6 +1169,127 @@ func (s *Server) verifySupplyChain(
 	}
 
 	return sc, time.Since(start)
+}
+
+// verifyTinfoilSupplyChain performs Tinfoil-specific Sigstore supply chain
+// verification and code/hardware measurement comparison. Returns nil for
+// non-Tinfoil providers.
+func (s *Server) verifyTinfoilSupplyChain(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	tdxResult *attestation.TDXVerifyResult,
+	sevResult *attestation.SEVVerifyResult,
+	prov *provider.Provider,
+	upstreamModel string,
+) (*attestation.TinfoilSupplyChainResult, time.Duration) {
+	if raw.BackendFormat != attestation.FormatTinfoil || prov.SigstoreRepoForModel == nil {
+		return nil, 0
+	}
+	sigstoreRepo := prov.SigstoreRepoForModel(upstreamModel)
+	if sigstoreRepo == "" {
+		return nil, 0
+	}
+	start := time.Now()
+	result := &attestation.TinfoilSupplyChainResult{}
+
+	// Check GPU hash bound from REPORTDATA verification detail.
+	bindingDetail := ""
+	if tdxResult != nil {
+		bindingDetail = tdxResult.ReportDataBindingDetail
+	} else if sevResult != nil {
+		bindingDetail = sevResult.ReportDataBindingDetail
+	}
+	result.GPUHashBound = strings.Contains(bindingDetail, "gpu_bound=true")
+	result.NVSwitchHashBound = strings.Contains(bindingDetail, "nvswitch_bound=true")
+	result.NVSwitchExpected = strings.Contains(bindingDetail, "nvswitch_bound=")
+
+	// TDX policy checks.
+	if tdxResult != nil && tdxResult.ParseErr == nil {
+		pol := tinfoil.CheckTDXPolicy(tdxResult, prov.MeasurementPolicy.MRSeamAllow)
+		result.TDXPolicyErr = pol.Err()
+		if result.TDXPolicyErr == nil {
+			result.TDXPolicyDetail = "Tinfoil TDX policy: TD_ATTRIBUTES, XFAM, MR_SEAM, MR registers, RTMR3, TEE_TCB_SVN all pass"
+		} else {
+			result.TDXPolicyDetail = fmt.Sprintf("Tinfoil TDX policy checks failed: %v", result.TDXPolicyErr)
+		}
+	}
+
+	// Sigstore DSSE bundle verification.
+	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(s.cfg.Offline))
+	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, sigstoreRepo)
+	if err != nil {
+		result.SigstoreErr = err
+		slog.WarnContext(ctx, "Tinfoil Sigstore verification failed",
+			"repo", sigstoreRepo, "err", err)
+		return result, time.Since(start)
+	}
+	result.SigstoreVerified = true
+	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", sigstoreRepo, predicateType)
+
+	// Parse code measurements from the verified predicate.
+	if predicateType != tinfoil.PredicateMultiPlatform {
+		result.CodeMatchErr = fmt.Errorf("unexpected predicate type %q, want %q", predicateType, tinfoil.PredicateMultiPlatform)
+		return result, time.Since(start)
+	}
+	codeMeasurements, err := tinfoil.ParseMultiPlatformPredicate(predicateBytes)
+	if err != nil {
+		result.CodeMatchErr = fmt.Errorf("parse multi-platform predicate: %w", err)
+		return result, time.Since(start)
+	}
+
+	// Build enclave measurements and compare.
+	switch {
+	case tdxResult != nil && tdxResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromTDX(tdxResult)
+		if err := tinfoil.CompareMultiPlatformTDX(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("TDX code measurements match Sigstore predicate (RTMR1=%s..., RTMR2=%s...)",
+				truncTo(codeMeasurements.RTMR1, 16), truncTo(codeMeasurements.RTMR2, 16))
+		}
+
+		// Hardware measurement match (TDX only).
+		hwPredBytes, hwPredType, hwErr := sv.FetchAndVerify(ctx, "tinfoilsh/hardware-measurements")
+		switch {
+		case hwErr != nil:
+			result.HWMatchErr = fmt.Errorf("fetch hardware measurements: %w", hwErr)
+		case hwPredType != tinfoil.PredicateHardwareMeasurements:
+			result.HWMatchErr = fmt.Errorf("unexpected hardware predicate type %q", hwPredType)
+		default:
+			entries, parseErr := tinfoil.ParseHardwareMeasurements(hwPredBytes)
+			if parseErr != nil {
+				result.HWMatchErr = fmt.Errorf("parse hardware measurements: %w", parseErr)
+			} else if matchID, matchErr := tinfoil.MatchHardwareMeasurements(entries, enclave); matchErr != nil {
+				result.HWMatchErr = matchErr
+			} else {
+				result.HWMatch = matchID
+			}
+		}
+
+	case sevResult != nil && sevResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromSEV(sevResult)
+		if err := tinfoil.CompareMultiPlatformSEVSNP(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("SEV-SNP code measurement matches Sigstore predicate (%s...)",
+				truncTo(codeMeasurements.SNPMeasurement, 16))
+		}
+
+	default:
+		result.CodeMatchErr = errors.New("no parseable TDX or SEV-SNP result for code measurement comparison")
+	}
+
+	return result, time.Since(start)
+}
+
+// truncTo returns the first n characters of s, or s itself if shorter.
+func truncTo(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // --------------------------------------------------------------------------
@@ -1145,6 +1425,23 @@ var (
 			return "", false
 		},
 	}
+	responsesEndpoint = endpointConfig{
+		name:         "responses",
+		endpointType: e2ee.EndpointResponses,
+		endpointPath: func(p *provider.Provider) string { return p.ResponsesPath },
+		unsupported:  "responses",
+		parseRequest: parseChatRequest,
+		contentType:  "application/json",
+		canStream:    true,
+	}
+	speechEndpoint = endpointConfig{
+		name:         "speech",
+		endpointType: e2ee.EndpointSpeech,
+		endpointPath: func(p *provider.Provider) string { return p.SpeechPath },
+		unsupported:  "text-to-speech",
+		parseRequest: parseJSONModelRequest,
+		contentType:  "application/json",
+	}
 )
 
 // handleEndpoint returns an http.HandlerFunc that handles requests for the
@@ -1178,6 +1475,22 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		if !ok {
 			http.Error(w, fmt.Sprintf("unknown model %q: use provider:model format (e.g. venice:qwen3-5b)", model), http.StatusBadRequest)
 			return
+		}
+
+		// Extract prompt_cache_key for cache-aware backend selection.
+		// When present, the resolver uses hash-based sticky routing to
+		// select a backend enclave domain, maximizing vLLM APC hit rates.
+		promptCacheKey := extractPromptCacheKey(body)
+		ctx = tinfoil.WithPromptCacheKey(ctx, promptCacheKey)
+
+		// Compute per-backend cache model key to prevent attestation cache
+		// collisions between enclaves with different TLS keys. When
+		// CacheKeySuffix returns a domain, all cache operations for this
+		// request use "model@domain" instead of just "model".
+		if prov.CacheKeySuffix != nil {
+			if suffix := prov.CacheKeySuffix(ctx, upstreamModel); suffix != "" {
+				ctx = withCacheModel(ctx, upstreamModel+"@"+suffix)
+			}
 		}
 
 		body, err = rewriteModelInBody(r.Header.Get("Content-Type"), body, ep.contentType, upstreamModel)
@@ -1231,7 +1544,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 			s.stats.nonStream.Add(1)
 		}
 
-		if s.negCache.IsBlocked(prov.Name, upstreamModel) {
+		if s.negCache.IsBlocked(prov.Name, cacheModelFor(ctx, upstreamModel)) {
 			status = "neg_cached"
 			s.stats.errors.Add(1)
 			ms.errors.Add(1)
@@ -1283,7 +1596,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		if ar.E2EEActive {
 			cloned := report.Clone()
 			cloned.MarkE2EEUsable("E2EE roundtrip succeeded via proxy")
-			s.cache.Put(prov.Name, upstreamModel, cloned)
+			s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 		}
 		s.stats.lastSuccessAt.Store(time.Now().UnixNano())
 		status = "ok"
@@ -1362,6 +1675,7 @@ func (s *Server) relayWithRetry(
 		resp := ur.Resp
 		session := ur.Session
 		meta := ur.Meta
+		ehbp := ur.EHBP
 		if meta != nil && meta.ChuteID != "" {
 			lastChuteID = meta.ChuteID
 		}
@@ -1371,7 +1685,7 @@ func (s *Server) relayWithRetry(
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 10<<20))
 			resp.Body.Close()
 			ur.Cancel()
-			zeroE2EESessions(session, meta)
+			zeroE2EE(session, meta, ehbp)
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -1410,6 +1724,22 @@ func (s *Server) relayWithRetry(
 			return result
 		}
 
+		// EHBP response unwrapping: decrypt the full response body before
+		// relay so standard relay functions see plaintext SSE/JSON.
+		if ehbp != nil {
+			status, ok := s.unwrapEHBPResponse(ctx, resp, ehbp, prov.Name, upstreamModel, ri, riWriter)
+			if !ok {
+				cleanupAttempt()
+				ehbpErr := fmt.Errorf("EHBP: %s", status)
+				result.status = s.handleE2EEDecryptionFailure(ctx, prov, upstreamModel, ms, false, "", ehbpErr)
+				return result
+			}
+			ehbp.Zero()
+			ehbp = nil
+			session = nil
+			meta = nil
+		}
+
 		upstreamRelayStart := time.Now()
 		ss, relayErr = relayResponse(ctx, riWriter, resp.Body, session, meta, stream, endpoint)
 		result.upstreamDur += time.Since(upstreamRelayStart)
@@ -1419,12 +1749,7 @@ func (s *Server) relayWithRetry(
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 10<<20))
 		resp.Body.Close()
 		ur.Cancel()
-		if session != nil {
-			session.Zero()
-		}
-		if meta != nil && meta.Session != nil {
-			meta.Session.Zero()
-		}
+		zeroE2EE(session, meta, ehbp)
 
 		if relayErr == nil {
 			// Relay succeeded.
@@ -1524,7 +1849,7 @@ func (s *Server) handleE2EEDecryptionFailure(
 		// Non-Chutes: mark the provider+model pair as globally failed.
 		// This is a stronger signal — possible MITM or server-side E2EE
 		// breakage. Block all subsequent requests until re-attestation.
-		s.e2eeFailed.Store(providerModelKey{prov.Name, upstreamModel}, true)
+		s.e2eeFailed.Store(providerModelKey{prov.Name, cacheModelFor(ctx, upstreamModel)}, true)
 	}
 
 	// Demote e2ee_usable in the cached report so the report endpoint
@@ -1532,15 +1857,15 @@ func (s *Server) handleE2EEDecryptionFailure(
 	// a concurrent reader may still see it briefly. Keep the report detail
 	// sanitized: relayErr may wrap lower-level decrypt errors that include
 	// upstream content, which must never be exposed via the report endpoint.
-	if cachedReport, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+	if cachedReport, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		cloned := cachedReport.Clone()
 		cloned.MarkE2EEFailed("E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
-		s.cache.Put(prov.Name, upstreamModel, cloned)
+		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 	}
 
 	// Invalidate caches to force full re-attestation on the next request.
-	s.cache.Delete(prov.Name, upstreamModel)
-	s.signingKeyCache.Delete(prov.Name, upstreamModel)
+	s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+	s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 
 	slog.ErrorContext(ctx, "E2EE decryption failed; caches invalidated",
 		"provider", prov.Name, "model", upstreamModel, "err", relayErr)
@@ -1557,9 +1882,9 @@ func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWrite
 	if !prov.E2EE {
 		return true
 	}
-	if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+	if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		if !cached.ReportDataBindingPassed() {
-			slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
+			slog.ErrorContext(ctx, "E2EE required but tee_reportdata_binding not passed; refusing request",
 				"provider", prov.Name, "model", upstreamModel)
 			http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
 			return false
@@ -1609,7 +1934,7 @@ func (s *Server) pinnedPostDispatchE2EE(
 	// Without one (e.g. attestation cache expired while SPKI cache is live),
 	// we cannot verify the signing key is bound to the TDX quote.
 	if report == nil {
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		slog.ErrorContext(ctx, "E2EE required but no attestation report available",
 			"provider", prov.Name, "model", upstreamModel)
 		http.Error(w, "E2EE required but no attestation report available; refusing request", http.StatusBadGateway)
@@ -1619,8 +1944,8 @@ func (s *Server) pinnedPostDispatchE2EE(
 	// miss). Without it a MITM can substitute the enclave public key and
 	// E2EE degrades to plaintext.
 	if !report.ReportDataBindingPassed() {
-		s.negCache.Record(prov.Name, upstreamModel)
-		slog.ErrorContext(ctx, "E2EE required but tdx_reportdata_binding not passed; refusing request",
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
+		slog.ErrorContext(ctx, "E2EE required but tee_reportdata_binding not passed; refusing request",
 			"provider", prov.Name, "model", upstreamModel)
 		http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
 		return false
@@ -1628,15 +1953,15 @@ func (s *Server) pinnedPostDispatchE2EE(
 	// Clear stale E2EE failure markers only after a confirmed fresh pinned
 	// attestation (freshReport=true). On an SPKI cache hit the pinned
 	// handler skips attestation: fail closed and force re-attestation.
-	key := providerModelKey{prov.Name, upstreamModel}
+	key := providerModelKey{prov.Name, cacheModelFor(ctx, upstreamModel)}
 	if _, failed := s.e2eeFailed.Load(key); failed {
 		if freshReport {
 			s.e2eeFailed.Delete(key)
 			slog.InfoContext(ctx, "Cleared prior E2EE failure after successful fresh pinned attestation",
 				"provider", prov.Name, "model", upstreamModel)
 		} else {
-			s.cache.Delete(prov.Name, upstreamModel)
-			s.signingKeyCache.Delete(prov.Name, upstreamModel)
+			s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+			s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 			slog.ErrorContext(ctx, "E2EE previously failed; cached pinned attestation insufficient for recovery",
 				"provider", prov.Name, "model", upstreamModel)
 			s.stats.errors.Add(1)
@@ -1686,7 +2011,7 @@ func (s *Server) handlePinnedChat(
 	}
 	// Supply the cached signing key for E2EE on SPKI cache hits.
 	if prov.E2EE {
-		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
+		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 			pinnedReq.SigningKey = cachedKey
 		}
 	}
@@ -1701,7 +2026,7 @@ func (s *Server) handlePinnedChat(
 
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(ctx, &pinnedReq)
 	if err != nil {
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		slog.ErrorContext(ctx, "pinned chat failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
@@ -1712,19 +2037,19 @@ func (s *Server) handlePinnedChat(
 	// to enforce fail-closed policy before forwarding any upstream response.
 	report := pinnedResp.Report
 	if report != nil {
-		s.cache.Put(prov.Name, upstreamModel, report)
-	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
+	} else if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		report = cached
 	}
 	if !s.enforceReport(ctx, w, report, prov, upstreamModel) {
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		return
 	}
 	if !s.pinnedPostDispatchE2EE(ctx, w, prov, upstreamModel, report, pinnedResp.Report != nil) {
 		return
 	}
 	if pinnedResp.SigningKey != "" {
-		s.signingKeyCache.Put(prov.Name, upstreamModel, pinnedResp.SigningKey)
+		s.signingKeyCache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), pinnedResp.SigningKey)
 	}
 
 	// Copy response headers, excluding hop-by-hop headers that Go's
@@ -1776,19 +2101,19 @@ func (s *Server) handlePinnedPostRelay(
 	if relayErr != nil && errors.Is(relayErr, e2ee.ErrDecryptionFailed) && session != nil {
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
-		s.e2eeFailed.Store(providerModelKey{prov.Name, upstreamModel}, true)
+		s.e2eeFailed.Store(providerModelKey{prov.Name, cacheModelFor(ctx, upstreamModel)}, true)
 
 		// Demote e2ee_usable in the cached report so the report endpoint
 		// reflects the failure before the cache entry is deleted. Keep detail
 		// sanitized: relayErr may include upstream content.
-		if cachedReport, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		if cachedReport, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 			cloned := cachedReport.Clone()
 			cloned.MarkE2EEFailed("pinned E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
-			s.cache.Put(prov.Name, upstreamModel, cloned)
+			s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 		}
 
-		s.cache.Delete(prov.Name, upstreamModel)
-		s.signingKeyCache.Delete(prov.Name, upstreamModel)
+		s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+		s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 		slog.ErrorContext(ctx, "pinned E2EE decryption failed; caches invalidated",
 			"provider", prov.Name, "model", upstreamModel, "err", relayErr)
 		return
@@ -1808,7 +2133,7 @@ func (s *Server) handlePinnedPostRelay(
 	if session != nil && report != nil {
 		cloned := report.Clone()
 		cloned.MarkE2EEUsable("E2EE roundtrip succeeded via pinned connection")
-		s.cache.Put(prov.Name, upstreamModel, cloned)
+		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 	}
 	s.stats.lastSuccessAt.Store(time.Now().UnixNano())
 }
@@ -1834,7 +2159,7 @@ func (s *Server) attestAndCache(
 ) (result *attestResult, failStatus string) {
 	attestStart := time.Now()
 	var raw *attestation.RawAttestation
-	report, cached := s.cache.Get(prov.Name, upstreamModel)
+	report, cached := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel))
 	if cached {
 		s.stats.cacheHits.Add(1)
 	} else {
@@ -1846,7 +2171,7 @@ func (s *Server) attestAndCache(
 			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
 			return &attestResult{AttestDur: time.Since(attestStart)}, "attest_failed"
 		}
-		s.cache.Put(prov.Name, upstreamModel, report)
+		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
 	}
 
 	if !s.enforceReport(ctx, w, report, prov, upstreamModel) {
@@ -1859,10 +2184,10 @@ func (s *Server) attestAndCache(
 	// the Blocked() check would allow a key from a failed attestation to
 	// be reused for E2EE on a subsequent cache-hit request.
 	if raw != nil && raw.SigningKey != "" {
-		if prev, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok && subtle.ConstantTimeCompare([]byte(prev), []byte(raw.SigningKey)) == 0 {
+		if prev, ok := s.signingKeyCache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok && subtle.ConstantTimeCompare([]byte(prev), []byte(raw.SigningKey)) == 0 {
 			slog.WarnContext(ctx, "signing key rotated (VM restart?)", "provider", prov.Name, "model", upstreamModel)
 		}
-		s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
+		s.signingKeyCache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), raw.SigningKey)
 	}
 
 	e2eeActive := prov.E2EE && report.ReportDataBindingPassed()
@@ -1924,6 +2249,51 @@ func relayResponse(ctx context.Context, w http.ResponseWriter, body io.Reader,
 	default:
 		return e2ee.RelayNonStreamForEndpoint(ctx, w, body, nil, endpoint)
 	}
+}
+
+// unwrapEHBPResponse decrypts an EHBP-encrypted response body in place,
+// replacing resp.Body with a plaintext reader. Returns a status string and
+// false on failure; the caller must clean up and return. On success returns
+// ("", true) and resp.Body is ready for standard relay.
+func (s *Server) unwrapEHBPResponse(
+	ctx context.Context,
+	resp *http.Response,
+	ehbp *e2ee.EHBPSession,
+	provName, upstreamModel string,
+	ri *responseInterceptor,
+	riWriter http.ResponseWriter,
+) (string, bool) {
+	nonceHex := resp.Header.Get("Ehbp-Response-Nonce")
+	if nonceHex == "" {
+		slog.ErrorContext(ctx, "EHBP response missing Ehbp-Response-Nonce header",
+			"provider", provName, "model", upstreamModel)
+		if !ri.headerSent {
+			ri.WriteHeader(http.StatusBadGateway)
+			_, _ = riWriter.Write([]byte("EHBP response missing Ehbp-Response-Nonce header\n"))
+		}
+		return "ehbp_missing_nonce", false
+	}
+	if len(nonceHex) != 64 {
+		slog.ErrorContext(ctx, "EHBP response nonce wrong length",
+			"provider", provName, "model", upstreamModel, "len", len(nonceHex))
+		if !ri.headerSent {
+			ri.WriteHeader(http.StatusBadGateway)
+			_, _ = riWriter.Write([]byte("EHBP response nonce invalid\n"))
+		}
+		return "ehbp_invalid_nonce", false
+	}
+	decryptedBody, err := ehbp.DecryptResponse(resp.Body, nonceHex)
+	if err != nil {
+		slog.ErrorContext(ctx, "EHBP response decryption failed",
+			"provider", provName, "model", upstreamModel, "err", err)
+		if !ri.headerSent {
+			ri.WriteHeader(http.StatusBadGateway)
+			_, _ = riWriter.Write([]byte("EHBP response decryption failed\n"))
+		}
+		return "ehbp_decrypt_failed", false
+	}
+	resp.Body = decryptedBody
+	return "", true
 }
 
 // responseInterceptor wraps an http.ResponseWriter to detect whether headers
@@ -2007,9 +2377,67 @@ type upstreamResult struct {
 	Resp        *http.Response
 	Session     e2ee.Decryptor
 	Meta        *e2ee.ChutesE2EE
+	EHBP        *e2ee.EHBPSession
 	Cancel      context.CancelFunc
 	E2EEDur     time.Duration
 	UpstreamDur time.Duration
+}
+
+// setUpstreamConnectionHeaders sets Connection and EHBP headers on the
+// upstream request. For TLS-binding providers, Connection: close is set
+// when a fresh attestation was fetched (cache miss) to prevent TLS
+// connection reuse across attestation boundaries. On cache hits, the
+// connection is reusable — the per-response SPKI verification in
+// verifyUpstreamTLSBinding ensures the connection remains bound to the
+// attested enclave.
+func setUpstreamConnectionHeaders(req *http.Request, prov *provider.Provider, raw *attestation.RawAttestation, ehbp *e2ee.EHBPSession) {
+	if prov.UsesTLSBinding && raw != nil {
+		req.Header.Set("Connection", "close")
+	}
+	if ehbp != nil {
+		req.Header.Set("Ehbp-Encapsulated-Key", ehbp.EncapKeyHex())
+		req.ContentLength = -1 // force chunked transfer encoding
+	}
+}
+
+// verifyUpstreamTLSBinding checks that the live upstream TLS peer SPKI
+// matches the attested tls_key_fp from the attestation report. This
+// prevents MITM attacks between teep and the enclave after attestation
+// completes. The attestation fetch already verifies the peer SPKI, but
+// the upstream inference connection must also be bound to the same
+// attested identity.
+//
+// On mismatch, invalidates all caches to force re-attestation on the next
+// request. Returns an *httpError on failure, nil on success.
+func (s *Server) verifyUpstreamTLSBinding(
+	ctx context.Context,
+	prov *provider.Provider,
+	upstreamModel string,
+	resp *http.Response,
+	raw *attestation.RawAttestation,
+) *httpError {
+	peerSPKI := tlsct.PeerSPKI(resp.TLS)
+	if peerSPKI == "" {
+		return &httpError{http.StatusBadGateway, "tls_binding_failed",
+			errors.New("upstream TLS binding failed: no TLS peer state on upstream connection")}
+	}
+	if subtle.ConstantTimeCompare([]byte(peerSPKI), []byte(raw.TinfoilTLSKeyFP)) != 1 {
+		slog.ErrorContext(ctx, "upstream TLS SPKI mismatch: live peer does not match attested fingerprint",
+			"provider", prov.Name, "model", upstreamModel,
+			"live_spki", provider.Truncate(peerSPKI, 16),
+			"attested_spki", provider.Truncate(raw.TinfoilTLSKeyFP, 16))
+		// Invalidate caches to force re-attestation on next request.
+		s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+		s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+		if prov.SPKIDomainForModel != nil {
+			if domain, ok := prov.SPKIDomainForModel(ctx, upstreamModel); ok && domain != "" {
+				s.spkiCache.DeleteDomain(domain)
+			}
+		}
+		return &httpError{http.StatusBadGateway, "tls_binding_failed",
+			errors.New("upstream TLS SPKI mismatch: live peer fingerprint does not match attested tls_key_fp")}
+	}
+	return nil
 }
 
 // doUpstreamRoundtrip builds the upstream body, sends it, and handles Chutes
@@ -2027,7 +2455,16 @@ func (s *Server) doUpstreamRoundtrip(
 	contentType string,
 	endpoint e2ee.EndpointType,
 ) (*upstreamResult, error) {
-	upstreamURL := prov.BaseURL + endpointPath
+	baseURL := prov.BaseURL
+	if prov.BaseURLForModel != nil {
+		resolved, err := prov.BaseURLForModel(ctx, upstreamModel)
+		if err != nil {
+			return &upstreamResult{}, &httpError{http.StatusBadGateway, "model_resolution_failed",
+				fmt.Errorf("resolve upstream URL for model %q: %w", upstreamModel, err)}
+		}
+		baseURL = resolved
+	}
+	upstreamURL := baseURL + endpointPath
 	upstreamTimeout := upstreamStreamTimeout
 	if !stream {
 		upstreamTimeout = upstreamNonStreamTimeout
@@ -2042,6 +2479,7 @@ func (s *Server) doUpstreamRoundtrip(
 	var (
 		session     e2ee.Decryptor
 		meta        *e2ee.ChutesE2EE
+		ehbp        *e2ee.EHBPSession
 		resp        *http.Response
 		cancel      context.CancelFunc
 		err         error
@@ -2074,22 +2512,31 @@ func (s *Server) doUpstreamRoundtrip(
 
 		session = ub.Session
 		meta = ub.Meta
+		ehbp = ub.EHBP
 
 		var attemptCtx context.Context
 		attemptCtx, cancel = context.WithTimeout(ctx, upstreamTimeout)
 
-		upstreamReq, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(ub.Body))
+		var reqBody io.Reader
+		if ub.BodyReader != nil {
+			reqBody = ub.BodyReader
+		} else {
+			reqBody = bytes.NewReader(ub.Body)
+		}
+		upstreamReq, reqErr := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, reqBody)
 		if reqErr != nil {
 			cancel()
-			zeroE2EESessions(session, meta)
+			zeroE2EE(session, meta, ehbp)
 			return &upstreamResult{E2EEDur: e2eeDur, UpstreamDur: upstreamDur},
 				&httpError{http.StatusInternalServerError, "e2ee_failed", fmt.Errorf("build upstream request: %w", reqErr)}
 		}
 		upstreamReq.Header.Set("Content-Type", contentType)
+		provider.SetUserAgent(upstreamReq)
+		setUpstreamConnectionHeaders(upstreamReq, prov, raw, ehbp)
 
 		if prepErr := prepareUpstreamHeaders(upstreamReq, prov, session, meta, stream, endpointPath); prepErr != nil {
 			cancel()
-			zeroE2EESessions(session, meta)
+			zeroE2EE(session, meta, ehbp)
 			return &upstreamResult{E2EEDur: e2eeDur, UpstreamDur: upstreamDur},
 				&httpError{http.StatusInternalServerError, "e2ee_failed", fmt.Errorf("prepare upstream headers: %w", prepErr)}
 		}
@@ -2097,6 +2544,18 @@ func (s *Server) doUpstreamRoundtrip(
 		upstreamDoStart := time.Now()
 		resp, err = s.upstreamClient.Do(upstreamReq)
 		upstreamDur += time.Since(upstreamDoStart)
+
+		// TLS-fingerprint binding: for providers that use TLS binding
+		// (e.g. Tinfoil), verify the live upstream TLS peer SPKI matches
+		// the attested tls_key_fp from the attestation report.
+		if err == nil && resp != nil && prov.UsesTLSBinding && raw != nil && raw.TinfoilTLSKeyFP != "" {
+			if spkiErr := s.verifyUpstreamTLSBinding(ctx, prov, upstreamModel, resp, raw); spkiErr != nil {
+				cancel()
+				zeroE2EE(session, meta, ehbp)
+				resp.Body.Close()
+				return &upstreamResult{E2EEDur: e2eeDur, UpstreamDur: upstreamDur}, spkiErr
+			}
+		}
 
 		retryable := chutesRetryableError(err, resp)
 
@@ -2114,7 +2573,7 @@ func (s *Server) doUpstreamRoundtrip(
 					"instance_id", ub.InstanceID, "attempt", attempt+1,
 					"err", err, "status", respStatusCode(resp))
 			}
-			zeroE2EESessions(session, meta)
+			zeroE2EE(session, meta, ehbp)
 			if resp != nil {
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 10<<20))
 				resp.Body.Close()
@@ -2129,7 +2588,7 @@ func (s *Server) doUpstreamRoundtrip(
 		if cancel != nil {
 			cancel()
 		}
-		zeroE2EESessions(session, meta)
+		zeroE2EE(session, meta, ehbp)
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 10<<20))
 			resp.Body.Close()
@@ -2142,6 +2601,7 @@ func (s *Server) doUpstreamRoundtrip(
 		Resp:        resp,
 		Session:     session,
 		Meta:        meta,
+		EHBP:        ehbp,
 		Cancel:      cancel,
 		E2EEDur:     e2eeDur,
 		UpstreamDur: upstreamDur,
@@ -2165,7 +2625,7 @@ func (s *Server) buildUpstreamBody(
 ) (*upstreamBody, error) {
 	if !e2eeActive {
 		if prov.E2EE {
-			return nil, fmt.Errorf("E2EE required for %s but tdx_reportdata_binding not passed; refusing plaintext", prov.Name)
+			return nil, fmt.Errorf("E2EE required for %s but tee_reportdata_binding not passed; refusing plaintext", prov.Name)
 		}
 		return &upstreamBody{Body: rawBody}, nil
 	}
@@ -2187,7 +2647,7 @@ func (s *Server) buildUpstreamBody(
 		// key must match the attested key via constant-time comparison
 		// to keep ML-KEM bound to a verified TDX quote.
 		if prov.E2EEMaterialFetcher != nil {
-			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); !ok {
+			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); !ok {
 				slog.DebugContext(ctx, "E2EE key exchange: no cached signing key; skipping nonce pool",
 					"provider", prov.Name, "model", upstreamModel,
 				)
@@ -2221,7 +2681,7 @@ func (s *Server) buildUpstreamBody(
 				}
 			}
 		} else if !prov.SkipSigningKeyCache {
-			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
+			if cachedKey, ok := s.signingKeyCache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 				slog.DebugContext(ctx, "E2EE key exchange: using cached signing key", "provider", prov.Name, "model", upstreamModel)
 				raw = &attestation.RawAttestation{SigningKey: cachedKey}
 			}
@@ -2235,24 +2695,36 @@ func (s *Server) buildUpstreamBody(
 			if err != nil {
 				return nil, fmt.Errorf("fetch signing key: %w", err)
 			}
-			if raw.IntelQuote == "" {
-				return nil, errors.New("fresh attestation missing TDX quote; cannot verify signing key binding")
-			}
 			// Only REPORTDATA binding is needed here, not full online
-			// verification (Intel PCS collateral). The primary
-			// fetchAndVerify() path already did online verification for
-			// the cached report.
-			tdxResult := attestation.VerifyTDXQuoteOffline(ctx, raw.IntelQuote)
-			if tdxResult.ParseErr != nil {
-				return nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
-			}
-			if prov.ReportDataVerifier != nil {
-				_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-				if err != nil {
-					return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+			// verification. The primary fetchAndVerify() path already
+			// did online verification for the cached report.
+			switch {
+			case raw.IntelQuote != "":
+				tdxResult := attestation.VerifyTDXQuoteOffline(ctx, raw.IntelQuote)
+				if tdxResult.ParseErr != nil {
+					return nil, fmt.Errorf("fresh TDX quote parse failed: %w", tdxResult.ParseErr)
 				}
+				if prov.ReportDataVerifier != nil {
+					_, err := prov.ReportDataVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
+					if err != nil {
+						return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+					}
+				}
+			case len(raw.SEVReportBytes) > 0:
+				sevResult := attestation.VerifySEVReportOffline(ctx, raw.SEVReportBytes)
+				if sevResult.ParseErr != nil {
+					return nil, fmt.Errorf("fresh SEV-SNP report parse failed: %w", sevResult.ParseErr)
+				}
+				if prov.ReportDataVerifier != nil {
+					_, err := prov.ReportDataVerifier.VerifyReportData(sevResult.ReportData, raw, nonce)
+					if err != nil {
+						return nil, fmt.Errorf("fresh signing key REPORTDATA binding failed: %w", err)
+					}
+				}
+			default:
+				return nil, errors.New("fresh attestation has no TEE evidence; cannot verify signing key binding")
 			}
-			s.signingKeyCache.Put(prov.Name, upstreamModel, raw.SigningKey)
+			s.signingKeyCache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), raw.SigningKey)
 		}
 	} else {
 		slog.DebugContext(ctx, "E2EE key exchange: reusing attestation from verification (cache miss path)", "provider", prov.Name, "model", upstreamModel)
@@ -2262,14 +2734,16 @@ func (s *Server) buildUpstreamBody(
 		return nil, errors.New("attestation response missing signing_key")
 	}
 
-	encrypted, session, meta, err := prov.Encryptor.EncryptRequest(rawBody, raw, endpoint)
+	result, err := prov.Encryptor.EncryptRequest(rawBody, raw, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	return &upstreamBody{
-		Body:       encrypted,
-		Session:    session,
-		Meta:       meta,
+		Body:       result.Body,
+		BodyReader: result.BodyReader,
+		Session:    result.Session,
+		Meta:       result.Chutes,
+		EHBP:       result.EHBP,
 		ChuteID:    raw.ChuteID,
 		InstanceID: raw.InstanceID,
 	}, nil
@@ -2338,7 +2812,7 @@ func (s *Server) handlePinnedNonChat(
 		Endpoint: endpoint,
 	}
 	if prov.E2EE {
-		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, upstreamModel); ok {
+		if cachedKey, ok := s.signingKeyCache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 			pinnedReq.SigningKey = cachedKey
 		}
 	}
@@ -2348,7 +2822,7 @@ func (s *Server) handlePinnedNonChat(
 
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(reqCtx, &pinnedReq)
 	if err != nil {
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		slog.ErrorContext(ctx, "pinned request failed", "provider", prov.Name, "model", upstreamModel, "path", endpointPath, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
@@ -2357,19 +2831,19 @@ func (s *Server) handlePinnedNonChat(
 
 	report := pinnedResp.Report
 	if report != nil {
-		s.cache.Put(prov.Name, upstreamModel, report)
-	} else if cached, ok := s.cache.Get(prov.Name, upstreamModel); ok {
+		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
+	} else if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		report = cached
 	}
 	if !s.enforceReport(ctx, w, report, prov, upstreamModel) {
-		s.negCache.Record(prov.Name, upstreamModel)
+		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
 		return
 	}
 	if !s.pinnedPostDispatchE2EE(ctx, w, prov, upstreamModel, report, pinnedResp.Report != nil) {
 		return
 	}
 	if pinnedResp.SigningKey != "" {
-		s.signingKeyCache.Put(prov.Name, upstreamModel, pinnedResp.SigningKey)
+		s.signingKeyCache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), pinnedResp.SigningKey)
 	}
 
 	// Copy response headers, excluding hop-by-hop headers that Go's
@@ -2422,7 +2896,7 @@ func (s *Server) clearE2EEFailureIfFresh(
 	ar *attestResult,
 	ms *modelStats,
 ) bool {
-	key := providerModelKey{prov.Name, upstreamModel}
+	key := providerModelKey{prov.Name, cacheModelFor(ctx, upstreamModel)}
 	_, failed := s.e2eeFailed.Load(key)
 	if !failed {
 		return true
@@ -2433,8 +2907,8 @@ func (s *Server) clearE2EEFailureIfFresh(
 			"provider", prov.Name, "model", upstreamModel)
 		return true
 	}
-	s.cache.Delete(prov.Name, upstreamModel)
-	s.signingKeyCache.Delete(prov.Name, upstreamModel)
+	s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+	s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 	slog.ErrorContext(ctx, "E2EE previously failed; cached attestation insufficient for recovery",
 		"provider", prov.Name, "model", upstreamModel)
 	s.stats.errors.Add(1)

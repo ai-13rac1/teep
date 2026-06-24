@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -136,75 +135,6 @@ func TestClassifyUpstreamError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// e2eeFailed enforcement and recovery
-// ---------------------------------------------------------------------------
-
-func TestE2EEFailed_StoreAndRecover(t *testing.T) {
-	// Simulate the e2eeFailed lifecycle: store a failure, verify it's
-	// present, then clear it on successful fresh re-attestation.
-	var e2eeFailed sync.Map
-	key := providerModelKey{provider: "venice", model: "test-model"}
-
-	// Initially not failed.
-	if _, failed := e2eeFailed.Load(key); failed {
-		t.Fatal("should not be failed initially")
-	}
-
-	// Record failure (as handleE2EEDecryptionFailure does).
-	e2eeFailed.Store(key, true)
-	if _, failed := e2eeFailed.Load(key); !failed {
-		t.Fatal("should be failed after Store")
-	}
-
-	// Recovery: clear on successful fresh re-attestation (ar.Raw != nil).
-	freshAttestation := true // simulates ar.Raw != nil
-	if _, failed := e2eeFailed.Load(key); failed {
-		if freshAttestation {
-			e2eeFailed.Delete(key)
-		}
-	}
-	if _, failed := e2eeFailed.Load(key); failed {
-		t.Fatal("should be cleared after fresh attestation")
-	}
-}
-
-func TestE2EEFailed_NotClearedOnCachedAttestation(t *testing.T) {
-	// When the marker is set and attestation comes from cache (ar.Raw == nil),
-	// the marker must NOT be cleared — fail closed until fresh attestation.
-	var e2eeFailed sync.Map
-	key := providerModelKey{provider: "venice", model: "test-model"}
-
-	e2eeFailed.Store(key, true)
-
-	// Simulates cached attestation (ar.Raw == nil).
-	freshAttestation := false
-	if _, failed := e2eeFailed.Load(key); failed {
-		if freshAttestation {
-			e2eeFailed.Delete(key)
-		}
-		// else: fail closed, marker stays
-	}
-	if _, failed := e2eeFailed.Load(key); !failed {
-		t.Fatal("marker should NOT be cleared on cached attestation")
-	}
-}
-
-func TestE2EEFailed_IsolationByKey(t *testing.T) {
-	var e2eeFailed sync.Map
-	key1 := providerModelKey{provider: "venice", model: "model-a"}
-	key2 := providerModelKey{provider: "venice", model: "model-b"}
-
-	e2eeFailed.Store(key1, true)
-
-	if _, failed := e2eeFailed.Load(key1); !failed {
-		t.Error("key1 should be failed")
-	}
-	if _, failed := e2eeFailed.Load(key2); failed {
-		t.Error("key2 should NOT be failed (different model)")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // httpError.Unwrap
 // ---------------------------------------------------------------------------
@@ -222,7 +152,7 @@ func TestHTTPError_Unwrap(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// zeroE2EESessions
+// zeroE2EE
 // ---------------------------------------------------------------------------
 
 type noopDecryptor struct{ zeroed bool }
@@ -233,27 +163,22 @@ func (n *noopDecryptor) IsRequestFieldEncrypted(string) bool                    
 func (n *noopDecryptor) IsResponseFieldEncrypted(string, e2ee.EndpointType) bool { return false }
 func (n *noopDecryptor) Zero()                                                   { n.zeroed = true }
 
-func TestZeroE2EESessions_NilBoth(t *testing.T) {
-	zeroE2EESessions(nil, nil) // must not panic
-}
-
-func TestZeroE2EESessions_WithSession(t *testing.T) {
+func TestZeroE2EE_WithSession(t *testing.T) {
 	dec := &noopDecryptor{}
-	zeroE2EESessions(dec, nil)
+	zeroE2EE(dec, nil, nil)
 	if !dec.zeroed {
 		t.Error("Zero() not called on non-nil session")
 	}
 }
 
-func TestZeroE2EESessions_WithMeta(t *testing.T) {
+func TestZeroE2EE_WithMeta(t *testing.T) {
 	sess, err := e2ee.NewChutesSession()
 	if err != nil {
 		t.Fatalf("NewChutesSession: %v", err)
 	}
 	meta := &e2ee.ChutesE2EE{Session: sess}
-	// Zero() should be called on meta.Session without panicking.
-	zeroE2EESessions(nil, meta)
-	t.Log("zeroE2EESessions with meta.Session completed without panic")
+	zeroE2EE(nil, meta, nil)
+	t.Log("zeroE2EE with meta.Session completed without panic")
 }
 
 // ---------------------------------------------------------------------------
@@ -465,11 +390,11 @@ func TestHandleE2EEDecryptionFailure_Chutes_NilFetcher(t *testing.T) {
 // pinnedPostDispatchE2EE
 // ---------------------------------------------------------------------------
 
-// bindingPassedReport returns a minimal report where tdx_reportdata_binding passed.
+// bindingPassedReport returns a minimal report where tee_reportdata_binding passed.
 func bindingPassedReport() *attestation.VerificationReport {
 	return &attestation.VerificationReport{
 		Factors: []attestation.FactorResult{
-			{Name: "tdx_reportdata_binding", Status: attestation.Pass, Enforced: true},
+			{Name: "tee_reportdata_binding", Status: attestation.Pass, Enforced: true},
 		},
 	}
 }
@@ -503,7 +428,7 @@ func TestPinnedPostDispatchE2EE_BindingNotPassed(t *testing.T) {
 	s := newMinimalServer()
 	w := httptest.NewRecorder()
 	prov := &provider.Provider{Name: "venice", E2EE: true}
-	// Report with no tdx_reportdata_binding factor → ReportDataBindingPassed() = false.
+	// Report with no tee_reportdata_binding factor → ReportDataBindingPassed() = false.
 	report := &attestation.VerificationReport{}
 	proceed := s.pinnedPostDispatchE2EE(context.Background(), w, prov, "model", report, false)
 	t.Logf("proceed = %v, status = %d", proceed, w.Code)
@@ -724,7 +649,7 @@ func TestResolveModel_EmptySegments(t *testing.T) {
 func blockedReport() *attestation.VerificationReport {
 	return &attestation.VerificationReport{
 		Factors: []attestation.FactorResult{
-			{Tier: "model", Name: "tdx_quote_present", Status: attestation.Fail, Enforced: true, Detail: "no quote"},
+			{Tier: "model", Name: "tee_quote_present", Status: attestation.Fail, Enforced: true, Detail: "no quote"},
 		},
 	}
 }
@@ -799,19 +724,6 @@ func TestHandlePinnedPostRelay_NoError_NoSession(t *testing.T) {
 	t.Logf("errors after no-error/no-session: %d", ms.errors.Load())
 	if ms.errors.Load() != 0 {
 		t.Errorf("ms.errors = %d, want 0", ms.errors.Load())
-	}
-}
-
-func TestHandlePinnedPostRelay_NoError_WithSession(t *testing.T) {
-	s := newMinimalServer()
-	prov := &provider.Provider{Name: "venice"}
-	ms := &modelStats{}
-	report := &attestation.VerificationReport{}
-	// No error, session present → E2EE success path, cache updated.
-	s.handlePinnedPostRelay(context.Background(), prov, "model", report, mockDecryptor{}, ms, nil)
-	t.Logf("errors after no-error/with-session: %d", ms.errors.Load())
-	if ms.errors.Load() != 0 {
-		t.Errorf("ms.errors = %d, want 0 on success", ms.errors.Load())
 	}
 }
 
@@ -1299,8 +1211,8 @@ func (m *mockReportDataVerifier) VerifyReportData(_ [64]byte, _ *attestation.Raw
 
 type mockRequestEncryptor struct{ err error }
 
-func (m *mockRequestEncryptor) EncryptRequest(_ []byte, _ *attestation.RawAttestation, _ e2ee.EndpointType) ([]byte, e2ee.Decryptor, *e2ee.ChutesE2EE, error) {
-	return []byte("encrypted"), nil, nil, m.err
+func (m *mockRequestEncryptor) EncryptRequest(_ []byte, _ *attestation.RawAttestation, _ e2ee.EndpointType) (e2ee.EncryptResult, error) {
+	return e2ee.EncryptResult{Body: []byte("encrypted")}, m.err
 }
 
 type mockAttester struct{ err error }
@@ -1848,4 +1760,180 @@ func TestRewriteModelInBody_Audio_InvalidBoundaryIsBadRequest(t *testing.T) {
 		t.Fatalf("normalizationStatusCode(err) = %d, want %d", got, http.StatusBadRequest)
 	}
 	t.Logf("invalid boundary error: %v", err)
+}
+
+// ---------------------------------------------------------------------------
+// requestNormalizationError.Unwrap
+// ---------------------------------------------------------------------------
+
+func TestRequestNormalizationError_Unwrap(t *testing.T) {
+	inner := errors.New("bad input")
+	e := requestNormalizationError{statusCode: http.StatusBadRequest, err: inner}
+	if got := e.Unwrap(); !errors.Is(got, inner) {
+		t.Errorf("Unwrap() = %v, want %v", got, inner)
+	}
+}
+
+func TestRequestNormalizationError_Error(t *testing.T) {
+	inner := errors.New("bad input")
+	e := requestNormalizationError{statusCode: http.StatusBadRequest, err: inner}
+	if e.Error() != "bad input" {
+		t.Errorf("Error() = %q, want %q", e.Error(), "bad input")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// normalizationStatusCode — non-matching error fallthrough
+// ---------------------------------------------------------------------------
+
+func TestNormalizationStatusCode_NonMatchingError(t *testing.T) {
+	code := normalizationStatusCode(errors.New("random error"))
+	if code != http.StatusInternalServerError {
+		t.Errorf("normalizationStatusCode(random) = %d, want %d", code, http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// verifyNVIDIA — GPUEvidence with valid nonce
+// ---------------------------------------------------------------------------
+
+func TestVerifyNVIDIA_GPUEvidence_ValidNonce(t *testing.T) {
+	ctx := context.Background()
+	raw := &attestation.RawAttestation{
+		GPUEvidence: []attestation.GPUEvidence{{Certificate: "test-cert", Evidence: "test-ev", Arch: "HOPPER"}},
+		Nonce:       strings.Repeat("ab", 32), // valid 64 hex chars
+	}
+	result, _ := verifyNVIDIA(ctx, raw, attestation.Nonce{}, "test-provider")
+	if result == nil {
+		t.Fatal("expected non-nil result for GPUEvidence with valid nonce")
+	}
+	t.Logf("verifyNVIDIA(GPUEvidence valid nonce): result=%v", result)
+}
+
+// ---------------------------------------------------------------------------
+// verifySEV — ReportDataVerifier paths
+// ---------------------------------------------------------------------------
+
+func TestVerifySEV_WithReportDataVerifier_ErrNoVerifier(t *testing.T) {
+	s := newMinimalServer()
+	s.sevVerifier = func(_ context.Context, _ []byte) *attestation.SEVVerifyResult {
+		return &attestation.SEVVerifyResult{} // ParseErr == nil
+	}
+	prov := &provider.Provider{
+		Name:               "test",
+		ReportDataVerifier: &mockReportDataVerifier{err: fmt.Errorf("%w %q", multi.ErrNoVerifier, "test-format")},
+	}
+	raw := &attestation.RawAttestation{SEVReportBytes: make([]byte, 100)}
+	result, dur := s.verifySEV(context.Background(), raw, attestation.Nonce{}, prov)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	t.Logf("verifySEV(ErrNoVerifier): result.ReportDataBindingErr=%v dur=%v", result.ReportDataBindingErr, dur)
+	if result.ReportDataBindingErr != nil {
+		t.Errorf("ReportDataBindingErr should be nil for ErrNoVerifier, got: %v", result.ReportDataBindingErr)
+	}
+}
+
+func TestVerifySEV_WithReportDataVerifier_OtherError(t *testing.T) {
+	s := newMinimalServer()
+	s.sevVerifier = func(_ context.Context, _ []byte) *attestation.SEVVerifyResult {
+		return &attestation.SEVVerifyResult{} // ParseErr == nil
+	}
+	bindingErr := errors.New("sev reportdata binding mismatch")
+	prov := &provider.Provider{
+		Name:               "test",
+		ReportDataVerifier: &mockReportDataVerifier{err: bindingErr},
+	}
+	raw := &attestation.RawAttestation{SEVReportBytes: make([]byte, 100)}
+	result, _ := s.verifySEV(context.Background(), raw, attestation.Nonce{}, prov)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !errors.Is(result.ReportDataBindingErr, bindingErr) {
+		t.Errorf("ReportDataBindingErr = %v, want %v", result.ReportDataBindingErr, bindingErr)
+	}
+	if result.ReportDataBindingDetail != "mock-detail" {
+		t.Errorf("ReportDataBindingDetail = %q, want %q", result.ReportDataBindingDetail, "mock-detail")
+	}
+}
+
+func TestVerifySEV_WithReportDataVerifier_Success(t *testing.T) {
+	s := newMinimalServer()
+	s.sevVerifier = func(_ context.Context, _ []byte) *attestation.SEVVerifyResult {
+		return &attestation.SEVVerifyResult{} // ParseErr == nil
+	}
+	prov := &provider.Provider{
+		Name:               "test",
+		ReportDataVerifier: &mockReportDataVerifier{err: nil},
+	}
+	raw := &attestation.RawAttestation{SEVReportBytes: make([]byte, 100)}
+	result, _ := s.verifySEV(context.Background(), raw, attestation.Nonce{}, prov)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ReportDataBindingErr != nil {
+		t.Errorf("ReportDataBindingErr = %v, want nil", result.ReportDataBindingErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildUpstreamBody — fresh attestation TDX/SEV REPORTDATA verification paths
+// ---------------------------------------------------------------------------
+
+// mockAttesterWithRaw returns a specific RawAttestation.
+type mockAttesterWithRaw struct {
+	raw *attestation.RawAttestation
+	err error
+}
+
+func (m *mockAttesterWithRaw) FetchAttestation(_ context.Context, _ string, _ attestation.Nonce) (*attestation.RawAttestation, error) {
+	return m.raw, m.err
+}
+
+func TestBuildUpstreamBody_FreshAttestation_NoTEEEvidence(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{
+		Name:      "test",
+		Attester:  &mockAttesterWithRaw{raw: &attestation.RawAttestation{SigningKey: "key"}},
+		Encryptor: &mockRequestEncryptor{},
+	}
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
+	if err == nil {
+		t.Fatal("expected error for no TEE evidence")
+	}
+	if !strings.Contains(err.Error(), "no TEE evidence") {
+		t.Errorf("error %q should mention no TEE evidence", err.Error())
+	}
+}
+
+func TestBuildUpstreamBody_FreshAttestation_TDXQuoteParseErr(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{
+		Name:      "test",
+		Attester:  &mockAttesterWithRaw{raw: &attestation.RawAttestation{SigningKey: "key", IntelQuote: "invalid-hex"}},
+		Encryptor: &mockRequestEncryptor{},
+	}
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
+	if err == nil {
+		t.Fatal("expected error for TDX quote parse failure")
+	}
+	if !strings.Contains(err.Error(), "fresh TDX quote parse failed") {
+		t.Errorf("error %q should mention fresh TDX quote parse", err.Error())
+	}
+}
+
+func TestBuildUpstreamBody_FreshAttestation_SEVReportParseErr(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{
+		Name:      "test",
+		Attester:  &mockAttesterWithRaw{raw: &attestation.RawAttestation{SigningKey: "key", SEVReportBytes: []byte("too-short")}},
+		Encryptor: &mockRequestEncryptor{},
+	}
+	_, err := s.buildUpstreamBody(context.Background(), []byte(`{}`), "model", true, prov, nil, e2ee.EndpointChat)
+	if err == nil {
+		t.Fatal("expected error for SEV report parse failure")
+	}
+	if !strings.Contains(err.Error(), "fresh SEV-SNP report parse failed") {
+		t.Errorf("error %q should mention fresh SEV-SNP report parse", err.Error())
+	}
 }

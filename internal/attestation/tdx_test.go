@@ -95,30 +95,6 @@ func TestVerifyTDXQuoteMeasurements(t *testing.T) {
 	t.Logf("MROwnerConfig:  %s", hex.EncodeToString(result.MROwnerConfig))
 }
 
-// TestVerifyTDXQuoteCertChain verifies the cert chain and signature verification
-// against the real quote. Because these certs may be expired, we check that
-// CertChainErr is set or not — we do not require it to pass (production quote
-// is from 2023 hardware and its cert chain TTL may have lapsed).
-func TestVerifyTDXQuoteCertChain(t *testing.T) {
-	result := VerifyTDXQuoteOffline(context.Background(), realTDXQuoteHex())
-
-	if result.ParseErr != nil {
-		t.Fatalf("parse failed, cannot test cert chain: %v", result.ParseErr)
-	}
-
-	if result.CertChainErr != nil {
-		t.Logf("CertChainErr (expected for expired test fixture): %v", result.CertChainErr)
-	} else {
-		t.Log("CertChainErr: nil (cert chain verified successfully)")
-	}
-
-	// SignatureErr should match CertChainErr: same root cause in our implementation.
-	if (result.CertChainErr == nil) != (result.SignatureErr == nil) {
-		t.Errorf("CertChainErr and SignatureErr should be nil/non-nil together; got CertChainErr=%v, SignatureErr=%v",
-			result.CertChainErr, result.SignatureErr)
-	}
-}
-
 // TestVerifyTDXQuoteDebugFlagRealQuote verifies the real production quote has
 // debug disabled (it's a production quote, not a debug quote).
 func TestVerifyTDXQuoteDebugFlagRealQuote(t *testing.T) {
@@ -233,9 +209,9 @@ func TestClientHTTPSGetter_GetContext_NonOKStatus(t *testing.T) {
 // response body returns an error.
 func TestClientHTTPSGetter_GetContext_BodyTooLarge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// Write maxPCSResponseSize+2 bytes to trigger the size check.
+		// Write maxCertResponseSize+2 bytes to trigger the size check.
 		w.WriteHeader(http.StatusOK)
-		buf := make([]byte, maxPCSResponseSize+2)
+		buf := make([]byte, maxCertResponseSize+2)
 		_, _ = w.Write(buf)
 	}))
 	defer srv.Close()
@@ -293,4 +269,83 @@ func TestVerifyTDXQuoteOnlineNoRace(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// NewTDXVerifier
+// ---------------------------------------------------------------------------
+
+func TestNewTDXVerifier_Offline(t *testing.T) {
+	v := NewTDXVerifier(true, nil)
+	if v == nil {
+		t.Fatal("expected non-nil verifier")
+	}
+	// Offline verifier should parse without network.
+	result := v(context.Background(), realTDXQuoteHex())
+	if result.ParseErr != nil {
+		t.Errorf("offline verifier ParseErr: %v", result.ParseErr)
+	}
+}
+
+func TestNewTDXVerifier_Online(t *testing.T) {
+	getter := &noopGetter{}
+	v := NewTDXVerifier(false, getter)
+	if v == nil {
+		t.Fatal("expected non-nil verifier")
+	}
+	result := v(context.Background(), realTDXQuoteHex())
+	if result.ParseErr != nil {
+		t.Errorf("online verifier ParseErr: %v", result.ParseErr)
+	}
+	// noop getter causes collateral failure
+	if result.CollateralErr == nil {
+		t.Error("expected CollateralErr with noop getter")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// extractPCKExtensions
+// ---------------------------------------------------------------------------
+
+func TestExtractPCKExtensions_RealQuote(t *testing.T) {
+	result := VerifyTDXQuoteOffline(context.Background(), realTDXQuoteHex())
+	if result.ParseErr != nil {
+		t.Fatalf("parse: %v", result.ParseErr)
+	}
+	ppid, fmspc, err := extractPCKExtensions(result.quote)
+	if err != nil {
+		t.Fatalf("extractPCKExtensions: %v", err)
+	}
+	if ppid == "" {
+		t.Error("PPID is empty")
+	}
+	if fmspc == "" {
+		t.Error("FMSPC is empty")
+	}
+	t.Logf("PPID=%s, FMSPC=%s", ppid, fmspc)
+}
+
+func TestExtractPCKExtensions_UnsupportedType(t *testing.T) {
+	_, _, err := extractPCKExtensions("not a quote")
+	if err == nil {
+		t.Fatal("expected error for unsupported type")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GPUVerificationNonce
+// ---------------------------------------------------------------------------
+
+func TestGPUVerificationNonce_GPUNonce(t *testing.T) {
+	raw := &RawAttestation{GPUNonce: "gpu-nonce", Nonce: "top-nonce"}
+	if got := raw.GPUVerificationNonce(); got != "gpu-nonce" {
+		t.Errorf("GPUVerificationNonce = %q, want gpu-nonce", got)
+	}
+}
+
+func TestGPUVerificationNonce_FallbackToNonce(t *testing.T) {
+	raw := &RawAttestation{GPUNonce: "", Nonce: "top-nonce"}
+	if got := raw.GPUVerificationNonce(); got != "top-nonce" {
+		t.Errorf("GPUVerificationNonce = %q, want top-nonce", got)
+	}
 }

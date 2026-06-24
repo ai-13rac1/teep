@@ -144,7 +144,7 @@ attestation to fail and the request to be blocked.
 
 However, the built-in Go defaults (`DefaultAllowFail`) mark some
 high-variability factors as *advisory* by default (for example,
-`tdx_hardware_config`, `tdx_boot_config`, and their gateway equivalents).
+`tee_hardware_config`, `tee_boot_config`, and their gateway equivalents).
 When a factor is in `allow_fail`, a mismatch is recorded and surfaced as a
 warning, but does not by itself block the request. Factors not listed in
 `allow_fail` are strictly enforced and any mismatch is a hard failure. To
@@ -311,6 +311,45 @@ If all values in the fleet are unknown, you can temporarily configure
 `allow_fail` for the relevant measurement checks to observe real-world
 values, pin and cross-check them, and then remove those `allow_fail` entries
 to switch back to strict enforcement.
+
+## Tinfoil Providers (SEV-SNP)
+
+Tinfoil providers (`tinfoil_v3_cloud` and `tinfoil_v3_direct`) run on AMD
+SEV-SNP, not Intel TDX. The measurement model is different:
+
+| Register | Measures |
+|----------|----------|
+| MEASUREMENT (48 bytes) | Launch digest of the guest firmware + kernel + initrd |
+| GUEST_POLICY (8 bytes) | Guest platform policy (debug, migration, SMT, etc.) |
+| TCB SVN (16 bytes) | Platform TCB version (bootloader, TEE, SNP, microcode) |
+
+### Code Measurement Verification
+
+Tinfoil uses Sigstore DSSE bundles to publish expected code measurements.
+Teep verifies these automatically via the `sigstore_code_verified` factor:
+
+1. Resolve the model's Sigstore repo (e.g. `tinfoilsh/confidential-llama3-3-70b`)
+2. Fetch the latest release tag and `tinfoil.hash` artifact
+3. Fetch the GitHub attestation for that digest
+4. Verify the DSSE bundle signature and extract the code measurement
+5. Compare against the live enclave's SEV-SNP MEASUREMENT register
+
+No manual allowlist configuration is needed for Tinfoil — the Sigstore chain
+provides the canonical measurement values. If the Sigstore-published hash
+does not match the running enclave, `tee_measurement` and
+`sigstore_code_verified` both fail.
+
+### MR_SEAM Equivalent
+
+SEV-SNP does not have an MR_SEAM register. The platform TCB version
+(bootloader, TEE, SNP, and microcode SVN components) serves a similar role
+and is verified by the `tee_tcb_current` factor against hardcoded minimums.
+
+### Per-Provider Configuration
+
+No per-provider measurement policy is needed for Tinfoil. The verification
+factors use Sigstore for code measurements and hardcoded TCB minimums for
+platform version checks.
 
 ## Related Documentation
 

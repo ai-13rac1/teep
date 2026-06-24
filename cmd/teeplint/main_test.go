@@ -564,6 +564,21 @@ func (a *Attester) FetchAttestation() {
 	}
 }
 
+func TestCheckFetchUsesBoundedRead_PassWithTLS(t *testing.T) {
+	f, fset := parseGo(t, `package p
+type Attester struct{}
+func (a *Attester) FetchAttestation() {
+	provider.FetchAttestationWithTLS(nil, "")
+}
+`)
+	p := &providerInfo{name: "test", files: []*ast.File{f}, fset: fset}
+	r := newResult()
+	checkFetchUsesBoundedRead(r, p)
+	if r.failed != 0 {
+		t.Errorf("expected pass for FetchAttestationWithTLS, got %d failures", r.failed)
+	}
+}
+
 func TestCheckFetchUsesBoundedRead_Fail_NoCall(t *testing.T) {
 	f, fset := parseGo(t, `package p
 type Attester struct{}
@@ -1291,6 +1306,48 @@ func TestCheckProjectWideBans_Pass(t *testing.T) {
 	}
 }
 
+func TestCheckNoPlainHTTPTestServer_PassOnRepoRoot(t *testing.T) {
+	repoRoot(t)
+	fset := token.NewFileSet()
+	r := newResult()
+	checkNoPlainHTTPTestServer(r, fset)
+	if r.failed != 0 {
+		t.Errorf("expected no failures on repo root, got %d failures", r.failed)
+	}
+}
+
+func TestCheckNoPlainHTTPTestServer_AllowlistContainsKnownFiles(t *testing.T) {
+	// Verify that every _test.go file in the repo that uses httptest.NewServer
+	// is in the allowlist. This is a sanity check — the real enforcement is
+	// checkNoPlainHTTPTestServer itself.
+	repoRoot(t)
+	dirs := []string{"internal", "cmd"}
+	fset := token.NewFileSet()
+	for _, root := range dirs {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			f, perr := parser.ParseFile(fset, path, nil, 0)
+			if perr != nil {
+				return nil //nolint:nilerr // skip unparseable files; don't abort the walk
+			}
+			if containsCall(f, "httptest", "NewServer") {
+				if !isAllowedPath(path, plainHTTPTestServerAllowlist) {
+					t.Errorf("file %s uses httptest.NewServer but is not in allowlist", path)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
 func TestCheckMakefile_Pass(t *testing.T) {
 	repoRoot(t)
 	providers, err := discoverProviders()
@@ -1569,7 +1626,7 @@ func writeCLIMainDir(t *testing.T, src string) {
 
 func TestCheckCLIMain_MissingNewAttester(t *testing.T) {
 	writeCLIMainDir(t, `package verify
-var ProviderEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
+var providerEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
 func newReportDataVerifier(p string) {}
 func supplyChainPolicy(p string) {}
 `)
@@ -1582,7 +1639,7 @@ func supplyChainPolicy(p string) {}
 
 func TestCheckCLIMain_MissingRDV(t *testing.T) {
 	writeCLIMainDir(t, `package verify
-var ProviderEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
+var providerEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
 func newAttester(p string) {
 	switch p {
 	case "alpha":
@@ -1599,7 +1656,7 @@ func supplyChainPolicy(p string) {}
 
 func TestCheckCLIMain_MissingSCP(t *testing.T) {
 	writeCLIMainDir(t, `package verify
-var ProviderEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
+var providerEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
 func newAttester(p string) {
 	switch p {
 	case "alpha":
@@ -1620,7 +1677,7 @@ func newReportDataVerifier(p string) {
 
 func TestCheckCLIMain_MissingProviderInSwitches(t *testing.T) {
 	writeCLIMainDir(t, `package verify
-var ProviderEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
+var providerEnvVars = map[string]string{"alpha": "ALPHA_KEY"}
 func newAttester(p string) {
 	switch p {
 	case "other":
@@ -1762,10 +1819,10 @@ func TestReadProviderEnvVars_NonLitKeyVal(t *testing.T) {
 	if err := os.MkdirAll(factoryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// ProviderEnvVars with identifier (non-literal) key — should be skipped.
+	// providerEnvVars with identifier (non-literal) key — should be skipped.
 	src := `package verify
 const k = "alpha"
-var ProviderEnvVars = map[string]string{k: "ALPHA_KEY"}
+var providerEnvVars = map[string]string{k: "ALPHA_KEY"}
 `
 	if err := os.WriteFile(filepath.Join(factoryDir, "factory.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
@@ -1783,10 +1840,10 @@ func TestReadProviderEnvVars_NonLitValue(t *testing.T) {
 	if err := os.MkdirAll(factoryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// ProviderEnvVars with identifier (non-literal) value — should be skipped.
+	// providerEnvVars with identifier (non-literal) value — should be skipped.
 	src := `package verify
 const v = "ALPHA_KEY"
-var ProviderEnvVars = map[string]string{"alpha": v}
+var providerEnvVars = map[string]string{"alpha": v}
 `
 	if err := os.WriteFile(filepath.Join(factoryDir, "factory.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)

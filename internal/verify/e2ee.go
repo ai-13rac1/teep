@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/jsonstrict"
 	"github.com/13rac1/teep/internal/provider/neardirect"
+	"github.com/13rac1/teep/internal/provider/tinfoil"
 	"github.com/13rac1/teep/internal/tlsct"
 )
 
@@ -41,7 +43,7 @@ func testE2EE(ctx context.Context, raw *attestation.RawAttestation, providerName
 	if offline {
 		return &attestation.E2EETestResult{Detail: "offline mode; E2EE test skipped"}
 	}
-	envVar := ProviderEnvVars[providerName]
+	envVar, _ := ProviderEnvVar(providerName)
 	if cp.APIKey == "" {
 		return &attestation.E2EETestResult{NoAPIKey: true, APIKeyEnv: envVar}
 	}
@@ -55,6 +57,8 @@ func testE2EE(ctx context.Context, raw *attestation.RawAttestation, providerName
 		return testE2EENeardirect(ctx, raw, cp, model)
 	case "chutes":
 		return testE2EEChutes(ctx, raw, cp, model)
+	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
+		return testE2EETinfoil(ctx, raw, cp, model, providerName)
 	default:
 		return nil
 	}
@@ -97,6 +101,7 @@ func testE2EEVenice(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header.Set("X-Venice-Tee-Signing-Algo", "ecdsa")
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEStreamTest(req, session, "venice")
 }
@@ -152,6 +157,7 @@ func testE2EENearAI(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header.Set("X-Encrypt-All-Fields", "true")
 	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEStreamTest(req, session, label)
 }
@@ -205,6 +211,7 @@ func testE2EEChutes(ctx context.Context, raw *attestation.RawAttestation, cp *co
 	req.Header["X-E2E-Path"] = []string{chatPathForProvider("chutes")}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Connection", "close")
+	tlsct.SetUserAgent(req)
 
 	return doE2EEChutesStreamTest(req, session)
 }
@@ -515,4 +522,120 @@ func safePrefix(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// testE2EETinfoil tests Tinfoil EHBP (HPKE X25519 + AES-256-GCM full-body
+// encryption) via direct HTTPS request.
+func testE2EETinfoil(ctx context.Context, raw *attestation.RawAttestation, cp *config.Provider, model, providerName string) *attestation.E2EETestResult {
+	if raw.TinfoilHPKEKey == "" {
+		return &attestation.E2EETestResult{Attempted: true, Err: errors.New("tinfoil E2EE: HPKE key absent from attestation")}
+	}
+	pubKeyBytes, err := hex.DecodeString(raw.TinfoilHPKEKey)
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("tinfoil E2EE: decode HPKE key: %w", err)}
+	}
+	session, err := e2ee.NewEHBPSession(pubKeyBytes)
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("tinfoil E2EE: %w", err)}
+	}
+	defer session.Zero()
+
+	var chatURL string
+	if providerName == "tinfoil_v3_direct" {
+		resolver := tinfoil.NewDirectResolver(cp.APIKey, false)
+		domain, resolveErr := resolver.Resolve(ctx, model)
+		if resolveErr != nil {
+			return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("tinfoil E2EE: resolve model: %w", resolveErr)}
+		}
+		chatURL = "https://" + domain + "/v1/chat/completions"
+	} else {
+		baseURL := cp.BaseURL
+		if baseURL == "" {
+			baseURL = "https://inference.tinfoil.sh"
+		}
+		chatURL = baseURL + "/v1/chat/completions"
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": "Say hello"}},
+		"stream":   true,
+	})
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("tinfoil E2EE: marshal body: %w", err)}
+	}
+
+	bodyReader := session.EncryptRequest(bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatURL, bodyReader)
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("tinfoil E2EE: build request: %w", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Ehbp-Encapsulated-Key", session.EncapKeyHex())
+	req.Header.Set("Authorization", "Bearer "+cp.APIKey)
+	req.Header.Set("Connection", "close")
+	req.ContentLength = -1 // force chunked transfer encoding
+	tlsct.SetUserAgent(req)
+
+	return doEHBPStreamTest(req, session)
+}
+
+// doEHBPStreamTest sends an EHBP-encrypted request and validates that the
+// response can be decrypted and contains valid SSE chat completion chunks.
+func doEHBPStreamTest(req *http.Request, session *e2ee.EHBPSession) *attestation.E2EETestResult {
+	client := tlsct.NewHTTPClient(60 * time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("HTTP request: %w", err)}
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)}
+	}
+
+	nonceHex := resp.Header.Get("Ehbp-Response-Nonce")
+	if len(nonceHex) != 64 {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("Ehbp-Response-Nonce header missing or wrong length (%d)", len(nonceHex))}
+	}
+
+	decrypted, err := session.DecryptResponse(resp.Body, nonceHex)
+	if err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("EHBP decrypt response: %w", err)}
+	}
+	defer decrypted.Close()
+
+	scanner := bufio.NewScanner(decrypted)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	chunkCount := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		chunkCount++
+		if !json.Valid([]byte(data)) {
+			return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("decrypted SSE chunk %d is not valid JSON", chunkCount)}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return &attestation.E2EETestResult{Attempted: true, Err: fmt.Errorf("read decrypted SSE stream: %w", err)}
+	}
+	if chunkCount == 0 {
+		return &attestation.E2EETestResult{Attempted: true, Err: errors.New("no SSE data chunks in decrypted response")}
+	}
+
+	return &attestation.E2EETestResult{
+		Attempted: true,
+		Detail:    fmt.Sprintf("EHBP X25519: %d chunks decrypted", chunkCount),
+	}
 }

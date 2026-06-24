@@ -55,9 +55,11 @@ var DefaultAllowFail = attestation.DefaultAllowFail
 // Go-level default allow_fail lists. Providers not in this map fall back to
 // the global DefaultAllowFail.
 var providerDefaultAllowFail = map[string][]string{
-	"chutes":     attestation.ChutesDefaultAllowFail,
-	"nearcloud":  attestation.NearcloudDefaultAllowFail,
-	"neardirect": attestation.NeardirectDefaultAllowFail,
+	"chutes":            attestation.ChutesDefaultAllowFail,
+	"nearcloud":         attestation.NearcloudDefaultAllowFail,
+	"neardirect":        attestation.NeardirectDefaultAllowFail,
+	"tinfoil_v3_cloud":  attestation.TinfoilDefaultAllowFail,
+	"tinfoil_v3_direct": attestation.TinfoilDefaultAllowFail,
 }
 
 // ProviderDefaultAllowFail returns a defensive copy of the provider-specific
@@ -606,6 +608,8 @@ func applyEnvOverrides(cfg *Config) {
 	applyAPIKeyEnv(cfg, "nanogpt", "NANOGPT_API_KEY", "https://nano-gpt.com/api", false)
 	applyAPIKeyEnv(cfg, "phalacloud", "PHALA_API_KEY", "https://api.redpill.ai", false)
 	applyAPIKeyEnv(cfg, "chutes", "CHUTES_API_KEY", "https://api.chutes.ai", true)
+	applyAPIKeyEnv(cfg, "tinfoil_v3_cloud", "TINFOIL_API_KEY", "https://inference.tinfoil.sh", true)
+	applyAPIKeyEnv(cfg, "tinfoil_v3_direct", "TINFOIL_API_KEY", "https://inference.tinfoil.sh", true)
 }
 
 // applyAPIKeyEnv sets or updates the API key for the named provider from the
@@ -745,11 +749,16 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // endpoints. The default MaxIdleConnsPerHost (2) is too low for providers
 // that serve multiple models from the same host. In offline mode, CT checks
 // are disabled to avoid external CT log list downloads.
+//
+// AMD KDS (kdsintf.amd.com) only supports TLS 1.2, so a TLS 1.2 fallback
+// transport routes KDS requests to a separate base while everything else
+// uses TLS 1.3 + CT.
 func NewAttestationClient(offline bool) *http.Client {
 	client := tlsct.NewHTTPClientWithTransport(AttestationTimeout, &http.Transport{
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	}, !offline)
+	client.Transport = tlsct.NewTLS12FallbackTransport(client.Transport, attestation.AMDKDSHost)
 	client.Transport = tlsct.WrapLogging(client.Transport)
 	client.Transport = &RetryTransport{Base: client.Transport}
 	return client

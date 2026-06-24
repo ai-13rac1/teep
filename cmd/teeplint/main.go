@@ -225,8 +225,22 @@ func checkProviderStructure(r *result, p *providerInfo) {
 
 	switch p.archetype {
 	case archetypeDirect:
-		checkResponseStruct(r, p, "attestationResponse")
-		fd := checkParseFunc(r, p, "ParseAttestationResponse")
+		// Tinfoil uses v3Response/parseV3Response instead of the standard
+		// attestationResponse/ParseAttestationResponse names because its V3
+		// attestation format is distinct from the dstack-based providers.
+		switch {
+		case hasStruct(p.files, "attestationResponse"):
+			checkResponseStruct(r, p, "attestationResponse")
+		case hasStruct(p.files, "v3Response"):
+			checkResponseStruct(r, p, "v3Response")
+		default:
+			r.failf("attestationResponse (or v3Response) struct not found in %s", p.name)
+		}
+		parseName := "ParseAttestationResponse"
+		if !hasFunc(p.files, parseName) && hasFunc(p.files, "parseV3Response") {
+			parseName = "parseV3Response"
+		}
+		fd := checkParseFunc(r, p, parseName)
 		checkParseFuncUsesJSONStrict(r, p, fd)
 	case archetypeGateway:
 		fd := checkParseFunc(r, p, "ParseAttestationResponse")
@@ -377,8 +391,10 @@ func checkUsesFormatDetect(r *result, p *providerInfo, fd *ast.FuncDecl) {
 	r.failf("%s does not call formatdetect.Detect (%s:%d)", fd.Name.Name, filepath.Base(pos.Filename), pos.Line)
 }
 
-// FetchAttestation calls provider.FetchAttestationJSON for bounded reads.
+// FetchAttestation calls provider.FetchAttestationJSON (or FetchAttestationWithTLS)
+// for bounded reads, either directly or via a package-level helper function.
 func checkFetchUsesBoundedRead(r *result, p *providerInfo) {
+	allowedFuncs := []string{"FetchAttestationJSON", "FetchAttestationWithTLS"}
 	for _, f := range p.files {
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
@@ -386,13 +402,15 @@ func checkFetchUsesBoundedRead(r *result, p *providerInfo) {
 				continue
 			}
 			if fd.Name.Name == "FetchAttestation" {
-				if containsCall(fd.Body, "provider", "FetchAttestationJSON") {
-					pos := p.fset.Position(fd.Name.Pos())
-					r.passf("FetchAttestation uses provider.FetchAttestationJSON (%s:%d)", filepath.Base(pos.Filename), pos.Line)
-					return
+				for _, fn := range allowedFuncs {
+					if containsCallTransitive(fd.Body, "provider", fn, p.files) {
+						pos := p.fset.Position(fd.Name.Pos())
+						r.passf("FetchAttestation uses provider.%s (%s:%d)", fn, filepath.Base(pos.Filename), pos.Line)
+						return
+					}
 				}
 				pos := p.fset.Position(fd.Name.Pos())
-				r.failf("FetchAttestation does not call provider.FetchAttestationJSON (%s:%d)", filepath.Base(pos.Filename), pos.Line)
+				r.failf("FetchAttestation does not call provider.FetchAttestationJSON or FetchAttestationWithTLS (%s:%d)", filepath.Base(pos.Filename), pos.Line)
 				return
 			}
 		}
@@ -443,11 +461,23 @@ func checkNoSlogAPIKeyArgs(r *result, p *providerInfo) {
 }
 
 // No json.RawMessage in provider response structs.
-// Skips models.go which uses json.RawMessage for pass-through relay (not attestation parsing).
+// Skips models.go (pass-through relay) and sigstore.go (Sigstore bundle).
+// Tinfoil attestation.go is also skipped: gpu and nvswitch are kept as
+// raw bytes for SHA-256 hash verification (the raw JSON bytes are the
+// hash preimage for REPORTDATA binding).
 func checkNoJSONRawMessage(r *result, p *providerInfo) {
+	skipFiles := map[string]bool{
+		"models.go":   true,
+		"sigstore.go": true,
+	}
+	// Tinfoil attestation.go has intentional json.RawMessage for GPU/NVSwitch
+	// raw byte hashing.
+	if p.name == "tinfoil" {
+		skipFiles["attestation.go"] = true
+	}
 	var violations []string
 	for i, f := range p.files {
-		if filepath.Base(p.fileNames[i]) == "models.go" {
+		if skipFiles[filepath.Base(p.fileNames[i])] {
 			continue
 		}
 		for _, decl := range f.Decls {
@@ -502,7 +532,16 @@ func collectRawMessageViolations(fset *token.FileSet, st *ast.StructType, struct
 }
 
 // At least one test file uses external package.
+// Providers with unexported parse functions (e.g. parseV3Response) need
+// internal test access, so the external package requirement is skipped.
 func checkExternalTestPackage(r *result, p *providerInfo) {
+	// If the provider uses an unexported parse function, it needs internal
+	// test access and cannot use external test packages for parse tests.
+	if hasFunc(p.files, "parseV3Response") && !hasFunc(p.files, "ParseAttestationResponse") {
+		r.skipf("external test package not required (%s uses unexported parse function)", p.name)
+		return
+	}
+
 	testFiles, _ := filepath.Glob(filepath.Join(p.dir, "*_test.go"))
 	wantPkg := p.name + "_test"
 	for _, tf := range testFiles {
@@ -566,6 +605,7 @@ func checkProjectWideBans(r *result) {
 	checkNoJSONUnmarshalCLI(r, files, names, fset)
 	checkNoCryptoTLSImport(r, files, names)
 	checkNoHTTPClientLiteral(r, files, names)
+	checkNoPlainHTTPTestServer(r, fset)
 	fmt.Println()
 }
 
@@ -693,6 +733,110 @@ func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
 	}
 	for _, v := range violations {
 		r.failf("http.Client{} literal in %s (use tlsct.NewHTTPClient)", v)
+	}
+}
+
+// plainHTTPTestServerAllowlist lists _test.go files that are permitted to use
+// httptest.NewServer. Each entry was audited to confirm it does not exercise
+// attestation-fetch TLS channel binding (the class of bug that caused the
+// tinfoil fallback).
+//
+// THIS LIST IS FROZEN. No additions are permitted — only subtractions as
+// files are converted to httptest.NewTLSServer. New test files MUST use
+// httptest.NewTLSServer.
+//
+// To use httptest.NewTLSServer correctly:
+//  1. Create the server with httptest.NewTLSServer(handler).
+//  2. Configure the HTTP client with the test server's certificate pool:
+//     client := srv.Client()
+//     The returned *http.Client trusts the server's self-signed
+//     certificate automatically.
+//  3. If the test needs the live peer SPKI (e.g. attestation channel binding),
+//     extract it from srv.Certificate() and compute SHA-256(SPKI DER) to
+//     match against the attested tls_key_fp / tls_cert_fingerprint.
+//  4. If a custom tls.Config is needed (e.g. custom certificate), use
+//     httptest.NewUnstartedServer, set srv.TLS = &tls.Config{...}, then
+//     call srv.StartTLS().
+//
+// Categories of allowlisted files:
+//   - Attestation metadata fetchers (Rekor, NRAS, JWKS, PoC, SEV, TDX) — no
+//     live TLS peer state to compare.
+//   - Model listers / resolvers — gateway metadata, not attestation endpoints.
+//   - Proxy integration tests — the proxy server itself is HTTP; upstream
+//     mock returns canned JSON.
+var plainHTTPTestServerAllowlist = []string{
+	"internal/attestation/nvidia_test.go",
+	"internal/attestation/poc_test.go",
+	"internal/attestation/rekor_test.go",
+	"internal/attestation/sev_test.go",
+	"internal/attestation/sigstore_test.go",
+	"internal/attestation/tdx_test.go",
+	"internal/provider/chutes/chutes_test.go",
+	"internal/provider/chutes/models_test.go",
+	"internal/provider/chutes/noncepool_test.go",
+	"internal/provider/chutes/resolve_test.go",
+	"internal/provider/fetch_test.go",
+	"internal/provider/models_test.go",
+	"internal/provider/nanogpt/nanogpt_test.go",
+	"internal/provider/nearcloud/nearcloud_test.go",
+	"internal/provider/nearcloud/pinned_test.go",
+	"internal/provider/neardirect/endpoints_test.go",
+	"internal/provider/neardirect/nearai_test.go",
+	"internal/provider/neardirect/pinned_test.go",
+	"internal/provider/phalacloud/phalacloud_test.go",
+	"internal/provider/tinfoil/resolver_test.go",
+	"internal/provider/tinfoil/sigstore_test.go",
+	"internal/provider/venice/models_test.go",
+	"internal/provider/venice/venice_test.go",
+	"internal/proxy/mock_near_pinned_test.go",
+	"internal/proxy/proxy_test.go",
+	"internal/proxy/relay_internal_test.go",
+	"internal/verify/attest_test.go",
+	"internal/verify/e2ee_test.go",
+}
+
+// checkNoPlainHTTPTestServer walks all _test.go files under internal/ and cmd/
+// and flags httptest.NewServer calls that are not in the allowlist. This
+// enforces a blanket ban on plain-HTTP test servers with an escape hatch for
+// audited files. New test files must use httptest.NewTLSServer or be added to
+// the allowlist with justification.
+func checkNoPlainHTTPTestServer(r *result, fset *token.FileSet) {
+	dirs := []string{"internal", "cmd"}
+	var violations []string
+
+	for _, root := range dirs {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			if isAllowedPath(path, plainHTTPTestServerAllowlist) {
+				return nil
+			}
+			f, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				r.failf("parse %s: %v", path, parseErr)
+				return nil
+			}
+			if containsCall(f, "httptest", "NewServer") {
+				violations = append(violations, path)
+			}
+			return nil
+		})
+		if err != nil {
+			r.failf("walk %s: %v", root, err)
+			return
+		}
+	}
+
+	if len(violations) == 0 {
+		r.passf("no httptest.NewServer in non-allowlisted test files (use NewTLSServer)")
+		return
+	}
+	for _, v := range violations {
+		r.failf("httptest.NewServer in %s (use NewTLSServer or add to allowlist with justification)", v)
 	}
 }
 
@@ -900,6 +1044,21 @@ func checkProxyWiring(r *result, providers []string) {
 	checkFromConfigFieldAssignment(r, fd, providers, "Attester")
 	checkFromConfigFieldAssignment(r, fd, providers, "ReportDataVerifier")
 	checkFromConfigFieldAssignment(r, fd, providers, "SupplyChainPolicy")
+
+	// inapplicableForProvider() switch has case for each provider.
+	inapFunc := findFunc(f, "inapplicableForProvider")
+	if inapFunc == nil {
+		r.failf("inapplicableForProvider function not found in %s", path)
+	} else {
+		cases := collectSwitchCases(inapFunc.Body)
+		for _, prov := range providers {
+			if hasPrefixMatch(cases, prov) {
+				r.passf("inapplicableForProvider switch includes %q", prov)
+			} else {
+				r.failf("inapplicableForProvider switch missing %q", prov)
+			}
+		}
+	}
 	fmt.Println()
 }
 
@@ -914,8 +1073,9 @@ func checkCLIMain(r *result, providers []string) {
 	}
 
 	// ProviderEnvVars map has key for each provider (checked via direct import).
+	// Supports multi-name providers where one directory maps to multiple config names.
 	for _, prov := range providers {
-		if _, ok := verify.ProviderEnvVars[prov]; ok {
+		if hasProviderEnvVar(prov) {
 			r.passf("ProviderEnvVars has key %q", prov)
 		} else {
 			r.failf("ProviderEnvVars missing key %q", prov)
@@ -929,7 +1089,7 @@ func checkCLIMain(r *result, providers []string) {
 	} else {
 		cases := collectSwitchCases(newAttesterFunc.Body)
 		for _, prov := range providers {
-			if cases[prov] {
+			if hasPrefixMatch(cases, prov) {
 				r.passf("newAttester switch includes %q", prov)
 			} else {
 				r.failf("newAttester switch missing %q", prov)
@@ -944,7 +1104,7 @@ func checkCLIMain(r *result, providers []string) {
 	} else {
 		cases := collectSwitchCases(rdvFunc.Body)
 		for _, prov := range providers {
-			if cases[prov] {
+			if hasPrefixMatch(cases, prov) {
 				r.passf("newReportDataVerifier switch includes %q", prov)
 			} else {
 				r.failf("newReportDataVerifier switch missing %q", prov)
@@ -959,10 +1119,25 @@ func checkCLIMain(r *result, providers []string) {
 	} else {
 		cases := collectSwitchCases(scpFunc.Body)
 		for _, prov := range providers {
-			if cases[prov] {
+			if hasPrefixMatch(cases, prov) {
 				r.passf("supplyChainPolicy switch includes %q", prov)
 			} else {
 				r.failf("supplyChainPolicy switch missing %q", prov)
+			}
+		}
+	}
+
+	// inapplicableFactors() switch has case for each provider.
+	inapFunc := findFunc(f, "inapplicableFactors")
+	if inapFunc == nil {
+		r.failf("inapplicableFactors function not found")
+	} else {
+		cases := collectSwitchCases(inapFunc.Body)
+		for _, prov := range providers {
+			if hasPrefixMatch(cases, prov) {
+				r.passf("inapplicableFactors switch includes %q", prov)
+			} else {
+				r.failf("inapplicableFactors switch missing %q", prov)
 			}
 		}
 	}
@@ -986,8 +1161,8 @@ func checkHelpText(r *result, providers []string, envVars map[string]string) {
 
 	for _, prov := range providers {
 		// printOverview environment section mentions provider env var.
-		envVar := envVars[prov]
-		if envVar != "" {
+		envVar, envFound := hasEnvVarForProvider(envVars, prov)
+		if envFound && envVar != "" {
 			if strings.Contains(overviewText, envVar) {
 				r.passf("printOverview mentions %s", envVar)
 			} else {
@@ -1012,6 +1187,42 @@ func checkHelpText(r *result, providers []string, envVars map[string]string) {
 		}
 	}
 	fmt.Println()
+}
+
+// hasPrefixMatch reports whether any key in the cases map has prov as a prefix.
+// This supports multi-name providers where one directory (e.g. "tinfoil") maps
+// to multiple config names (e.g. "tinfoil_v3_cloud", "tinfoil_v3_direct").
+func hasPrefixMatch(cases map[string]bool, prov string) bool {
+	if cases[prov] {
+		return true
+	}
+	for k := range cases {
+		if strings.HasPrefix(k, prov) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasProviderEnvVar reports whether the provider env var map contains an
+// entry whose key matches prov exactly or has prov as a prefix. Uses the
+// exported HasProviderEnvVar accessor to avoid touching the unexported map.
+func hasProviderEnvVar(prov string) bool {
+	return verify.HasProviderEnvVar(prov)
+}
+
+// hasEnvVarForProvider returns the env var value for a provider, checking
+// both exact matches and prefix matches.
+func hasEnvVarForProvider(envVars map[string]string, prov string) (string, bool) {
+	if v, ok := envVars[prov]; ok {
+		return v, true
+	}
+	for k, v := range envVars {
+		if strings.HasPrefix(k, prov) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // =============================================================================
@@ -1070,6 +1281,40 @@ func hasFunc(files []*ast.File, name string) bool {
 				continue
 			}
 			if fd.Name.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// containsCallTransitive checks if the AST node contains a call to
+// pkg.funcName, either directly or via a package-level function that
+// itself calls pkg.funcName. Only one level of indirection is checked.
+func containsCallTransitive(node ast.Node, pkg, funcName string, files []*ast.File) bool {
+	if containsCall(node, pkg, funcName) {
+		return true
+	}
+	// Check if node calls any package-level function whose body contains the target call.
+	if node == nil {
+		return false
+	}
+	var calledFuncs []string
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		calledFuncs = append(calledFuncs, ident.Name)
+		return true
+	})
+	for _, name := range calledFuncs {
+		for _, f := range files {
+			if fd := findFunc(f, name); fd != nil && containsCall(fd.Body, pkg, funcName) {
 				return true
 			}
 		}
@@ -1194,7 +1439,18 @@ func checkFromConfigDefaultError(r *result, fd *ast.FuncDecl, providers []string
 	}
 
 	for _, prov := range providers {
-		if strings.Contains(fmtStr, prov) {
+		// Check for exact match or prefix match (e.g. "tinfoil" in "tinfoil_v3_cloud").
+		found := strings.Contains(fmtStr, prov)
+		if !found {
+			// Check if any prefixed variant appears (multi-name providers).
+			for word := range strings.FieldsSeq(strings.ReplaceAll(fmtStr, ",", " ")) {
+				if strings.HasPrefix(word, prov) {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
 			r.passf("fromConfig default error mentions %q", prov)
 		} else {
 			r.failf("fromConfig default error missing %q (update the error message)", prov)
@@ -1257,7 +1513,17 @@ func checkFromConfigFieldAssignment(r *result, fd *ast.FuncDecl, providers []str
 	})
 
 	for _, prov := range providers {
-		if assigned[prov] {
+		found := assigned[prov]
+		if !found {
+			// Check prefix matches for multi-name providers.
+			for k := range assigned {
+				if strings.HasPrefix(k, prov) {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
 			r.passf("fromConfig %q sets p.%s", prov, field)
 		} else {
 			r.failf("fromConfig %q missing p.%s assignment", prov, field)
@@ -1328,7 +1594,7 @@ func extractFuncStringLiterals(f *ast.File, funcName string) string {
 	return b.String()
 }
 
-// readProviderEnvVars extracts the ProviderEnvVars map from internal/verify/factory.go.
+// readProviderEnvVars extracts the providerEnvVars map from internal/verify/factory.go.
 func readProviderEnvVars() map[string]string {
 	path := "internal/verify/factory.go"
 	fset := token.NewFileSet()
@@ -1348,7 +1614,7 @@ func readProviderEnvVars() map[string]string {
 				continue
 			}
 			for i, name := range vs.Names {
-				if name.Name != "ProviderEnvVars" || i >= len(vs.Values) {
+				if name.Name != "providerEnvVars" || i >= len(vs.Values) {
 					continue
 				}
 				cl, ok := vs.Values[i].(*ast.CompositeLit)

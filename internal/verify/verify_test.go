@@ -26,16 +26,16 @@ func buildVerifyTestReport(provider, model string) *attestation.VerificationRepo
 	factors := []attestation.FactorResult{
 		// Tier 1
 		{Name: "nonce_match", Status: attestation.Pass, Detail: "Nonce matches (64 hex chars)", Enforced: true, Tier: attestation.TierCore},
-		{Name: "tdx_quote_present", Status: attestation.Pass, Detail: "TDX quote present (1247 base64 chars)", Tier: attestation.TierCore},
-		{Name: "tdx_quote_structure", Status: attestation.Pass, Detail: "Valid QuoteV4 structure", Tier: attestation.TierCore},
-		{Name: "tdx_cert_chain", Status: attestation.Pass, Detail: "cert chain valid (Intel root CA)", Tier: attestation.TierCore},
-		{Name: "tdx_quote_signature", Status: attestation.Pass, Detail: "Quote signature verified", Tier: attestation.TierCore},
-		{Name: "tdx_debug_disabled", Status: attestation.Pass, Detail: "Debug bit is 0", Enforced: true, Tier: attestation.TierCore},
+		{Name: "tee_quote_present", Status: attestation.Pass, Detail: "TDX quote present (1247 base64 chars)", Tier: attestation.TierCore},
+		{Name: "tee_quote_structure", Status: attestation.Pass, Detail: "Valid QuoteV4 structure", Tier: attestation.TierCore},
+		{Name: "tee_cert_chain", Status: attestation.Pass, Detail: "cert chain valid (Intel root CA)", Tier: attestation.TierCore},
+		{Name: "tee_quote_signature", Status: attestation.Pass, Detail: "Quote signature verified", Tier: attestation.TierCore},
+		{Name: "tee_debug_disabled", Status: attestation.Pass, Detail: "Debug bit is 0", Enforced: true, Tier: attestation.TierCore},
 		{Name: "signing_key_present", Status: attestation.Pass, Detail: "enclave pubkey present (04a3b2...)", Enforced: true, Tier: attestation.TierCore},
 		// Tier 2
-		{Name: "tdx_reportdata_binding", Status: attestation.Pass, Detail: "REPORTDATA binds signing key + nonce", Enforced: true, Tier: attestation.TierBinding},
+		{Name: "tee_reportdata_binding", Status: attestation.Pass, Detail: "REPORTDATA binds signing key + nonce", Enforced: true, Tier: attestation.TierBinding},
 		{Name: "intel_pcs_collateral", Status: attestation.Skip, Detail: "Quote age not determinable", Tier: attestation.TierBinding},
-		{Name: "tdx_tcb_current", Status: attestation.Pass, Detail: "TCB is UpToDate per Intel PCS", Tier: attestation.TierBinding},
+		{Name: "tee_tcb_current", Status: attestation.Pass, Detail: "TCB is UpToDate per Intel PCS", Tier: attestation.TierBinding},
 		{Name: "nvidia_payload_present", Status: attestation.Pass, Detail: "NVIDIA payload present (512 chars)", Tier: attestation.TierBinding},
 		{Name: "nvidia_signature", Status: attestation.Pass, Detail: "JWT signature valid (RS256)", Tier: attestation.TierBinding},
 		{Name: "nvidia_claims", Status: attestation.Pass, Detail: "Claims valid", Tier: attestation.TierBinding},
@@ -50,7 +50,7 @@ func buildVerifyTestReport(provider, model string) *attestation.VerificationRepo
 		{Name: "cpu_id_registry", Status: attestation.Fail, Detail: "no CPU ID registry check", Tier: attestation.TierSupplyChain},
 	}
 
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	enforcedFailed, allowedFailed := 0, 0
 	for _, f := range factors {
 		switch f.Status {
@@ -65,19 +65,22 @@ func buildVerifyTestReport(provider, model string) *attestation.VerificationRepo
 			}
 		case attestation.Skip:
 			skipped++
+		case attestation.NotApplicable:
+			notApplicable++
 		}
 	}
 
 	return &attestation.VerificationReport{
-		Provider:       provider,
-		Model:          model,
-		Timestamp:      time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
-		Factors:        factors,
-		Passed:         passed,
-		Failed:         failed,
-		Skipped:        skipped,
-		EnforcedFailed: enforcedFailed,
-		AllowedFailed:  allowedFailed,
+		Provider:           provider,
+		Model:              model,
+		Timestamp:          time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		Factors:            factors,
+		Passed:             passed,
+		Failed:             failed,
+		Skipped:            skipped,
+		NotApplicableCount: notApplicable,
+		EnforcedFailed:     enforcedFailed,
+		AllowedFailed:      allowedFailed,
 	}
 }
 
@@ -124,8 +127,8 @@ func TestFormatReport_StatusIcons(t *testing.T) {
 	if !strings.Contains(out, "\u2717") { // ✗ fail
 		t.Error("fail icon ✗ not found in output")
 	}
-	if !strings.Contains(out, "?") { // ? skip
-		t.Error("skip icon ? not found in output")
+	if !strings.Contains(out, "- ") { // - skip (hyphen followed by space)
+		t.Error("skip icon - not found in output")
 	}
 }
 
@@ -168,8 +171,8 @@ func TestFormatReport_FactorNamesPresent(t *testing.T) {
 
 	for _, name := range []string{
 		"nonce_match",
-		"tdx_quote_present",
-		"tdx_reportdata_binding",
+		"tee_quote_present",
+		"tee_reportdata_binding",
 		"tls_key_binding",
 		"cpu_id_registry",
 	} {
@@ -302,7 +305,8 @@ func TestStatusIcon(t *testing.T) {
 	}{
 		{attestation.Pass, "\u2713"},
 		{attestation.Fail, "\u2717"},
-		{attestation.Skip, "?"},
+		{attestation.Skip, "-"},
+		{attestation.NotApplicable, "\u2014"},
 		{attestation.Status(99), "?"},
 	}
 	for _, tc := range tests {

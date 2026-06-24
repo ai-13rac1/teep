@@ -16,8 +16,10 @@ These are the OpenAI-style endpoints that clients use for inference:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/v1/chat/completions` | POST | Chat completions (streaming and non-streaming) |
+| `/v1/responses` | POST | Responses API (streaming and non-streaming) |
 | `/v1/embeddings` | POST | Text embeddings |
 | `/v1/audio/transcriptions` | POST | Audio transcription (multipart) |
+| `/v1/audio/speech` | POST | Text-to-speech |
 | `/v1/images/generations` | POST | Image generation |
 | `/v1/rerank` | POST | Document reranking |
 | `/v1/score` | POST | Text similarity scoring |
@@ -45,27 +47,31 @@ Not all providers support all endpoints. If a provider has no path configured fo
 
 This matrix applies to OpenAI-compatible inference endpoints.
 
-| Endpoint | NearDirect | NearCloud | Chutes | Venice | Phala Cloud |
-|---|---|---|---|---|---|
-| Chat completions | Yes | Yes | Yes | Yes | Yes |
-| Embeddings | Yes | Yes | Yes | — | Yes |
-| Audio transcriptions | Yes | — | — | — | — |
-| Image generation | Yes | Yes | — | — | — |
-| Reranking | Yes | Yes | — | — | — |
-| Score | Yes | Yes | — | — | — |
+| Endpoint | NearDirect | NearCloud | Chutes | Venice | Phala Cloud | Tinfoil Cloud | Tinfoil Direct |
+|---|---|---|---|---|---|---|---|
+| Chat completions | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Responses | — | — | — | — | — | Yes | Yes |
+| Embeddings | Yes | Yes | Yes | — | Yes | Yes | Yes |
+| Audio transcriptions | Yes | — | — | — | — | Yes | Yes |
+| Text-to-speech | — | — | — | — | — | Yes | Yes |
+| Image generation | Yes | Yes | — | — | — | — | — |
+| Reranking | Yes | Yes | — | — | — | — | — |
+| Score | Yes | Yes | — | — | — | — | — |
 
 **—** = Not wired. Provider returns HTTP 400.
 
 ## E2EE Support Matrix
 
-| Endpoint | NearDirect | NearCloud | Chutes | Venice | Phala Cloud |
-|---|---|---|---|---|---|
-| Chat completions | Encrypted | Encrypted | Encrypted | Encrypted | No E2EE |
-| Embeddings | Encrypted | Encrypted | Encrypted | — | No E2EE |
-| Audio transcriptions | Plaintext (pinned) | — | — | — | — |
-| Image generation | Encrypted | Encrypted | — | — | — |
-| Reranking | Encrypted | Encrypted | — | — | — |
-| Score | Request encrypted; response plaintext (pinned) | Request encrypted; response plaintext (pinned) | — | — | — |
+| Endpoint | NearDirect | NearCloud | Chutes | Venice | Phala Cloud | Tinfoil Cloud | Tinfoil Direct |
+|---|---|---|---|---|---|---|---|
+| Chat completions | Encrypted | Encrypted | Encrypted | Encrypted | No E2EE | Encrypted | Encrypted |
+| Responses | — | — | — | — | — | Encrypted | Encrypted |
+| Embeddings | Encrypted | Encrypted | Encrypted | — | No E2EE | Encrypted | Encrypted |
+| Audio transcriptions | Plaintext (pinned) | — | — | — | — | Fail closed when E2EE is enabled; plaintext when disabled | Fail closed when E2EE is enabled; plaintext when disabled |
+| Text-to-speech | — | — | — | — | — | Encrypted | Encrypted |
+| Image generation | Encrypted | Encrypted | — | — | — | — | — |
+| Reranking | Encrypted | Encrypted | — | — | — | — | — |
+| Score | Request encrypted; response plaintext (pinned) | Request encrypted; response plaintext (pinned) | — | — | — | — | — |
 
 **Encrypted** = E2EE is applied to request and response fields.
 **Fail closed** = Proxy rejects the request with an error because E2EE is not supported for this endpoint in the end-to-end path, either because the proxy does not implement E2EE field dispatch for that request type or because the upstream TEE cannot decrypt it.
@@ -263,22 +269,74 @@ Venice only exposes chat completions. No other endpoints are available.
 |---|---|---|
 | Chutes | `attestation_type` key present | Not yet wired |
 | dstack | `intel_quote` key present | No E2EE |
-| Tinfoil | `format` key present | Not yet supported |
+| Tinfoil | `format` key present | Not yet wired |
 | Gateway | `gateway_attestation` key present | Not yet supported |
 
 When a Chutes-format backend is detected, the attestation is parsed using the Chutes protocol, but E2EE is not yet wired through the Phala proxy layer.
 
+### Tinfoil Cloud (`tinfoil_v3_cloud`)
+
+**Upstream:** Tinfoil router at `https://inference.tinfoil.sh`, which routes to per-model inference enclaves.
+
+**E2EE protocol:** EHBP — HPKE X25519 + AES-256-GCM (full-body encryption).
+
+**Connection model:** TLS-bound to the router enclave. Teep fetches `/.well-known/tinfoil-attestation?nonce=<64hex>`, verifies the Tinfoil V3 attestation document, checks the live TLS peer SPKI against `report_data.tls_key_fp`, and then verifies the upstream inference TLS peer against the same attested fingerprint. The EHBP key belongs to the router, not the per-model inference enclave. The router decrypts, forwards to the model enclave internally, and re-encrypts the response.
+
+| Endpoint | Upstream Path | E2EE | Notes |
+|---|---|---|---|
+| Chat completions | `/v1/chat/completions` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
+| Responses | `/v1/responses` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
+| Embeddings | `/v1/embeddings` | Yes | Full-body EHBP encryption |
+| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is wired, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
+| Text-to-speech | `/v1/audio/speech` | Yes | Full-body EHBP encryption |
+
+**E2EE field coverage:** EHBP encrypts the entire HTTP request and response body. There are **no field-level encryption gaps** — all request fields (messages, tools, parameters) and all response fields (content, tool_calls, usage) are encrypted by construction. Adding new OpenAI API fields requires zero changes to the encryption layer.
+
+**Wire format:**
+- Request: Chunked EHBP frames (`[4-byte length][AEAD ciphertext]`), sent as `Content-Type: application/json` with `Ehbp-Encapsulated-Key` header carrying the HPKE encapsulated key
+- Response: Same chunked EHBP frames; `Ehbp-Response-Nonce` header carries the 32-byte response nonce for key derivation
+
+**Model listing:** `/v1/models` is listed through the router base URL and returned by teep's proxy-aggregated model endpoint with `tinfoil_v3_cloud:` prefixes.
+
+---
+
+### Tinfoil Direct (`tinfoil_v3_direct`)
+
+**Upstream:** Per-model inference enclaves resolved via the router's `/.well-known/tinfoil-proxy` discovery endpoint. The discovery response maps model IDs to actual backend enclave domains such as `gemma4-31b-1.inf10.tinfoil.sh`; teep validates that selected domains end in Tinfoil-owned suffixes before using them.
+
+**E2EE protocol:** Same as Tinfoil Cloud — EHBP (HPKE X25519 + AES-256-GCM full-body encryption).
+
+**Connection model:** TLS-bound directly to the selected per-model inference enclave. Teep fetches the enclave's Tinfoil V3 attestation with a client nonce, verifies the live attestation TLS peer SPKI, then verifies the upstream inference TLS peer against the attested `tls_key_fp`. The EHBP key belongs to the inference enclave itself, providing end-to-end encryption without a router intermediary.
+
+| Endpoint | Upstream Path | E2EE | Notes |
+|---|---|---|---|
+| Chat completions | `/v1/chat/completions` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
+| Responses | `/v1/responses` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
+| Embeddings | `/v1/embeddings` | Yes | Full-body EHBP encryption |
+| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is wired, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
+| Text-to-speech | `/v1/audio/speech` | Yes | Full-body EHBP encryption |
+
+**E2EE field coverage:** Identical to Tinfoil Cloud — full-body EHBP, no field-level gaps.
+
+**Key ownership distinction:** In `tinfoil_v3_direct`, the HPKE public key in the attestation belongs to the inference enclave. In `tinfoil_v3_cloud`, it belongs to the router. Both use the same EHBP wire format.
+
+**Direct routing details:** The direct resolver caches model-to-enclave mappings for 5 minutes. When a request includes `prompt_cache_key`, teep uses deterministic hash-based sticky routing across a model's available enclave domains; otherwise it chooses the lexicographically first domain for deterministic behavior. Attestation and cache keys include the selected backend domain so multiple enclaves for the same model cannot collide.
+
+**Model listing:** Teep's model list for `tinfoil_v3_direct` is still fetched from the router base URL, not from each direct enclave.
+
+---
+
 ## E2EE Protocol Comparison
 
-| Property | NearDirect / NearCloud | Venice | Chutes |
-|---|---|---|---|
-| Encryption scope | Per-field (requests; most responses) | Per-field (`messages[].content` only) | Full-body |
-| Key exchange | ECDH (Ed25519→X25519) | ECDH (secp256k1) | ML-KEM-768 (post-quantum) |
-| Symmetric cipher | XChaCha20-Poly1305 | AES-256-GCM | ChaCha20-Poly1305 |
-| E2EE headers | `X-Signing-Algo`, `X-Client-Pub-Key`, `X-Encryption-Version`, `X-Encrypt-All-Fields` | `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, `X-Venice-TEE-Signing-Algo` | None (body-level AEAD) |
-| Request encryption | All sensitive JSON fields | `messages[].content` | Entire body (gzipped) |
-| Response encryption | Selected sensitive fields encrypted (chat text/tool-call payloads/logprobs tokens, embeddings vectors, rerank document text, image `b64_json`/`revised_prompt`); structural and numeric metadata plaintext; score `data[].score` currently plaintext (known upstream NearAI limitation) | `choices[].delta.content` in SSE chunks | Entire SSE chunks |
-| Field coverage | Broad sensitive-field coverage with `X-Encrypt-All-Fields: true`; metadata fields (IDs, indexes, roles, finish reasons, usage counters, scores) remain plaintext | `messages[].content` (request); `choices[].delta.content` (response) | Complete — all fields encrypted by construction |
-| New field coverage | Requires explicit code change per field | Requires explicit code change per field | Automatic — new fields covered by construction |
-| Streaming | `stream=true` forced; relay decrypts SSE | `stream=true` forced; relay decrypts SSE | `e2e_init` + `e2e` SSE events; relay decrypts chunks |
-| Post-quantum | No | No | Yes (ML-KEM-768) |
+| Property | NearDirect / NearCloud | Venice | Chutes | Tinfoil |
+|---|---|---|---|---|
+| Encryption scope | Per-field (requests; most responses) | Per-field (`messages[].content` only) | Full-body | Full-body |
+| Key exchange | ECDH (Ed25519→X25519) | ECDH (secp256k1) | ML-KEM-768 (post-quantum) | HPKE X25519 (RFC 9180) |
+| Symmetric cipher | XChaCha20-Poly1305 | AES-256-GCM | ChaCha20-Poly1305 | AES-256-GCM |
+| E2EE headers | `X-Signing-Algo`, `X-Client-Pub-Key`, `X-Encryption-Version`, `X-Encrypt-All-Fields` | `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, `X-Venice-TEE-Signing-Algo` | None (body-level AEAD) | `Ehbp-Encapsulated-Key` (request), `Ehbp-Response-Nonce` (response) |
+| Request encryption | All sensitive JSON fields | `messages[].content` | Entire body (gzipped) | Entire body (chunked EHBP frames) |
+| Response encryption | Selected sensitive fields encrypted (chat text/tool-call payloads/logprobs tokens, embeddings vectors, rerank document text, image `b64_json`/`revised_prompt`); structural and numeric metadata plaintext; score `data[].score` currently plaintext (known upstream NearAI limitation) | `choices[].delta.content` in SSE chunks | Entire SSE chunks | Entire body (chunked EHBP frames) |
+| Field coverage | Broad sensitive-field coverage with `X-Encrypt-All-Fields: true`; metadata fields (IDs, indexes, roles, finish reasons, usage counters, scores) remain plaintext | `messages[].content` (request); `choices[].delta.content` (response) | Complete — all fields encrypted by construction | Complete — all fields encrypted by construction |
+| New field coverage | Requires explicit code change per field | Requires explicit code change per field | Automatic — new fields covered by construction | Automatic — new fields covered by construction |
+| Streaming | `stream=true` forced; relay decrypts SSE | `stream=true` forced; relay decrypts SSE | `e2e_init` + `e2e` SSE events; relay decrypts chunks | EHBP decrypts body to plaintext SSE; relay forwards decrypted stream |
+| Post-quantum | No | No | Yes (ML-KEM-768) | No |

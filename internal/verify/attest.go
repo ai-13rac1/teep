@@ -2,14 +2,19 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/config"
+	"github.com/13rac1/teep/internal/multi"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
+	"github.com/13rac1/teep/internal/provider/tinfoil"
 )
 
 // fetchAttestation fetches raw attestation data from the provider with timing log.
@@ -35,11 +40,37 @@ func verifyTDX(ctx context.Context, raw *attestation.RawAttestation, nonce attes
 	tdxResult := verifier(ctx, raw.IntelQuote)
 	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && tdxResult.ParseErr == nil {
 		detail, err := rdVerifier.VerifyReportData(tdxResult.ReportData, raw, nonce)
-		tdxResult.ReportDataBindingErr = err
-		tdxResult.ReportDataBindingDetail = detail
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			tdxResult.ReportDataBindingErr = err
+			tdxResult.ReportDataBindingDetail = detail
+		}
 	}
 	slog.Debug("TDX verification complete", "elapsed", time.Since(tdxStart))
 	return tdxResult
+}
+
+// verifySEV runs SEV-SNP report verification and report data binding.
+// Returns nil if no SEV report is present.
+func verifySEV(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, providerName string, verifier attestation.SEVVerifier) *attestation.SEVVerifyResult {
+	if len(raw.SEVReportBytes) == 0 {
+		return nil
+	}
+	slog.Debug("SEV-SNP verification starting", "report_len", len(raw.SEVReportBytes))
+	sevStart := time.Now()
+	sevResult := verifier(ctx, raw.SEVReportBytes)
+	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && sevResult.ParseErr == nil {
+		detail, err := rdVerifier.VerifyReportData(sevResult.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			sevResult.ReportDataBindingErr = err
+			sevResult.ReportDataBindingDetail = detail
+		}
+	}
+	slog.Debug("SEV-SNP verification complete", "elapsed", time.Since(sevStart))
+	return sevResult
 }
 
 // verifyNVIDIA runs NVIDIA EAT and NRAS verification.
@@ -51,7 +82,7 @@ func verifyNVIDIA(ctx context.Context, raw *attestation.RawAttestation, nonce at
 		eat = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, nonce)
 		slog.DebugContext(ctx, "NVIDIA verification complete", "elapsed", time.Since(nvidiaStart))
 	} else if len(raw.GPUEvidence) > 0 {
-		serverNonce, err := attestation.ParseNonce(raw.Nonce)
+		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
 		if err != nil {
 			slog.Error("parse server nonce for GPU verification", "err", err)
 			eat = &attestation.NvidiaVerifyResult{
@@ -167,4 +198,144 @@ func checkSigstore(ctx context.Context, digests []string, client *http.Client, o
 		}
 	}
 	return sigstoreResults, rekorResults
+}
+
+// verifyTinfoilSupplyChain performs Tinfoil-specific Sigstore supply chain
+// verification and code/hardware measurement comparison. Returns nil for
+// non-Tinfoil providers.
+//
+// providerName determines which Sigstore repo to verify against:
+// tinfoil_v3_cloud attests the router enclave (confidential-model-router),
+// while tinfoil_v3_direct attests per-model inference enclaves.
+func verifyTinfoilSupplyChain(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	tdxResult *attestation.TDXVerifyResult,
+	sevResult *attestation.SEVVerifyResult,
+	providerName, modelName string,
+	policy attestation.MeasurementPolicy,
+	offline bool,
+) *attestation.TinfoilSupplyChainResult {
+	if raw.BackendFormat != attestation.FormatTinfoil {
+		return nil
+	}
+	// Use the repo from the proxy discovery endpoint if available (direct
+	// provider), otherwise fall back to RepoForProvider. The proxy endpoint
+	// returns the correct repo name which may differ from the convention
+	// (e.g. "glm-5-2" → "tinfoilsh/confidential-glm5-2" not "confidential-glm-5-2").
+	sigstoreRepo := raw.TinfoilRepo
+	if sigstoreRepo == "" {
+		sigstoreRepo = tinfoil.RepoForProvider(providerName, modelName)
+	}
+	if sigstoreRepo == "" {
+		return nil
+	}
+	slog.Debug("Tinfoil supply chain verification starting", "repo", sigstoreRepo)
+	start := time.Now()
+	result := &attestation.TinfoilSupplyChainResult{}
+
+	// Check GPU hash bound from REPORTDATA verification detail.
+	bindingDetail := ""
+	if tdxResult != nil {
+		bindingDetail = tdxResult.ReportDataBindingDetail
+	} else if sevResult != nil {
+		bindingDetail = sevResult.ReportDataBindingDetail
+	}
+	result.GPUHashBound = strings.Contains(bindingDetail, "gpu_bound=true")
+	result.NVSwitchHashBound = strings.Contains(bindingDetail, "nvswitch_bound=true")
+	result.NVSwitchExpected = strings.Contains(bindingDetail, "nvswitch_bound=")
+
+	// TDX policy checks.
+	if tdxResult != nil && tdxResult.ParseErr == nil {
+		pol := tinfoil.CheckTDXPolicy(tdxResult, policy.MRSeamAllow)
+		result.TDXPolicyErr = pol.Err()
+		if result.TDXPolicyErr == nil {
+			result.TDXPolicyDetail = "Tinfoil TDX policy: TD_ATTRIBUTES, XFAM, MR_SEAM, MR registers, RTMR3, TEE_TCB_SVN all pass"
+		} else {
+			result.TDXPolicyDetail = fmt.Sprintf("Tinfoil TDX policy checks failed: %v", result.TDXPolicyErr)
+		}
+	}
+
+	if offline {
+		slog.Debug("Tinfoil supply chain: skipping Sigstore fetch (offline mode)")
+		return result
+	}
+
+	// Sigstore DSSE bundle verification.
+	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(offline))
+	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, sigstoreRepo)
+	if err != nil {
+		result.SigstoreErr = err
+		slog.WarnContext(ctx, "Tinfoil Sigstore verification failed",
+			"repo", sigstoreRepo, "err", err)
+		return result
+	}
+	result.SigstoreVerified = true
+	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", sigstoreRepo, predicateType)
+
+	// Parse code measurements from the verified predicate.
+	if predicateType != tinfoil.PredicateMultiPlatform {
+		result.CodeMatchErr = fmt.Errorf("unexpected predicate type %q, want %q", predicateType, tinfoil.PredicateMultiPlatform)
+		return result
+	}
+	codeMeasurements, err := tinfoil.ParseMultiPlatformPredicate(predicateBytes)
+	if err != nil {
+		result.CodeMatchErr = fmt.Errorf("parse multi-platform predicate: %w", err)
+		return result
+	}
+
+	// Build enclave measurements and compare.
+	switch {
+	case tdxResult != nil && tdxResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromTDX(tdxResult)
+		if err := tinfoil.CompareMultiPlatformTDX(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("TDX code measurements match Sigstore predicate (RTMR1=%s..., RTMR2=%s...)",
+				truncTo(codeMeasurements.RTMR1, 16), truncTo(codeMeasurements.RTMR2, 16))
+		}
+
+		// Hardware measurement match (TDX only).
+		hwPredBytes, hwPredType, hwErr := sv.FetchAndVerify(ctx, "tinfoilsh/hardware-measurements")
+		switch {
+		case hwErr != nil:
+			result.HWMatchErr = fmt.Errorf("fetch hardware measurements: %w", hwErr)
+		case hwPredType != tinfoil.PredicateHardwareMeasurements:
+			result.HWMatchErr = fmt.Errorf("unexpected hardware predicate type %q", hwPredType)
+		default:
+			entries, parseErr := tinfoil.ParseHardwareMeasurements(hwPredBytes)
+			if parseErr != nil {
+				result.HWMatchErr = fmt.Errorf("parse hardware measurements: %w", parseErr)
+			} else if matchID, matchErr := tinfoil.MatchHardwareMeasurements(entries, enclave); matchErr != nil {
+				result.HWMatchErr = matchErr
+			} else {
+				result.HWMatch = matchID
+			}
+		}
+
+	case sevResult != nil && sevResult.ParseErr == nil:
+		enclave := tinfoil.EnclaveMeasurementsFromSEV(sevResult)
+		if err := tinfoil.CompareMultiPlatformSEVSNP(codeMeasurements, enclave); err != nil {
+			result.CodeMatchErr = err
+		} else {
+			result.CodeMatch = true
+			result.CodeMatchDetail = fmt.Sprintf("SEV-SNP code measurement matches Sigstore predicate (%s...)",
+				truncTo(codeMeasurements.SNPMeasurement, 16))
+		}
+
+	default:
+		result.CodeMatchErr = errors.New("no parseable TDX or SEV-SNP result for code measurement comparison")
+	}
+
+	slog.Debug("Tinfoil supply chain verification complete", "elapsed", time.Since(start))
+	return result
+}
+
+// truncTo returns the first n characters of s, or s itself if shorter.
+func truncTo(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

@@ -76,8 +76,9 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		}()
 	}
 
-	// Build a per-call verifier so concurrent Run calls don't race on a global.
+	// Build per-call verifiers so concurrent Run calls don't race on a global.
 	verifier := attestation.NewTDXVerifier(opts.Offline, attestation.NewCollateralGetter(client))
+	sevVerifier := attestation.NewSEVVerifier(opts.Offline, attestation.NewSEVCertGetter(client))
 
 	// Inject shared client into attester for capture/replay.
 	type clientSetter interface{ SetClient(*http.Client) }
@@ -93,6 +94,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	}
 
 	tdxResult := verifyTDX(ctx, raw, nonce, opts.ProviderName, verifier)
+	sevResult := verifySEV(ctx, raw, nonce, opts.ProviderName, sevVerifier)
 	nv := opts.NVIDIAVerifier
 	if nv == nil {
 		nv = attestation.DefaultNVIDIAVerifier()
@@ -137,32 +139,38 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	mergedPolicy := config.MergedMeasurementPolicy(opts.ProviderName, cfg, mDefaults)
 	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(opts.ProviderName, cfg, gwDefaults)
 
+	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline)
+
 	report = attestation.BuildReport(&attestation.ReportInput{
-		Provider:          opts.ProviderName,
-		Model:             opts.ModelName,
-		Raw:               raw,
-		Nonce:             nonce,
-		AllowFail:         config.MergedAllowFail(opts.ProviderName, cfg, opts.Offline),
-		Policy:            mergedPolicy,
-		GatewayPolicy:     mergedGWPolicy,
-		SupplyChainPolicy: supplyChainPolicy(opts.ProviderName),
-		TDX:               tdxResult,
-		Nvidia:            nvidiaResult,
-		NvidiaNRAS:        nrasResult,
-		PoC:               pocResult,
-		Compose:           composeResult,
-		ImageRepos:        modelCD.Repos,
-		GatewayImageRepos: gatewayCD.Repos,
-		DigestToRepo:      digestToRepo,
-		Sigstore:          sigstoreResults,
-		Rekor:             rekorResults,
-		GatewayTDX:        gatewayTDX,
-		GatewayPoC:        gatewayPoCResult,
-		GatewayNonceHex:   raw.GatewayNonceHex,
-		GatewayNonce:      nonce,
-		GatewayCompose:    gatewayCompose,
-		GatewayEventLog:   raw.GatewayEventLog,
-		E2EETest:          e2eeResult,
+		Provider:               opts.ProviderName,
+		Model:                  opts.ModelName,
+		Raw:                    raw,
+		Nonce:                  nonce,
+		AllowFail:              config.MergedAllowFail(opts.ProviderName, cfg, opts.Offline),
+		Policy:                 mergedPolicy,
+		GatewayPolicy:          mergedGWPolicy,
+		SupplyChainPolicy:      supplyChainPolicy(opts.ProviderName),
+		TDX:                    tdxResult,
+		SEV:                    sevResult,
+		Nvidia:                 nvidiaResult,
+		NvidiaNRAS:             nrasResult,
+		PoC:                    pocResult,
+		Compose:                composeResult,
+		ImageRepos:             modelCD.Repos,
+		GatewayImageRepos:      gatewayCD.Repos,
+		DigestToRepo:           digestToRepo,
+		Sigstore:               sigstoreResults,
+		Rekor:                  rekorResults,
+		GatewayTDX:             gatewayTDX,
+		GatewayPoC:             gatewayPoCResult,
+		GatewayNonceHex:        raw.GatewayNonceHex,
+		GatewayNonce:           nonce,
+		GatewayCompose:         gatewayCompose,
+		GatewayEventLog:        raw.GatewayEventLog,
+		TinfoilSC:              tinfoilSC,
+		E2EETest:               e2eeResult,
+		Inapplicable:           inapplicableFactors(opts.ProviderName),
+		ProviderUsesTLSBinding: providerUsesTLSBinding(opts.ProviderName),
 	})
 
 	return report, nil
@@ -322,9 +330,12 @@ func FormatReport(r *attestation.VerificationReport) string {
 		}
 		icon := statusIcon(f.Status)
 		line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
-		if f.Enforced {
+		switch {
+		case f.Status == attestation.NotApplicable:
+			// no enforcement tag for N/A factors
+		case f.Enforced:
 			line += "  [ENFORCED]"
-		} else {
+		default:
 			line += "  [ALLOWED]"
 		}
 		b.WriteString(line)
@@ -332,10 +343,14 @@ func FormatReport(r *attestation.VerificationReport) string {
 	}
 	b.WriteString("\n")
 
+	total := r.Passed + r.Failed + r.Skipped
 	fmt.Fprintf(&b, "Score: %d/%d passed, %d skipped, %d failed",
-		r.Passed, r.Passed+r.Failed+r.Skipped, r.Skipped, r.Failed)
+		r.Passed, total, r.Skipped, r.Failed)
 	if r.Failed > 0 {
 		fmt.Fprintf(&b, " (%d enforced, %d allowed)", r.EnforcedFailed, r.AllowedFailed)
+	}
+	if r.NotApplicableCount > 0 {
+		fmt.Fprintf(&b, ", %d n/a", r.NotApplicableCount)
 	}
 	b.WriteString("\n")
 	b.WriteString("\nRun 'teep help tiers' for scoring or 'teep help factors' for details.\n")
@@ -350,9 +365,12 @@ func statusIcon(s attestation.Status) string {
 		return "\u2713" // ✓
 	case attestation.Fail:
 		return "\u2717" // ✗
-	default:
-		return "?"
+	case attestation.Skip:
+		return "-"
+	case attestation.NotApplicable:
+		return "\u2014" // — (em dash)
 	}
+	return "?"
 }
 
 // metadataDisplayOrder defines the order and labels for the metadata block.

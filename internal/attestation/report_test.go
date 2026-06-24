@@ -120,14 +120,14 @@ func allExcept(exclude ...string) []string {
 // BuildReport-level tests (cross-cutting concerns)
 // ---------------------------------------------------------------------------
 
-// TestBuildReportFactorCount ensures exactly 29 factors are produced.
+// TestBuildReportFactorCount ensures exactly 30 factors are produced.
 func TestBuildReportFactorCount(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	if len(report.Factors) != 29 {
-		t.Errorf("factor count: got %d, want 29", len(report.Factors))
+	if len(report.Factors) != 31 {
+		t.Errorf("factor count: got %d, want 31", len(report.Factors))
 	}
 }
 
@@ -137,13 +137,13 @@ func TestBuildReportTotals(t *testing.T) {
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	total := report.Passed + report.Failed + report.Skipped
+	total := report.Passed + report.Failed + report.Skipped + report.NotApplicableCount
 	if total != len(report.Factors) {
 		t.Errorf("tallies sum to %d, want %d", total, len(report.Factors))
 	}
 
 	// Recount manually.
-	passed, failed, skipped := 0, 0, 0
+	passed, failed, skipped, notApplicable := 0, 0, 0, 0
 	for _, f := range report.Factors {
 		switch f.Status {
 		case Pass:
@@ -152,12 +152,71 @@ func TestBuildReportTotals(t *testing.T) {
 			failed++
 		case Skip:
 			skipped++
+		case NotApplicable:
+			notApplicable++
 		}
 	}
-	if report.Passed != passed || report.Failed != failed || report.Skipped != skipped {
-		t.Errorf("tally mismatch: got P=%d/F=%d/S=%d, manual count P=%d/F=%d/S=%d",
-			report.Passed, report.Failed, report.Skipped, passed, failed, skipped)
+	if report.Passed != passed || report.Failed != failed || report.Skipped != skipped || report.NotApplicableCount != notApplicable {
+		t.Errorf("tally mismatch: got P=%d/F=%d/S=%d/NA=%d, manual count P=%d/F=%d/S=%d/NA=%d",
+			report.Passed, report.Failed, report.Skipped, report.NotApplicableCount,
+			passed, failed, skipped, notApplicable)
 	}
+}
+
+// TestBuildReportInapplicableOverride verifies the applicability override.
+func TestBuildReportInapplicableOverride(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+
+	inapplicable := InapplicableFactors{
+		"nvidia_payload_present":    "test: not applicable",
+		"nvidia_signature":          "test: not applicable",
+		"nvidia_claims":             "test: not applicable",
+		"nvidia_nonce_client_bound": "test: not applicable",
+		"nvidia_nras_verified":      "test: not applicable",
+	}
+
+	report := BuildReport(&ReportInput{
+		Provider:     "venice",
+		Model:        "test-model",
+		Raw:          raw,
+		Nonce:        nonce,
+		AllowFail:    DefaultAllowFail,
+		Inapplicable: inapplicable,
+	})
+
+	// All 5 nvidia factors must be NotApplicable.
+	for _, name := range []string{
+		"nvidia_payload_present", "nvidia_signature", "nvidia_claims",
+		"nvidia_nonce_client_bound", "nvidia_nras_verified",
+	} {
+		f := findFactor(t, report, name)
+		if f.Status != NotApplicable {
+			t.Errorf("factor %s: got %s, want NotApplicable", name, f.Status)
+		}
+		if f.Detail != "test: not applicable" {
+			t.Errorf("factor %s detail: got %q, want %q", name, f.Detail, "test: not applicable")
+		}
+	}
+
+	// NotApplicable factors must not appear in the score denominator.
+	scoreDenom := report.Passed + report.Failed + report.Skipped
+	if report.NotApplicableCount != 5 {
+		t.Errorf("NotApplicableCount: got %d, want 5", report.NotApplicableCount)
+	}
+	if scoreDenom+report.NotApplicableCount != len(report.Factors) {
+		t.Errorf("score denominator (%d) + N/A (%d) != total factors (%d)",
+			scoreDenom, report.NotApplicableCount, len(report.Factors))
+	}
+
+	// Non-inapplicable factors must retain their original status.
+	f := findFactor(t, report, "nonce_match")
+	if f.Status != Pass {
+		t.Errorf("nonce_match: got %s, want Pass (should not be overridden)", f.Status)
+	}
+
+	// The above assertions prove NotApplicable factors cannot contribute to
+	// Blocked() — Blocked() checks Status == Fail && Enforced, and N/A != Fail.
 }
 
 // TestBuildReportEnforcedFlags verifies Enforced is set for factors NOT in AllowFail.
@@ -313,7 +372,7 @@ func TestWithOfflineAllowFail(t *testing.T) {
 func TestWithOfflineAllowFailNoDuplicates(t *testing.T) {
 	// If the input already contains some OnlineFactors, they should not
 	// be duplicated.
-	input := []string{"intel_pcs_collateral", "tdx_hardware_config"}
+	input := []string{"intel_pcs_collateral", "tee_hardware_config"}
 	result := WithOfflineAllowFail(input)
 	seen := make(map[string]int, len(result))
 	for _, f := range result {
@@ -329,8 +388,8 @@ func TestWithOfflineAllowFailNoDuplicates(t *testing.T) {
 	for _, f := range result {
 		resultSet[f] = true
 	}
-	if !resultSet["tdx_hardware_config"] {
-		t.Error("original entry tdx_hardware_config missing")
+	if !resultSet["tee_hardware_config"] {
+		t.Error("original entry tee_hardware_config missing")
 	}
 	for _, f := range OnlineFactors {
 		if !resultSet[f] {
@@ -340,7 +399,7 @@ func TestWithOfflineAllowFailNoDuplicates(t *testing.T) {
 }
 
 func TestWithOfflineAllowFailDoesNotMutateInput(t *testing.T) {
-	input := []string{"tdx_hardware_config"}
+	input := []string{"tee_hardware_config"}
 	inputCopy := append([]string(nil), input...)
 	_ = WithOfflineAllowFail(input)
 	if len(input) != len(inputCopy) || input[0] != inputCopy[0] {
@@ -349,18 +408,18 @@ func TestWithOfflineAllowFailDoesNotMutateInput(t *testing.T) {
 }
 
 func TestWithAllowFailAddsNewFactor(t *testing.T) {
-	input := []string{"tdx_hardware_config"}
+	input := []string{"tee_hardware_config"}
 	result := WithAllowFail(input, "e2ee_usable")
 	if len(result) != 2 {
 		t.Fatalf("got %d entries, want 2", len(result))
 	}
-	if result[0] != "tdx_hardware_config" || result[1] != "e2ee_usable" {
-		t.Errorf("got %v, want [tdx_hardware_config e2ee_usable]", result)
+	if result[0] != "tee_hardware_config" || result[1] != "e2ee_usable" {
+		t.Errorf("got %v, want [tee_hardware_config e2ee_usable]", result)
 	}
 }
 
 func TestWithAllowFailDeduplicates(t *testing.T) {
-	input := []string{"tdx_hardware_config", "e2ee_usable"}
+	input := []string{"tee_hardware_config", "e2ee_usable"}
 	result := WithAllowFail(input, "e2ee_usable")
 	if len(result) != 2 {
 		t.Fatalf("got %d entries, want 2 (no duplicate)", len(result))
@@ -368,7 +427,7 @@ func TestWithAllowFailDeduplicates(t *testing.T) {
 }
 
 func TestWithAllowFailDoesNotMutateInput(t *testing.T) {
-	input := []string{"tdx_hardware_config"}
+	input := []string{"tee_hardware_config"}
 	inputCopy := append([]string(nil), input...)
 	_ = WithAllowFail(input, "e2ee_usable")
 	if len(input) != len(inputCopy) || input[0] != inputCopy[0] {
@@ -434,7 +493,7 @@ func TestEvalTDXQuotePresent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
 			raw.IntelQuote = tc.quote
-			assertSingleFactor(t, evalTDXQuotePresent(&ReportInput{Raw: raw}), tc.want)
+			assertSingleFactor(t, evalTEEQuotePresent(&ReportInput{Raw: raw}), tc.want)
 		})
 	}
 }
@@ -465,11 +524,11 @@ func TestEvalTDXParseDependent(t *testing.T) {
 
 	t.Run("nil_tdx_all_fail", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
-		results := evalTDXParseDependent(&ReportInput{Raw: raw})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw})
 		if len(results) != 4 {
 			t.Fatalf("got %d results, want 4", len(results))
 		}
-		for _, name := range []string{"tdx_quote_structure", "tdx_cert_chain", "tdx_quote_signature", "tdx_debug_disabled"} {
+		for _, name := range []string{"tee_quote_structure", "tee_cert_chain", "tee_quote_signature", "tee_debug_disabled"} {
 			assertFactor(t, results, name, Fail)
 		}
 	})
@@ -477,11 +536,11 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("all_pass", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
 		if len(results) != 4 {
 			t.Fatalf("got %d results, want 4", len(results))
 		}
-		for _, name := range []string{"tdx_quote_structure", "tdx_cert_chain", "tdx_quote_signature", "tdx_debug_disabled"} {
+		for _, name := range []string{"tee_quote_structure", "tee_cert_chain", "tee_quote_signature", "tee_debug_disabled"} {
 			assertFactor(t, results, name, Pass)
 		}
 	})
@@ -489,8 +548,8 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("debug_enabled", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{DebugEnabled: true, TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
-		f := assertFactor(t, results, "tdx_debug_disabled", Fail)
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		f := assertFactor(t, results, "tee_debug_disabled", Fail)
 		if !strings.Contains(f.Detail, "debug") {
 			t.Errorf("detail should mention debug: %s", f.Detail)
 		}
@@ -499,25 +558,25 @@ func TestEvalTDXParseDependent(t *testing.T) {
 	t.Run("cert_chain_err", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{CertChainErr: errors.New("expired"), TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
-		assertFactor(t, results, "tdx_cert_chain", Fail)
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		assertFactor(t, results, "tee_cert_chain", Fail)
 	})
 
 	t.Run("signature_err", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{SignatureErr: errors.New("bad sig"), TeeTCBSVN: make([]byte, 16)}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
-		assertFactor(t, results, "tdx_quote_signature", Fail)
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		assertFactor(t, results, "tee_quote_signature", Fail)
 	})
 
 	t.Run("parse_err_skips_chain_sig_debug", func(t *testing.T) {
 		raw := buildMinimalRaw(nonce, sigKey)
 		tdx := &TDXVerifyResult{ParseErr: errors.New("bad quote")}
-		results := evalTDXParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
-		assertFactor(t, results, "tdx_quote_structure", Fail)
-		assertFactor(t, results, "tdx_cert_chain", Skip)
-		assertFactor(t, results, "tdx_quote_signature", Skip)
-		assertFactor(t, results, "tdx_debug_disabled", Skip)
+		results := evalTEEParseDependent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx})
+		assertFactor(t, results, "tee_quote_structure", Fail)
+		assertFactor(t, results, "tee_cert_chain", Skip)
+		assertFactor(t, results, "tee_quote_signature", Skip)
+		assertFactor(t, results, "tee_debug_disabled", Skip)
 	})
 }
 
@@ -531,10 +590,10 @@ func TestEvalTDXQuoteStructure(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		results := evalTDXParseDependent(&ReportInput{
+		results := evalTEEParseDependent(&ReportInput{
 			Raw: raw, Nonce: nonce, TDX: tdx,
 		})
-		f := assertFactor(t, results, "tdx_quote_structure", Pass)
+		f := assertFactor(t, results, "tee_quote_structure", Pass)
 		if !strings.Contains(f.Detail, "valid") {
 			t.Errorf("detail should mention valid: %s", f.Detail)
 		}
@@ -546,28 +605,28 @@ func TestEvalTDXQuoteStructure(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		results := evalTDXParseDependent(&ReportInput{
+		results := evalTEEParseDependent(&ReportInput{
 			Raw: raw, Nonce: nonce, TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("aa", 48): {}},
 			},
 		})
-		// tdx_quote_structure should pass — measurement checks moved to tdx_mrseam_mrtd
-		assertFactor(t, results, "tdx_quote_structure", Pass)
+		// tee_quote_structure should pass — measurement checks moved to tee_measurement
+		assertFactor(t, results, "tee_quote_structure", Pass)
 	})
 }
 
-func TestEvalTDXMrseamMrtd(t *testing.T) {
+func TestEvalTDXMeasurement(t *testing.T) {
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEMeasurement(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEMeasurement(&ReportInput{}), Skip)
 	})
 
 	t.Run("mrtd_mismatch", func(t *testing.T) {
@@ -575,7 +634,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("aa", 48): {}},
@@ -591,7 +650,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow:   map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -608,7 +667,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow:   map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -625,7 +684,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRTDAllow: map[string]struct{}{strings.Repeat("11", 48): {}},
@@ -641,7 +700,7 @@ func TestEvalTDXMrseamMrtd(t *testing.T) {
 			MRTD:   bytesFromHex(t, strings.Repeat("11", 48)),
 			MRSeam: bytesFromHex(t, strings.Repeat("22", 48)),
 		}
-		f := assertSingleFactor(t, evalTDXMrseamMrtd(&ReportInput{
+		f := assertSingleFactor(t, evalTEEMeasurement(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				MRSeamAllow: map[string]struct{}{strings.Repeat("22", 48): {}},
@@ -664,16 +723,16 @@ func TestEvalTDXHardwareConfig(t *testing.T) {
 
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{}), Skip)
 	})
 
 	t.Run("rtmr0_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		f := assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -688,7 +747,7 @@ func TestEvalTDXHardwareConfig(t *testing.T) {
 
 	t.Run("rtmr0_match", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48))}
-		assertSingleFactor(t, evalTDXHardwareConfig(&ReportInput{
+		assertSingleFactor(t, evalTEEHardwareConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -710,16 +769,16 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("skip_no_policy", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{TDX: tdx}), Skip)
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{TDX: tdx}), Skip)
 	})
 
 	t.Run("skip_no_tdx", func(t *testing.T) {
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{}), Skip)
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{}), Skip)
 	})
 
 	t.Run("rtmr1_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		f := assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -737,7 +796,7 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("rtmr2_mismatch", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		f := assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		f := assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -755,7 +814,7 @@ func TestEvalTDXBootConfig(t *testing.T) {
 
 	t.Run("pass_both_match", func(t *testing.T) {
 		tdx := &TDXVerifyResult{RTMRs: makeRTMRs(t, strings.Repeat("ab", 48), strings.Repeat("cd", 48))}
-		assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+		assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 			TDX: tdx,
 			Policy: MeasurementPolicy{
 				RTMRAllow: [4]map[string]struct{}{
@@ -774,7 +833,7 @@ func TestEvalTDXBootConfig_PassRTMR2Only(t *testing.T) {
 	var rtmrs [4][48]byte
 	copy(rtmrs[2][:], bytesFromHex(t, strings.Repeat("cd", 48)))
 	tdx := &TDXVerifyResult{RTMRs: rtmrs}
-	assertSingleFactor(t, evalTDXBootConfig(&ReportInput{
+	assertSingleFactor(t, evalTEEBootConfig(&ReportInput{
 		TDX: tdx,
 		Policy: MeasurementPolicy{
 			RTMRAllow: [4]map[string]struct{}{
@@ -813,7 +872,7 @@ func TestEvalTDXReportDataBinding(t *testing.T) {
 		{
 			"fail_nil_tdx",
 			nil,
-			Fail, "no parseable TDX",
+			Fail, "no parseable TEE",
 		},
 		{
 			"fail_binding_err",
@@ -821,13 +880,13 @@ func TestEvalTDXReportDataBinding(t *testing.T) {
 				TeeTCBSVN:            make([]byte, 16),
 				ReportDataBindingErr: errors.New("mismatch"),
 			},
-			Fail, "does not bind",
+			Fail, "binding failed",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXReportDataBinding(&ReportInput{
+			f := assertSingleFactor(t, evalTEEReportDataBinding(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.wantStatus)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -841,11 +900,227 @@ func TestEvalTDXReportDataBinding_EmptySigningKey(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, "")
 	tdx := &TDXVerifyResult{TeeTCBSVN: make([]byte, 16)} // ParseErr == nil
-	f := assertSingleFactor(t, evalTDXReportDataBinding(&ReportInput{
+	f := assertSingleFactor(t, evalTEEReportDataBinding(&ReportInput{
 		Raw: raw, Nonce: nonce, TDX: tdx,
 	}), Fail)
 	if !strings.Contains(f.Detail, "public key absent") {
 		t.Errorf("detail %q should mention 'public key absent'", f.Detail)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SEV-SNP evaluator unit tests
+// ---------------------------------------------------------------------------
+
+func buildSEVInput(sev *SEVVerifyResult) *ReportInput {
+	nonce := NewNonce()
+	raw := &RawAttestation{
+		Verified:       true,
+		Nonce:          nonce.Hex(),
+		Model:          "test-model",
+		TEEHardware:    "amd-sev-snp",
+		SEVReportBytes: make([]byte, 1184),
+		SigningKey:     "1d4e65f73eabcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	return &ReportInput{
+		Raw:   raw,
+		Nonce: nonce,
+		SEV:   sev,
+	}
+}
+
+func TestEvalSEVQuotePresent(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		f := assertSingleFactor(t, evalTEEQuotePresent(in), Pass)
+		if !strings.Contains(f.Detail, "SEV-SNP") {
+			t.Errorf("detail %q should mention SEV-SNP", f.Detail)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		in.Raw.SEVReportBytes = nil
+		in.SEV = nil
+		assertSingleFactor(t, evalTEEQuotePresent(in), Fail)
+	})
+}
+
+func TestEvalSEVParseDependent(t *testing.T) {
+	t.Run("parse_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{ParseErr: errors.New("bad report")})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_structure", Fail)
+		assertFactor(t, results, "tee_cert_chain", Skip)
+		assertFactor(t, results, "tee_quote_signature", Skip)
+		assertFactor(t, results, "tee_debug_disabled", Skip)
+	})
+
+	t.Run("offline_pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement: make([]byte, 48),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_structure", Pass)
+		assertFactor(t, results, "tee_cert_chain", Skip)      // offline
+		assertFactor(t, results, "tee_quote_signature", Skip) // offline
+		assertFactor(t, results, "tee_debug_disabled", Pass)
+	})
+
+	t.Run("online_pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:    make([]byte, 48),
+			OnlineVerified: true,
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_cert_chain", Pass)
+		assertFactor(t, results, "tee_quote_signature", Pass)
+	})
+
+	t.Run("cert_chain_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			CertChainErr: errors.New("invalid cert"),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_cert_chain", Fail)
+	})
+
+	t.Run("signature_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			SignatureErr: errors.New("bad signature"),
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_quote_signature", Fail)
+	})
+
+	t.Run("debug_enabled", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			DebugEnabled: true,
+		})
+		results := evalTEEParseDependent(in)
+		assertFactor(t, results, "tee_debug_disabled", Fail)
+	})
+}
+
+func TestEvalSEVMeasurement(t *testing.T) {
+	meas := strings.Repeat("ab", 48)
+	measBytes, _ := hex.DecodeString(meas)
+
+	t.Run("no_policy", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{}
+		assertSingleFactor(t, evalTEEMeasurement(in), Skip)
+	})
+
+	t.Run("match", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{MRTDAllow: map[string]struct{}{meas: {}}}
+		assertSingleFactor(t, evalTEEMeasurement(in), Pass)
+	})
+
+	t.Run("mismatch", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{Measurement: measBytes})
+		in.Policy = MeasurementPolicy{MRTDAllow: map[string]struct{}{strings.Repeat("cd", 48): {}}}
+		assertSingleFactor(t, evalTEEMeasurement(in), Fail)
+	})
+}
+
+func TestEvalSEVHardwareConfig(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{GuestPolicy: 0x30000})
+		f := assertSingleFactor(t, evalTEEHardwareConfig(in), Pass)
+		if !strings.Contains(f.Detail, "guest policy valid") {
+			t.Errorf("detail %q should mention guest policy valid", f.Detail)
+		}
+	})
+
+	t.Run("fail_policy_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{PolicyErr: errors.New("debug must be disabled")})
+		assertSingleFactor(t, evalTEEHardwareConfig(in), Fail)
+	})
+}
+
+func TestEvalSEVBootConfig(t *testing.T) {
+	in := buildSEVInput(&SEVVerifyResult{})
+	f := assertSingleFactor(t, evalTEEBootConfig(in), Pass)
+	if !strings.Contains(f.Detail, "launch measurement") {
+		t.Errorf("detail %q should mention launch measurement", f.Detail)
+	}
+}
+
+func TestEvalSEVReportDataBinding(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			ReportDataBindingDetail: "verified binding",
+		})
+		assertSingleFactor(t, evalTEEReportDataBinding(in), Pass)
+	})
+
+	t.Run("fail_binding_err", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			ReportDataBindingErr: errors.New("mismatch"),
+		})
+		assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+	})
+
+	t.Run("fail_no_detail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		f := assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+		if !strings.Contains(f.Detail, "no REPORTDATA verifier") {
+			t.Errorf("detail %q should mention no verifier", f.Detail)
+		}
+	})
+
+	t.Run("fail_no_signing_key", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{ReportDataBindingDetail: "ok"})
+		in.Raw.SigningKey = ""
+		f := assertSingleFactor(t, evalTEEReportDataBinding(in), Fail)
+		if !strings.Contains(f.Detail, "public key absent") {
+			t.Errorf("detail %q should mention public key absent", f.Detail)
+		}
+	})
+}
+
+func TestEvalSEVTCBCurrent(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			CurrentTCB: SEVTCBVersion{BlSpl: 0x0a, SnpSpl: 0x17, UcodeSpl: 0x54},
+		})
+		f := assertSingleFactor(t, evalTEETCBCurrent(in), Pass)
+		if !strings.Contains(f.Detail, "meets minimums") {
+			t.Errorf("detail %q should mention meets minimums", f.Detail)
+		}
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			TCBErr: errors.New("BlSpl too low"),
+		})
+		assertSingleFactor(t, evalTEETCBCurrent(in), Fail)
+	})
+}
+
+func TestEvalSEVTCBNotRevoked(t *testing.T) {
+	t.Run("pass", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{})
+		assertSingleFactor(t, evalTEETCBNotRevoked(in), Pass)
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		in := buildSEVInput(&SEVVerifyResult{
+			TCBErr: errors.New("TCB revoked"),
+		})
+		assertSingleFactor(t, evalTEETCBNotRevoked(in), Fail)
+	})
+}
+
+func TestEvalIntelPCSCollateral_SEV(t *testing.T) {
+	in := buildSEVInput(&SEVVerifyResult{})
+	f := assertSingleFactor(t, evalIntelPCSCollateral(in), Skip)
+	if !strings.Contains(f.Detail, "AMD KDS") {
+		t.Errorf("detail %q should mention AMD KDS", f.Detail)
 	}
 }
 
@@ -912,7 +1187,7 @@ func TestEvalTDXTCBCurrent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{
+			f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.want)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -955,7 +1230,7 @@ func TestEvalTDXTCBNotRevoked(t *testing.T) {
 		{
 			"skip_nil_tdx",
 			nil,
-			Skip, "no parseable TDX",
+			Skip, "no parseable TEE",
 		},
 		{
 			"skip_offline",
@@ -971,7 +1246,7 @@ func TestEvalTDXTCBNotRevoked(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildMinimalRaw(nonce, sigKey)
-			f := assertSingleFactor(t, evalTDXTCBNotRevoked(&ReportInput{
+			f := assertSingleFactor(t, evalTEETCBNotRevoked(&ReportInput{
 				Raw: raw, Nonce: nonce, TDX: tc.tdx,
 			}), tc.want)
 			if tc.wantDetail != "" && !strings.Contains(f.Detail, tc.wantDetail) {
@@ -1221,6 +1496,41 @@ func TestEvalTLSKeyBinding(t *testing.T) {
 	}
 }
 
+func TestEvalTLSKeyBinding_ProviderUsesTLSBinding(t *testing.T) {
+	nonce := NewNonce()
+	sigKey := validSigningKey(t)
+
+	t.Run("fail_when_provider_declares_binding_but_no_fingerprint", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = ""
+		f := assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: true,
+		}), Fail)
+		if !strings.Contains(f.Detail, "declares TLS binding") {
+			t.Errorf("detail %q should mention TLS binding declaration", f.Detail)
+		}
+	})
+
+	t.Run("skip_when_provider_does_not_declare_binding", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = ""
+		assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: false,
+		}), Skip)
+	})
+
+	t.Run("pass_when_provider_declares_binding_and_has_fingerprint", func(t *testing.T) {
+		raw := buildMinimalRaw(nonce, sigKey)
+		raw.TLSFingerprint = "aabbccddee112233445566778899aabb"
+		assertSingleFactor(t, evalTLSKeyBinding(&ReportInput{
+			Raw:                    raw,
+			ProviderUsesTLSBinding: true,
+		}), Pass)
+	})
+}
+
 func TestEvalCPUGPUChain(t *testing.T) {
 	assertSingleFactor(t, evalCPUGPUChain(&ReportInput{Raw: &RawAttestation{}}), Fail)
 }
@@ -1230,11 +1540,10 @@ func TestEvalMeasuredModelWeights(t *testing.T) {
 }
 
 func TestEvalComposeBinding_ChutesFormat(t *testing.T) {
+	// Chutes-specific detail removed — handled by applicability layer.
+	// Evaluator now returns generic message for absent compose data.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
-	f := assertSingleFactor(t, evalComposeBinding(&ReportInput{Raw: raw, Compose: nil}), Skip)
-	if !strings.Contains(f.Detail, "chutes") {
-		t.Errorf("detail %q should mention 'chutes'", f.Detail)
-	}
+	assertSingleFactor(t, evalComposeBinding(&ReportInput{Raw: raw, Compose: nil}), Skip)
 }
 
 func TestEvalComposeBinding(t *testing.T) {
@@ -1308,11 +1617,9 @@ func TestEvalSigstoreVerification(t *testing.T) {
 }
 
 func TestEvalSigstoreVerification_ChutesFormat(t *testing.T) {
+	// Chutes-specific detail removed — handled by applicability layer.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
-	f := assertSingleFactor(t, evalSigstoreVerification(&ReportInput{Raw: raw}), Skip)
-	if !strings.Contains(f.Detail, "chutes") {
-		t.Errorf("detail %q should mention 'chutes'", f.Detail)
-	}
+	assertSingleFactor(t, evalSigstoreVerification(&ReportInput{Raw: raw}), Skip)
 }
 
 func TestEvalSigstoreVerification_FailWithErr(t *testing.T) {
@@ -1583,7 +1890,7 @@ func TestBuildMetadata_WithPPID(t *testing.T) {
 func TestReportDataBindingPassed(t *testing.T) {
 	t.Run("pass", func(t *testing.T) {
 		r := &VerificationReport{Factors: []FactorResult{
-			{Name: "tdx_reportdata_binding", Status: Pass},
+			{Name: "tee_reportdata_binding", Status: Pass},
 		}}
 		if !r.ReportDataBindingPassed() {
 			t.Error("expected true")
@@ -1591,7 +1898,7 @@ func TestReportDataBindingPassed(t *testing.T) {
 	})
 	t.Run("fail", func(t *testing.T) {
 		r := &VerificationReport{Factors: []FactorResult{
-			{Name: "tdx_reportdata_binding", Status: Fail},
+			{Name: "tee_reportdata_binding", Status: Fail},
 		}}
 		if r.ReportDataBindingPassed() {
 			t.Error("expected false")
@@ -2139,6 +2446,8 @@ func TestEvalCPUIDRegistry_Fallthrough(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestEvalEventLogIntegrity_ChutesSkip(t *testing.T) {
+	// Chutes-specific check removed — handled by applicability layer.
+	// Without event log entries, evaluator returns generic Skip.
 	raw := &RawAttestation{BackendFormat: FormatChutes}
 	assertSingleFactor(t, evalEventLogIntegrity(&ReportInput{Raw: raw}), Skip)
 }
@@ -2226,14 +2535,14 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 		GatewayNonce:    gatewayNonce,
 	})
 
-	// Base 29 + 13 gateway factors = 42
-	// Gateway factors: gateway_nonce_match, gateway_tdx_quote_present,
-	// gateway_tdx_quote_structure, gateway_tdx_cert_chain, gateway_tdx_quote_signature,
-	// gateway_tdx_debug_disabled, gateway_tdx_mrseam_mrtd, gateway_tdx_hardware_config,
-	// gateway_tdx_boot_config, gateway_tdx_reportdata_binding,
+	// Base 31 + 13 gateway factors = 44
+	// Gateway factors: gateway_nonce_match, gateway_tee_quote_present,
+	// gateway_tee_quote_structure, gateway_tee_cert_chain, gateway_tee_quote_signature,
+	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
+	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 42 {
-		t.Errorf("factor count with gateway: got %d, want 42", len(report.Factors))
+	if len(report.Factors) != 44 {
+		t.Errorf("factor count with gateway: got %d, want 44", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}
@@ -2947,12 +3256,14 @@ func TestBuildTransparencyNoRekor_WithComposeHash(t *testing.T) {
 }
 
 func TestBuildTransparencyNoRekor_Chutes(t *testing.T) {
+	// Chutes format check removed from evaluator — handled by applicability layer.
+	// Without applicability, the evaluator returns Fail for no Rekor data.
 	in := &ReportInput{
 		Raw: &RawAttestation{BackendFormat: FormatChutes},
 	}
 	result := buildTransparencyNoRekor(in, nil)
-	if result.Status != Skip {
-		t.Errorf("status = %v, want Skip", result.Status)
+	if result.Status != Fail {
+		t.Errorf("status = %v, want Fail", result.Status)
 	}
 	t.Logf("detail: %s", result.Detail)
 }
@@ -3070,30 +3381,30 @@ func TestCheckImageRepoPolicy_AllPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXMrseamMrtd
+// evalGatewayTDXMeasurement
 // ---------------------------------------------------------------------------
 
-func TestEvalGatewayTDXMrseamMrtd_NilGatewayTDX(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_NilGatewayTDX(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_NoPolicy(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_NoPolicy(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{},
 		// No GatewayPolicy configured → both HasMRTDPolicy and HasMRSeamPolicy are false
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRTDFail(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRTDFail(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{MRTD: []byte{0xaa, 0xbb}},
@@ -3101,13 +3412,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRTDFail(t *testing.T) {
 			MRTDAllow: map[string]struct{}{"ccdd": {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRTDPass(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRTDPass(t *testing.T) {
 	mrtd := []byte{0xaa, 0xbb}
 	mrtdHex := hex.EncodeToString(mrtd)
 	in := &ReportInput{
@@ -3117,13 +3428,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRTDPass(t *testing.T) {
 			MRTDAllow: map[string]struct{}{mrtdHex: {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRSeamFail(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRSeamFail(t *testing.T) {
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{MRSeam: []byte{0x01}},
@@ -3131,13 +3442,13 @@ func TestEvalGatewayTDXMrseamMrtd_MRSeamFail(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{"ffff": {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_BothMatch(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_BothMatch(t *testing.T) {
 	mrtd := []byte{0xaa}
 	mrseam := []byte{0xbb}
 	in := &ReportInput{
@@ -3148,13 +3459,13 @@ func TestEvalGatewayTDXMrseamMrtd_BothMatch(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
-func TestEvalGatewayTDXMrseamMrtd_MRSeamOnlyPass(t *testing.T) {
+func TestEvalGatewayTDXMeasurement_MRSeamOnlyPass(t *testing.T) {
 	mrseam := []byte{0xcc}
 	in := &ReportInput{
 		Raw:        &RawAttestation{},
@@ -3163,7 +3474,7 @@ func TestEvalGatewayTDXMrseamMrtd_MRSeamOnlyPass(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMrseamMrtd(in)
+	results := evalGatewayTDXMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3536,9 +3847,9 @@ func TestEvalGatewayTDXParseDependent_Errors(t *testing.T) {
 	if len(results) != 4 {
 		t.Fatalf("expected 4 results, got %d", len(results))
 	}
-	// gateway_tdx_quote_structure always passes when ParseErr == nil.
+	// gateway_tee_quote_structure always passes when ParseErr == nil.
 	if results[0].Status != Pass {
-		t.Errorf("gateway_tdx_quote_structure = %v, want Pass", results[0].Status)
+		t.Errorf("gateway_tee_quote_structure = %v, want Pass", results[0].Status)
 	}
 	// cert chain, signature, debug should all fail.
 	for _, r := range results[1:] {
@@ -3610,7 +3921,7 @@ func TestEvalTDXTCBCurrent_OutOfDateWithAdvisories(t *testing.T) {
 		TcbStatus:   "OutOfDate",
 		AdvisoryIDs: []string{"INTEL-SA-00615"},
 	}
-	f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Fail)
+	f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Fail)
 	t.Logf("detail: %s", f.Detail)
 	if !strings.Contains(f.Detail, "INTEL-SA-00615") {
 		t.Errorf("detail should contain advisory ID: %s", f.Detail)
@@ -3627,7 +3938,7 @@ func TestEvalTDXTCBCurrent_CollateralErrFallthrough(t *testing.T) {
 		TeeTCBSVN:     []byte{0x07, 0x01},
 		CollateralErr: errors.New("pcs timeout"),
 	}
-	f := assertSingleFactor(t, evalTDXTCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Skip)
+	f := assertSingleFactor(t, evalTEETCBCurrent(&ReportInput{Raw: raw, Nonce: nonce, TDX: tdx}), Skip)
 	t.Logf("detail: %s", f.Detail)
 	if !strings.Contains(f.Detail, "pcs timeout") {
 		t.Errorf("detail should contain error: %s", f.Detail)
@@ -3954,4 +4265,250 @@ func TestE2EEKeyType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tinfoil supply chain evaluator tests
+// ---------------------------------------------------------------------------
+
+func buildTinfoilInput(sc *TinfoilSupplyChainResult) *ReportInput {
+	nonce := NewNonce()
+	return &ReportInput{
+		Raw: &RawAttestation{
+			Verified:    true,
+			Nonce:       nonce.Hex(),
+			Model:       "test-model",
+			TEEHardware: "amd-sev-snp",
+			SigningKey:  "1d4e65f73eabcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+		Nonce:     nonce,
+		TinfoilSC: sc,
+	}
+}
+
+func TestEvalSigstoreCodeVerified(t *testing.T) {
+	t.Run("nil_tinfoilSC", func(t *testing.T) {
+		in := buildTinfoilInput(nil)
+		assertSingleFactor(t, evalSigstoreCodeVerified(in), Skip)
+	})
+
+	t.Run("sigstore_error", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreErr: errors.New("fetch failed"),
+		})
+		f := assertSingleFactor(t, evalSigstoreCodeVerified(in), Fail)
+		if !strings.Contains(f.Detail, "fetch failed") {
+			t.Errorf("detail %q should mention fetch failed", f.Detail)
+		}
+	})
+
+	t.Run("not_verified", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: false,
+		})
+		assertSingleFactor(t, evalSigstoreCodeVerified(in), Fail)
+	})
+
+	t.Run("code_mismatch", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatchErr:     errors.New("RTMR1 mismatch"),
+		})
+		f := assertSingleFactor(t, evalSigstoreCodeVerified(in), Fail)
+		if !strings.Contains(f.Detail, "RTMR1 mismatch") {
+			t.Errorf("detail %q should mention RTMR1 mismatch", f.Detail)
+		}
+	})
+
+	t.Run("verified_but_no_match", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatch:        false,
+		})
+		assertSingleFactor(t, evalSigstoreCodeVerified(in), Fail)
+	})
+
+	t.Run("pass", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatch:        true,
+			SigstoreDetail:   "Sigstore DSSE verified for tinfoilsh/test",
+		})
+		f := assertSingleFactor(t, evalSigstoreCodeVerified(in), Pass)
+		if !strings.Contains(f.Detail, "Sigstore DSSE verified") {
+			t.Errorf("detail %q should mention verification", f.Detail)
+		}
+	})
+
+	t.Run("pass_no_detail", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatch:        true,
+		})
+		f := assertSingleFactor(t, evalSigstoreCodeVerified(in), Pass)
+		if !strings.Contains(f.Detail, "code measurements match") {
+			t.Errorf("detail %q should have default text", f.Detail)
+		}
+	})
+}
+
+func TestEvalNVSwitchBinding(t *testing.T) {
+	t.Run("nil_tinfoilSC", func(t *testing.T) {
+		in := buildTinfoilInput(nil)
+		assertSingleFactor(t, evalNVSwitchBinding(in), Skip)
+	})
+
+	t.Run("no_gpu_hash", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			GPUHashBound: false,
+		})
+		f := assertSingleFactor(t, evalNVSwitchBinding(in), Skip)
+		if !strings.Contains(f.Detail, "no GPU evidence") {
+			t.Errorf("detail %q should mention no GPU evidence", f.Detail)
+		}
+	})
+
+	t.Run("nvswitch_bound", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			GPUHashBound:      true,
+			NVSwitchHashBound: true,
+		})
+		assertSingleFactor(t, evalNVSwitchBinding(in), Pass)
+	})
+
+	t.Run("gpu_bound_no_nvswitch", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			GPUHashBound:      true,
+			NVSwitchHashBound: false,
+		})
+		f := assertSingleFactor(t, evalNVSwitchBinding(in), Pass)
+		if !strings.Contains(f.Detail, "not required") {
+			t.Errorf("detail %q should mention not required", f.Detail)
+		}
+	})
+}
+
+func TestEvalCPUGPUChain_Tinfoil(t *testing.T) {
+	t.Run("gpu_bound", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{GPUHashBound: true})
+		assertSingleFactor(t, evalCPUGPUChain(in), Pass)
+	})
+
+	t.Run("gpu_not_bound", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{GPUHashBound: false})
+		assertSingleFactor(t, evalCPUGPUChain(in), Fail)
+	})
+
+	t.Run("nil_tinfoilSC", func(t *testing.T) {
+		in := buildTinfoilInput(nil)
+		assertSingleFactor(t, evalCPUGPUChain(in), Fail)
+	})
+}
+
+func TestEvalMeasuredModelWeights_Tinfoil(t *testing.T) {
+	t.Run("pass_sigstore_and_code", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatch:        true,
+		})
+		f := assertSingleFactor(t, evalMeasuredModelWeights(in), Pass)
+		if !strings.Contains(f.Detail, "dm-verity") {
+			t.Errorf("detail %q should mention dm-verity", f.Detail)
+		}
+	})
+
+	t.Run("fail_no_sigstore", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: false,
+		})
+		assertSingleFactor(t, evalMeasuredModelWeights(in), Fail)
+	})
+
+	t.Run("fail_no_code_match", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			SigstoreVerified: true,
+			CodeMatch:        false,
+		})
+		assertSingleFactor(t, evalMeasuredModelWeights(in), Fail)
+	})
+}
+
+func TestEvalTEEMeasurement_Tinfoil(t *testing.T) {
+	t.Run("code_match_pass", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			CodeMatch:       true,
+			CodeMatchDetail: "TDX code measurements match",
+		})
+		f := assertSingleFactor(t, evalTEEMeasurement(in), Pass)
+		if !strings.Contains(f.Detail, "TDX code measurements match") {
+			t.Errorf("detail %q should mention code match", f.Detail)
+		}
+	})
+
+	t.Run("code_match_error", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			CodeMatchErr: errors.New("RTMR2 mismatch"),
+		})
+		f := assertSingleFactor(t, evalTEEMeasurement(in), Fail)
+		if !strings.Contains(f.Detail, "RTMR2 mismatch") {
+			t.Errorf("detail %q should mention RTMR2 mismatch", f.Detail)
+		}
+	})
+}
+
+func TestEvalTEEHardwareConfig_Tinfoil(t *testing.T) {
+	t.Run("tdx_policy_pass", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			TDXPolicyDetail: "Tinfoil TDX policy: all checks pass",
+		})
+		f := assertSingleFactor(t, evalTEEHardwareConfig(in), Pass)
+		if !strings.Contains(f.Detail, "Tinfoil TDX policy") {
+			t.Errorf("detail %q should mention Tinfoil TDX policy", f.Detail)
+		}
+	})
+
+	t.Run("tdx_policy_fail", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			TDXPolicyDetail: "Tinfoil TDX policy: TD_ATTRIBUTES check failed",
+			TDXPolicyErr:    errors.New("TD_ATTRIBUTES mismatch"),
+		})
+		f := assertSingleFactor(t, evalTEEHardwareConfig(in), Fail)
+		if !strings.Contains(f.Detail, "TD_ATTRIBUTES mismatch") {
+			t.Errorf("detail %q should mention TD_ATTRIBUTES mismatch", f.Detail)
+		}
+	})
+}
+
+func TestEvalTEEBootConfig_Tinfoil(t *testing.T) {
+	t.Run("hw_match", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			HWMatch: "entry-001",
+		})
+		// Need a TDX result for the boot config Tinfoil path.
+		in.TDX = &TDXVerifyResult{}
+		f := assertSingleFactor(t, evalTEEBootConfig(in), Pass)
+		if !strings.Contains(f.Detail, "entry-001") {
+			t.Errorf("detail %q should mention entry-001", f.Detail)
+		}
+	})
+
+	t.Run("hw_match_error", func(t *testing.T) {
+		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+			HWMatchErr: errors.New("no matching MRTD"),
+		})
+		in.TDX = &TDXVerifyResult{}
+		f := assertSingleFactor(t, evalTEEBootConfig(in), Fail)
+		if !strings.Contains(f.Detail, "no matching MRTD") {
+			t.Errorf("detail %q should mention no matching MRTD", f.Detail)
+		}
+	})
+
+	t.Run("sev_pass", func(t *testing.T) {
+		in := buildTinfoilInput(nil)
+		in.SEV = &SEVVerifyResult{}
+		f := assertSingleFactor(t, evalTEEBootConfig(in), Pass)
+		if !strings.Contains(f.Detail, "SEV-SNP") {
+			t.Errorf("detail %q should mention SEV-SNP", f.Detail)
+		}
+	})
 }

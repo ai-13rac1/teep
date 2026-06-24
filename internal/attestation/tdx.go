@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/13rac1/teep/internal/tlsct"
 	tdxabi "github.com/google/go-tdx-guest/abi"
 	"github.com/google/go-tdx-guest/pcs"
 	pb "github.com/google/go-tdx-guest/proto/tdx"
@@ -29,13 +30,12 @@ func (g *clientHTTPSGetter) Get(url string) (header map[string][]string, body []
 	return g.GetContext(context.Background(), url)
 }
 
-const maxPCSResponseSize = 10 << 20 // 10 MiB
-
 func (g *clientHTTPSGetter) GetContext(ctx context.Context, url string) (header map[string][]string, body []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, nil, err
 	}
+	tlsct.SetUserAgent(req)
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -45,12 +45,12 @@ func (g *clientHTTPSGetter) GetContext(ctx context.Context, url string) (header 
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, nil, fmt.Errorf("failed to retrieve %s, status code received %d", url, resp.StatusCode)
 	}
-	body, err = io.ReadAll(io.LimitReader(resp.Body, maxPCSResponseSize+1))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxCertResponseSize+1))
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(body) > maxPCSResponseSize {
-		return nil, nil, fmt.Errorf("PCS response body exceeds %d bytes", maxPCSResponseSize)
+	if len(body) > maxCertResponseSize {
+		return nil, nil, fmt.Errorf("PCS response body exceeds %d bytes", maxCertResponseSize)
 	}
 	return resp.Header, body, nil
 }
@@ -106,6 +106,12 @@ type TDXVerifyResult struct {
 
 	// DebugEnabled is true if TD_ATTRIBUTES byte 0 bit 0 is set (debug enclave).
 	DebugEnabled bool
+
+	// TDAttributes is the raw 8-byte TD_ATTRIBUTES field from the quote body.
+	TDAttributes []byte
+
+	// XFAM is the raw 8-byte XFAM (eXtended Features Allowed Mask) from the quote body.
+	XFAM []byte
 
 	// ReportData is the raw 64-byte REPORTDATA field from the TDX quote body.
 	ReportData [64]byte
@@ -200,7 +206,7 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string) *TDXVerifyResul
 	result.quote = quoteAny
 
 	// Extract common fields from whichever quote version we got.
-	var reportData, tdAttrs, teeTCBSVN []byte
+	var reportData, tdAttrs, xfam, teeTCBSVN []byte
 	var mrTD, mrSeam, mrSignerSeam, mrConfigID, mrOwner, mrOwnerConfig []byte
 	var rtmrs [][]byte
 	switch q := quoteAny.(type) {
@@ -213,6 +219,7 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string) *TDXVerifyResul
 		}
 		reportData = body.GetReportData()
 		tdAttrs = body.GetTdAttributes()
+		xfam = body.GetXfam()
 		teeTCBSVN = body.GetTeeTcbSvn()
 		mrTD = body.GetMrTd()
 		rtmrs = body.GetRtmrs()
@@ -235,6 +242,7 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string) *TDXVerifyResul
 		}
 		reportData = body.GetReportData()
 		tdAttrs = body.GetTdAttributes()
+		xfam = body.GetXfam()
 		teeTCBSVN = body.GetTeeTcbSvn()
 		mrTD = body.GetMrTd()
 		rtmrs = body.GetRtmrs()
@@ -251,8 +259,10 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string) *TDXVerifyResul
 	// Extract REPORTDATA (64 bytes).
 	copy(result.ReportData[:], reportData)
 
-	// Extract TEE_TCB_SVN.
+	// Extract TEE_TCB_SVN, TD_ATTRIBUTES, XFAM.
 	result.TeeTCBSVN = teeTCBSVN
+	result.TDAttributes = tdAttrs
+	result.XFAM = xfam
 
 	// Extract measurement registers.
 	result.MRTD = mrTD

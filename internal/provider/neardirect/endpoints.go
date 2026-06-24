@@ -144,6 +144,7 @@ func (r *EndpointResolver) refresh(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
+	provider.SetUserAgent(req)
 
 	resp, err := r.client.Do(req)
 	if err != nil {

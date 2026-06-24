@@ -117,10 +117,10 @@ The endpoint coverage differs between providers:
 | Embeddings | `/v1/embeddings` | Yes (EHBP) | Implement | Implement | OpenAI embeddings |
 | Audio transcriptions | `/v1/audio/transcriptions` | Yes (EHBP) | Implement | Implement | Multipart form-data encrypted as full body |
 | TTS (text-to-speech) | `/v1/audio/speech` | Yes (EHBP) | Implement | Implement | OpenAI-compatible speech synthesis |
-| Audio endpoints (generic) | `/v1/audio/*` | Yes (EHBP, non-empty body) | Implement | Implement | Treat as model-routed audio APIs; preserve upstream-compatible defaults where model is omitted |
+| Audio endpoints (generic) | `/v1/audio/*` | Yes (EHBP, non-empty body) | Implement | Implement | Treat as model-routed audio APIs; model required |
 | Models list | `/v1/models` | No (bodyless GET) | Implement (router list) | Implement (direct enclave) | Plaintext over attested TLS; used by direct provider for model-to-domain mapping |
-| Realtime (WebSocket) | `/v1/realtime` | No EHBP (WebSocket over attested TLS) | Implement | Implement | Model from subdomain or `?model=` query; browser fallback auth via websocket subprotocol supported |
-| File conversion | `/v1/convert/file` | Yes (EHBP, multipart body) | Implement | Implement | Document/file preprocessing API; multipart upload with conversion mode |
+| Realtime (WebSocket) | `/v1/realtime` | — | — | — | Deferred to `tinfoil_endpoints.md` |
+| File conversion | `/v1/convert/file` | — | — | — | Deferred to `tinfoil_endpoints.md` |
 | Router operational endpoints | `/health`, `/.well-known/tinfoil-proxy`, etc. | No | Reject fail-closed | N/A | Operational/admin surface; explicitly excluded from inference provider APIs |
 
 **Endpoint availability by provider**: `tinfoil_v3_cloud` uses the router which
@@ -134,8 +134,9 @@ propagate upstream path/model errors without local path rewriting).
 
 For compatibility with the full inference API set, the provider should treat
 non-operational `/v1/*` paths as model-routed inference requests whenever a
-model can be resolved and attested (for example `/v1/embeddings`, `/v1/realtime`,
-`/v1/convert/file`, and future OpenAI-compatible `/v1/*` APIs).
+model can be resolved and attested (for example `/v1/embeddings` and future
+OpenAI-compatible `/v1/*` APIs). `/v1/realtime` and `/v1/convert/file` are
+deferred to `tinfoil_endpoints.md`.
 
 Vision models (qwen3-vl-30b, gemma4-31b, kimi-k2-6) use the chat completions
 endpoint with multimodal content arrays — no separate vision endpoint is needed.
@@ -154,43 +155,25 @@ code, teep must follow these endpoint-specific routing mechanics:
    APIs and must both be routed through attested + EHBP-protected transports.
 2. `/v1/chat/completions` and `/v1/responses` require `model` in the JSON body.
    Missing or non-string model is a fail-closed request error.
-3. `/v1/audio/speech` uses JSON body model routing. If `model` is missing,
-   empty, or non-string, apply compatibility default model `qwen3-tts`.
+3. `/v1/audio/speech` uses JSON body model routing. Missing or non-string
+   model is a fail-closed request error.
 4. Audio upload-style paths (`/v1/audio/transcriptions`) use multipart or
    binary request bodies and must preserve body bytes exactly across EHBP
    encryption/decryption boundaries. (Note: `/v1/audio/speech` uses JSON
    request bodies and is handled separately as a JSON endpoint.)
 5. For multipart audio requests, extract model from multipart field `model`.
-   If missing or empty, apply compatibility default model
-   `voxtral-small-24b`.
+   Missing or empty model is a fail-closed request error.
 6. `/v1/models` is a bodyless GET and therefore plaintext at the HTTP-body
    layer; this is acceptable because confidentiality is provided by TLS and the
    payload is non-sensitive model metadata.
-7. For `/v1/responses`, router-owned tool activation is driven by
-   `tools[].type` entries of `web_search` and `code_execution`; unknown
-   tool types must be rejected fail-closed at the teep boundary, and duplicate
-   activations are deduplicated.
-8. Requests with `stream=true` should preserve caller stream intent, and
+7. Requests with `stream=true` should preserve caller stream intent, and
    implementations should be prepared for usage metadata fields/chunks in both
    chat and responses streams.
-9. Unknown or unsupported operational paths must fail closed with explicit
+8. Unknown or unsupported operational paths must fail closed with explicit
     error diagnostics; model-routed `/v1/*` inference paths should be forwarded
     after model resolution and attestation checks, then return upstream errors
     transparently when not supported by the selected enclave.
-10. `POST /v1/convert/file` is in scope and must be implemented:
-      - request format: multipart with one or more file parts (`files` form key),
-         optional mode query parameter in `{text, vision, images, raw, vlm}`
-      - model routing: cloud defaults to `doc-upload`; direct resolves
-         `doc-upload` enclave domain when available
-      - encryption: request/response body use EHBP (non-empty HTTP body)
-11. WebSocket `/v1/realtime` is in scope and must be implemented over
-      attested TLS (no EHBP):
-      - model routing: model subdomain when present, else `?model=<name>` query
-      - auth: `Authorization: Bearer <key>`; for browser compatibility also
-         accept `Sec-WebSocket-Protocol: openai-insecure-api-key.<key>`
-      - attestation: full attestation + SPKI binding must complete before
-         websocket upgrade is accepted.
-12. Vision-capable models are accessed through `/v1/chat/completions`; no
+9. Vision-capable models are accessed through `/v1/chat/completions`; no
     separate vision endpoint is required.
 13. Generic JSON model-routed `/v1/*` requests (for example future
       OpenAI-compatible APIs) should follow this order:
@@ -202,80 +185,7 @@ code, teep must follow these endpoint-specific routing mechanics:
 
 ### Additional API Protocol Formats
 
-#### `/v1/convert/file` (Document/File Conversion)
-
-Request format:
-- Method: `POST`
-- Content-Type: `multipart/form-data`
-- Multipart fields:
-   - `files`: one or more uploaded file parts
-   - `to_format`: set to `md` for markdown extraction compatibility
-- Query parameter: optional `mode` in `{text, vision, images, raw, vlm}`
-- Model routing:
-   - cloud: default model `doc-upload` when omitted
-   - direct: resolve `doc-upload` enclave when available
-
-Response format (successful):
-- JSON object with `document` payload containing:
-   - `md_content` (string)
-   - `pages` (array of page objects)
-      - `page` (number)
-      - `text` (string)
-      - `image` (string; optional depending on mode)
-      - `is_scanned` (boolean)
-
-Encryption/authentication:
-- Request and response bodies are EHBP-protected (non-empty body exchange).
-- Missing/invalid EHBP response nonce is fail-closed.
-
-#### `/v1/realtime` (WebSocket)
-
-Handshake/routing:
-- Transport: WebSocket over attested TLS (no EHBP framing).
-- Model source:
-   - model subdomain if present, else
-   - required query parameter `?model=<name>`.
-- Authentication:
-   - preferred: `Authorization: Bearer <api-key>`
-   - browser compatibility: websocket subprotocol
-      `openai-insecure-api-key.<api-key>` when Authorization cannot be set.
-
-Message compatibility:
-- Proxy should transparently relay OpenAI-compatible realtime event frames.
-- Do not rewrite event payload schemas except for strict security checks
-   (attestation/TLS binding/auth).
-
-Security properties:
-- Confidentiality/integrity comes from attested TLS + SPKI binding.
-- EHBP AEAD response authentication does not apply to websocket frames.
-
-### Tinfoil-Specific Request Options
-
-The Tinfoil router recognizes optional top-level request fields that are not
-standard OpenAI schema. A compatible proxy must handle these deterministically:
-
-1. `code_execution_options`
-2. `web_search_options`
-3. `pii_check_options`
-
-These options are router-control metadata. They must not weaken attestation,
-E2EE, or verification gates.
-
-Compatibility validation behavior:
-1. `code_execution_options` is strict-validated when present.
-   - Must be an object.
-   - Required non-empty string fields: `accessToken`, `encryptionKey`,
-     `containerAuthToken`.
-   - Optional `uploads` must be an array of objects; each entry requires
-     non-empty string fields `fileAccessToken`, `filename`, `sha256`.
-   - Any malformed shape is a fail-closed request error.
-2. `web_search_options` currently behaves as presence-based metadata; router
-   activation can proceed even when no strict schema validation is applied at
-   the edge.
-3. `pii_check_options` is currently presence-based opt-in metadata.
-4. For `/v1/responses`, tool activation may come from either top-level options
-   or `tools[]` entries; implementations should deduplicate activations and
-   reject unknown `tools[].type` values fail-closed.
+`/v1/convert/file` and `/v1/realtime` are deferred to `tinfoil_endpoints.md`.
 
 ## Architecture Comparison with Existing Providers
 
@@ -1040,23 +950,32 @@ Status rule:
     - `gpu` evidence is REQUIRED. If `gpu` is absent or empty, fail closed
        and set both `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
     - If `gpu` is present, `report_data.gpu_evidence_hash` must be present and
-       equal the recomputed hash.
+       equal the recomputed hash (constant-time compare via
+       `subtle.ConstantTimeCompare`, consistent with the REPORTDATA comparison
+       standard used elsewhere in this plan).
     - Determine `nvswitch_expected` using this deterministic normalization
       algorithm (in order):
       1. Parse `gpu` as JSON object and require `gpu.evidences` array.
       2. Set `gpu_count = len(gpu.evidences)`.
       3. Inspect `gpu.evidences[*].arch` values to detect GPU architectures.
-      4. If `gpu_count == 8` AND at least one GPU arch is `HOPPER`, set
-         `nvswitch_expected = true`. This is the only condition that requires NVSwitch evidence.
-      5. Otherwise (single/dual/quad GPU, Blackwell systems, or unknown arches),
+      4. If `gpu_count == 8` AND any GPU arch value is unrecognized (not
+         `HOPPER` and not `BLACKWELL`), fail closed and set both
+         `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`. Unknown
+         architectures on 8-GPU systems must not silently skip NVSwitch
+         verification.
+      5. If `gpu_count == 8` AND at least one GPU arch is `HOPPER`, set
+         `nvswitch_expected = true`. This is the only condition that requires
+         NVSwitch evidence.
+      6. Otherwise (single/dual/quad GPU, or 8-GPU Blackwell-only systems),
          set `nvswitch_expected = false`.
-      6. If required fields for this derivation are malformed, missing, or
+      7. If required fields for this derivation are malformed, missing, or
          ambiguous (for example `gpu` present but `gpu.evidences` missing),
          fail closed and set both `cpu_gpu_chain` and
          `nvidia_gpu_attestation` to `Fail`.
     - If `nvswitch_expected` is true, `nvswitch` evidence is REQUIRED and
        `report_data.nvswitch_evidence_hash` must be present and equal the
-       recomputed hash; missing/mismatch is a fail-closed error and sets both
+       recomputed hash (constant-time compare); missing/mismatch is a
+       fail-closed error and sets both
        `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
     - If `nvswitch_expected` is false (for example single-GPU systems or
        8-GPU Blackwell MPT systems),
@@ -1466,10 +1385,15 @@ When `nvswitch` is absent, the hash concatenation is `tls_key_fp || hpke_key || 
 In addition to REPORTDATA verification, the envelope must be validated as
 follows:
 
-1. Parse the full envelope with `internal/jsonstrict` and reject unknown
+**Format downgrade prevention priority order** (steps 1–2 are never relaxed,
+even if strict schema validation is loosened for forward compatibility):
+
+1. Require `format` equals exactly `https://tinfoil.sh/predicate/attestation/v3`.
+   This is the authoritative format gate. Reject any other value.
+2. Reject any response with a `body` field (legacy V2 format indicator).
+   This is the independent legacy-format guard.
+3. Parse the full envelope with `internal/jsonstrict` and reject unknown
    fields fail-closed before any trust decisions.
-2. Require `format` equals exactly `https://tinfoil.sh/predicate/attestation/v3`.
-   Reject any response with a `body` field (legacy format indicator).
 3. Parse and validate `report_data.tls_key_fp`, `report_data.hpke_key`,
    `report_data.nonce`, and optional hash fields as hex strings that decode
    to exactly 32 bytes (64 hex chars).
@@ -1497,15 +1421,22 @@ follows:
     - Verify all hex strings in `report_data` are exactly 64 characters when
       present (32 bytes).
 9. Verify `signature` using ECDSA ASN.1 over SHA-256 of the JSON payload
-   produced from the parsed envelope with the `signature` field set to empty
-   string (`""`), using the implementation's deterministic serializer
-   (for Go, `encoding/json` marshaling of the typed struct).
-   - Construct the verification payload by:
-     1. Taking the parsed attestation struct (typed Attestation object, not raw JSON)
-     2. Setting the `Signature` field to empty string
-     3. Marshaling to JSON using `encoding/json` (standard deterministic ordering)
-   - Compute SHA-256 of the resulting JSON bytes
-   - Verify the base64-decoded `signature` field (DER ASN.1 ECDSA signature) against this hash
+   with the `signature` value replaced by an empty string.
+   - **Preferred approach**: byte-level surgery on the raw JSON response.
+     Find the `"signature":"<base64>"` value in the raw bytes and replace
+     the value with `""`, preserving all other bytes exactly. This avoids
+     implementation-dependent JSON serialization differences between Go's
+     `encoding/json` and the Tinfoil enclave's serializer (which may be a
+     different language). Differences in field ordering, whitespace, unicode
+     escaping, or number formatting between serializers would cause spurious
+     signature verification failures.
+   - **Alternative**: If Tinfoil documents an explicit serialization contract
+     (e.g., RFC 8785 JCS or Go `encoding/json` struct-order guarantee), the
+     parse-modify-reserialize approach is acceptable. Without such a contract,
+     raw-byte surgery is the only safe approach.
+   - Compute SHA-256 of the resulting JSON bytes (with signature zeroed).
+   - Verify the base64-decoded `signature` field (DER ASN.1 ECDSA signature)
+     against this hash using the leaf public key from `certificate`.
    - Reject non-ECDSA leaf public keys.
    - Decode `signature` from base64 and verify DER ASN.1 form.
 10. If envelope signature verification fails, fail closed before any CPU/GPU
@@ -1580,21 +1511,32 @@ verified through Sigstore.
 For a given configuration repo (e.g. `tinfoilsh/confidential-model-router`):
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/releases/latest
+GET https://api.github.com/repos/{repo}/releases/latest
 ```
 
 Parse `tag_name` from the response. Then fetch the digest:
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/releases/download/{tag}/tinfoil.hash
+GET https://github.com/{repo}/releases/download/{tag}/tinfoil.hash
 ```
 
 Returns a plain-text SHA-256 hex digest.
 
+**Trust note on `github-proxy.tinfoil.sh`**: The original Tinfoil client SDKs
+use `github-proxy.tinfoil.sh` as a GitHub API proxy. This is a
+Tinfoil-operated service that concentrates supply chain trust — a compromised
+or DNS-hijacked proxy can serve stale Sigstore bundles for old vulnerable CVM
+images, and the Sigstore verification will still pass (Sigstore proves "this
+code was built by this workflow" but not "this is the latest code"). Teep
+should prefer `api.github.com` directly as the primary source. If GitHub rate
+limits are a concern, `github-proxy.tinfoil.sh` can be used as a fallback, but
+this must be documented as a trust tradeoff. Consider pinning a minimum
+acceptable release timestamp to prevent rollback to old vulnerable images.
+
 #### Step 2: Fetch Sigstore DSSE Bundle
 
 ```
-GET https://github-proxy.tinfoil.sh/repos/{repo}/attestations/sha256:{digest}
+GET https://api.github.com/repos/{repo}/attestations/sha256:{digest}
 ```
 
 Returns JSON with `attestations[0].bundle` containing a Sigstore DSSE
@@ -1721,8 +1663,9 @@ Key discovery/source in teep integration:
 
 Compatibility rule: for Tinfoil, apply EHBP behavior consistently across
 `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`,
-`/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/convert/file`, and any additional
-non-empty-body `/v1/audio/*` request.
+`/v1/audio/transcriptions`, `/v1/audio/speech`, and any additional
+non-empty-body `/v1/audio/*` request. `/v1/convert/file` is deferred to
+`tinfoil_endpoints.md`.
 
 **Mode rule (mandatory)**:
 - If request body is non-empty: request MUST be EHBP-encrypted, must include
@@ -1735,8 +1678,8 @@ non-empty-body `/v1/audio/*` request.
    endpoint expects a request body, an empty body MUST be rejected fail-closed.
 - Never downgrade an encrypted exchange to plaintext on missing/invalid EHBP
    headers; fail closed.
-- WebSocket `/v1/realtime` is explicitly outside EHBP scope; use websocket
-  transport over attested TLS with SPKI pinning.
+- WebSocket `/v1/realtime` is outside EHBP scope (deferred to
+  `tinfoil_endpoints.md`).
 
 #### HPKE Parameters
 
@@ -1760,8 +1703,11 @@ non-empty-body `/v1/audio/*` request.
    - AAD is empty. The HPKE sealer's internal nonce counter auto-increments.
    - Zero-length chunks may appear and should be skipped by receivers.
    - End of message is indicated by HTTP stream termination (no sentinel).
-   - Enforce bounded chunk size in the decryptor (implementation limit) before
-     allocating buffers; oversized chunk lengths are protocol errors.
+   - **Maximum chunk size: 16 MiB** (16 * 1024 * 1024 bytes). Reject chunk
+     length prefixes above this bound before allocating buffers. The 4-byte
+     uint32 length allows up to ~4 GiB; without a bound, a malicious server
+     can trigger 4 GiB allocation before AEAD verification. 16 MiB is
+     sufficient for any inference response chunk.
 4. Set request header `Ehbp-Encapsulated-Key` to the lowercase hex encoding
    of the HPKE encapsulated key (32 bytes → 64 hex chars for X25519).
 5. Send encrypted bodies with unknown length (`Content-Length` unset/unknown).
@@ -1789,9 +1735,14 @@ non-empty-body `/v1/audio/*` request.
 3. Decrypt response body chunks:
    - Same framing as request: `[4-byte length] [ciphertext]`.
    - Each chunk decrypted with AES-256-GCM using `aead_key`.
-   - Nonce for chunk `i` (zero-indexed): `aead_nonce XOR i`.
+   - Nonce for chunk `i` (zero-indexed): `aead_nonce XOR i`, where `i` is a
+     uint64 counter XORed into the low 8 bytes of the 12-byte `aead_nonce`.
+   - **Maximum chunk count: 2^31.** AES-GCM has a hard 2^32 invocation limit
+     with the same key before nonce reuse enables the "forbidden attack"
+     (AEAD forgery + plaintext recovery). Fail closed if the chunk counter
+     exceeds 2^31 (conservative bound with safety margin).
    - AAD is empty.
-   - Reject chunk lengths above implementation bounds before allocation.
+   - Reject chunk lengths above 16 MiB before allocation.
 4. On any decryption failure: fail closed, abort the response.
 
 Response mode detection:
@@ -1833,11 +1784,7 @@ Response mode detection:
    parsing, and fail closed on any chunk authentication failure.
 4. For bodyless GET `/v1/models`, do not send EHBP headers and do not expect
    EHBP response headers.
-5. For `POST /v1/convert/file`, preserve multipart framing and part headers
-   exactly across EHBP encryption/decryption; do not normalize or re-order
-   multipart parts.
-6. For websocket `/v1/realtime`, do not attach EHBP headers and do not invoke
-   EHBP decryptors.
+5. `/v1/convert/file` and `/v1/realtime` EHBP rules are in `tinfoil_endpoints.md`.
 
 #### Bodyless Requests (GET /v1/models)
 
@@ -1867,7 +1814,10 @@ interface, REPORTDATA verifier, and TDX policy checks — all of which can be
 unit-tested with TDX fixtures. The deployed Tinfoil router currently runs
 on SEV-SNP, so the provider cannot be validated against the live deployment
 until Phase 3 (SEV-SNP verification) lands. Phase 1 is not independently
-deployable against the live Tinfoil infrastructure.
+deployable against the live Tinfoil infrastructure. **Recommendation**: stub
+the SEV-SNP path in Phase 1 with an `fmt.Errorf("sev-snp: not yet
+implemented")` return so the `cpu.platform` dispatch and interfaces are correct
+from the start, avoiding structural rework when Phase 3 lands.
 
 **Files to create**:
 - `internal/provider/tinfoil/tinfoil.go` — Shared types, constants, Preparer
@@ -1875,10 +1825,21 @@ deployable against the live Tinfoil infrastructure.
   (V3 structured JSON, CPU report dispatch, TDX/SEV-SNP helpers)
 - `internal/provider/tinfoil/attester.go` — `NewAttester`: V3 fetch (with
   nonce), structured JSON parsing, HPKE key from response field
-- `internal/provider/tinfoil/reportdata.go` — `ReportDataVerifier`:
-  SHA-256 hash recomputation, GPU evidence hash verification
-- `internal/provider/tinfoil/policy.go` — TDX additional policy checks +
-  MR_SEAM whitelist
+- `internal/provider/tinfoil/verify.go` — `ReportDataVerifier` (SHA-256
+  hash recomputation, GPU evidence hash verification) and TDX additional
+  policy checks + MR_SEAM whitelist. These are combined into a single file
+  because both are applied together in the same attestation verification pass.
+
+**Note on nonce handling**: The attester should use the existing
+`attestation.NewNonce()` and `nonce.Hex()` from `internal/attestation/attestation.go`
+rather than raw byte manipulation. The `Nonce` type already encapsulates
+32-byte generation, hex encoding, and parsing.
+
+**Note on resolver reuse**: The `tinfoil_v3_direct` model-to-domain resolver
+(Phase 5) duplicates ~280 lines of concurrent cache logic from
+`neardirect/endpoints.go` (singleflight, TTL, mutex, stale-cache fallback).
+Consider extracting a shared resolver type in `internal/provider/` to avoid
+maintaining two copies of non-trivial concurrent code.
 
 **Implementation**:
 
@@ -2159,16 +2120,29 @@ encryption and response decryption.
 4. **Tinfoil RequestEncryptor** (`tinfoil/e2ee.go`):
    - Implements `provider.RequestEncryptor`.
    - `EncryptRequest(body, raw, endpointPath)`:
-     - Extract HPKE public key from raw attestation (`raw.SigningKey`,
-       already extracted by the V2 or V3 attester).
+     - Extract HPKE public key from raw attestation. **Note**: storing the
+       X25519 HPKE key in `raw.SigningKey` will be misidentified by
+       `E2EEKeyType()` as Ed25519 (both are 64 hex chars). The implementation
+       must either add `raw.SigningAlgo = "x25519-hpke"` to `knownSigningAlgos`
+       in `attestation.go`, or use a dedicated HPKE key field on
+       `RawAttestation` rather than co-opting `SigningKey`.
      - Call `ehbp.EncryptRequest(body, pubKey)`.
-     - Return encrypted body bytes and a Decryptor for the response.
-   - Return a `Decryptor` that reads `Ehbp-Response-Nonce` from the response
-     headers and calls `ehbp.DecryptResponse`.
+     - Return encrypted body bytes and an EHBP response handler.
+   - **EHBP does not implement the existing `Decryptor` interface** from
+     `e2ee/session.go`. That interface is field-level (hex string in, plaintext
+     bytes out) and designed for Venice/NearCloud per-field encryption. EHBP is
+     a full-body `io.Reader` transformer driven by response headers. EHBP
+     follows the `ChutesE2EE`/`ChutesSession` pattern — a separate
+     transport-level type with its own proxy integration path. The EHBP type
+     should carry the HPKE sender context and encapsulated key, and provide a
+     `DecryptResponse(resp *http.Response) (io.ReadCloser, error)` method that
+     reads `Ehbp-Response-Nonce` from response headers and performs decryption.
 
 5. **Proxy Integration**:
-   - The existing proxy E2EE flow calls `Encryptor.EncryptRequest()` and then
-     uses the returned Decryptor. The EHBP encryptor follows this same pattern.
+   - The proxy integration follows the `ChutesE2EE` pattern rather than the
+     `Decryptor`-based field-level relay path. EHBP encryption/decryption is
+     transport-level: the entire request body is encrypted before sending, and
+     the entire response body is decrypted before the proxy parses SSE/JSON.
    - Set `Ehbp-Encapsulated-Key` header on the outgoing request.
    - Ensure encrypted requests have unknown content length (chunked transfer);
       never send encrypted body with fixed `Content-Length`.
@@ -2367,12 +2341,10 @@ wiring as a thin layer on top.
    - `tinfoil_v3_direct`: supports `/v1/responses` and `/v1/chat/completions`
      on all inference enclaves; audio/TTS only on enclaves that expose them
      per their `tinfoil-config.yml` `api_routes` configuration.
-    - Both providers: support `/v1/realtime` (attested TLS websocket) and
-       `/v1/convert/file` (EHBP multipart) when target model/domain is available.
-    - Compatibility defaults:
-       - `/v1/audio/speech` missing model -> `qwen3-tts`
-       - multipart `/v1/audio/*` missing model -> `voxtral-small-24b`
-       - `/v1/convert/file` missing model -> `doc-upload`
+    - `/v1/realtime` and `/v1/convert/file` are deferred to `tinfoil_endpoints.md`.
+    - Model is always required. Missing model is a fail-closed request error.
+       The proxy must not silently inject default models — doing so makes a
+       trust decision (which TEE to connect to) on behalf of the client.
 
 **Unit tests**:
 - Test provider construction from config for both `tinfoil_v3_cloud` and
@@ -2419,19 +2391,10 @@ wiring as a thin layer on top.
 4. **Chat Completions (non-streaming and streaming)**
 5. **Responses API (non-streaming and streaming)**
 6. **Embeddings**, **Audio Transcription**, **TTS**, **Models List**, **Vision**
-7. **Realtime WebSocket (`/v1/realtime`)**:
-   - Verify attestation/SPKI before upgrade.
-   - Verify model routing via subdomain or `?model=` query.
-   - Verify browser subprotocol auth compatibility.
-8. **File Conversion (`/v1/convert/file`)**:
-   - Verify multipart file upload behavior and mode query handling.
-   - Verify EHBP body encryption and response authentication.
+7. **Realtime WebSocket and File Conversion**: deferred to `tinfoil_endpoints.md`.
 
-9. **Negative Tests**:
-   - Missing websocket model parameter fails with explicit error.
-   - Invalid websocket auth/subprotocol fails closed.
-   - Unsupported conversion mode fails closed.
-   - Encrypted conversion request missing `Ehbp-Response-Nonce` fails closed.
+8. **Negative Tests**:
+   - (endpoint-specific negative tests deferred to `tinfoil_endpoints.md`)
 
 **Tests for `tinfoil_v3_direct`** (require `TINFOIL_API_KEY`):
 
@@ -2470,23 +2433,16 @@ wiring as a thin layer on top.
    - Test with a model whose inference enclave is directly accessible.
 
 8. **Embeddings** (model `nomic-embed-text.inference.tinfoil.sh`)
-9. **Realtime WebSocket (`/v1/realtime`)**:
-    - Verify direct websocket connection to realtime-capable model enclave
-       with attested TLS/SPKI binding.
-10. **File Conversion (`/v1/convert/file`)**:
-    - Verify direct routing to `doc-upload` model enclave when available.
-    - Verify multipart conversion mode behavior (`text|vision|images|raw|vlm`).
+9. **Realtime WebSocket and File Conversion**: deferred to `tinfoil_endpoints.md`.
 
-11. **Negative Tests**:
+10. **Negative Tests**:
    - Verify that supplying a model with no known direct enclave domain fails
      closed with explicit error.
    - Verify that a mismatched TLS fingerprint on the inference enclave
      triggers re-attestation and fails closed on continued mismatch.
    - Verify `/v1/audio/speech` fails closed when the target inference enclave
      does not expose that path.
-    - Verify `/v1/realtime` fails closed on model/domain mismatch.
-    - Verify `/v1/convert/file` fails closed when doc-upload enclave is
-       unavailable or attestation fails.
+   - (endpoint-specific negative tests deferred to `tinfoil_endpoints.md`)
 
 **Fixture Tests** (offline, no API key, shared):
 - Capture V3 attestation responses from both router and inference enclave
@@ -2517,8 +2473,7 @@ Existing factors reused as-is:
 - `tls_key_binding` — TLS fingerprint matches REPORTDATA[0:32]
 - `e2ee_capable` — HPKE key extracted from attestation (subsumes key binding)
 - `e2ee_usable` — Request encrypted and response authenticated via EHBP for
-   HTTP body-carrying endpoints; websocket `/v1/realtime` uses attested TLS
-   transport and should emit endpoint-scoped `Skip` for EHBP-specific checks
+   HTTP body-carrying endpoints
 
 Existing factors proposed for TEE-generic rename (`tdx_*` → `tee_*`):
 - `tee_quote_present` (was `tdx_quote_present`) — Hardware quote fetched
@@ -2565,8 +2520,7 @@ Normalization rules for this document:
 - Add `tinfoil_v3_cloud` and `tinfoil_v3_direct` to the endpoint support matrix in `api_support.md`.
 - Add Tinfoil E2EE details (EHBP, HPKE, full-body encryption).
 - Document that both Tinfoil providers have **no field-level encryption gaps**
-   for HTTP body-carrying APIs (full-body EHBP), while websocket `/v1/realtime`
-   uses attested TLS transport (no EHBP framing).
+   for HTTP body-carrying APIs (full-body EHBP).
 - Document the HPKE key ownership distinction: `tinfoil_v3_cloud` EHBP key is the router's; `tinfoil_v3_direct` EHBP key is the inference enclave's.
 - Note provider names `tinfoil_v3_cloud` (router) and `tinfoil_v3_direct` (direct).
 
@@ -2593,7 +2547,7 @@ descriptions reflect this distinction at the detail-string level.
 | `intel_pcs_collateral` | `enforced` (TDX only) | Intel collateral valid; N/A for SEV-SNP |
 | `tls_key_binding` | `enforced` | TLS fingerprint matches `report_data.tls_key_fp` (authenticated via REPORTDATA hash) |
 | `e2ee_capable` | `enforced` | HPKE key from `report_data.hpke_key`, authenticated via REPORTDATA hash |
-| `e2ee_usable` | `enforced` for HTTP body endpoints; `skip` for `/v1/realtime` | EHBP request encrypted + response AEAD-authenticated where EHBP applies |
+| `e2ee_usable` | `enforced` for HTTP body endpoints | EHBP request encrypted + response AEAD-authenticated where EHBP applies |
 | `sigstore_code_verified` | `enforced` | Code measurement verified via Sigstore DSSE |
 | `cpu_id_registry` | `allow_fail` (default) | Proof of Cloud CPU identity registration factor (applies to both TDX and SEV-SNP when available) |
 | `measured_model_weights` | `enforced` (transitive) | Model weights attested via dm-verity + Sigstore chain |
@@ -2607,6 +2561,15 @@ The `tee_*` factors are proposed renames of the existing `tdx_*` factors,
 generalized to cover both Intel TDX and AMD SEV-SNP. **This rename must be
 performed atomically within a single commit** to avoid silent breakage.
 
+**Critical precondition**: `ReportDataBindingPassed()` in
+`internal/attestation/report.go` hardcodes `"tdx_reportdata_binding"`. The
+proxy gates **all** E2EE activation on this function — at least four call
+sites in `proxy.go` and two in `nearcloud/pinned.go` and
+`neardirect/pinned.go`. If Tinfoil emits `tee_reportdata_binding` but this
+function is not updated, it silently returns `false` and the proxy refuses
+E2EE for all Tinfoil requests. This function **must** be updated as part of
+(or before) the rename commit.
+
 The following references must all be updated together:
 
 1. **`KnownFactors` list** in `internal/attestation/report.go` — rename all
@@ -2614,29 +2577,37 @@ The following references must all be updated together:
 2. **`ReportDataBindingPassed()`** in `internal/attestation/report.go` —
    currently hardcodes the string `"tdx_reportdata_binding"`. Must be
    updated to `"tee_reportdata_binding"` (or the new equivalent name).
-3. **All factor emission sites** across provider packages (`nearcloud`,
+3. **`DefaultAllowFail`** in `internal/attestation/report.go` — contains
+   `tdx_*` strings and is distinct from the per-provider lists in
+   `defaults.go`.
+4. **All factor emission sites** across provider packages (`nearcloud`,
    `neardirect`, `chutes`, `venice`, etc.) that emit `tdx_*` factor names.
-4. **`proxy.go`** — lines that gate E2EE on `ReportDataBindingPassed()`
+5. **`proxy.go`** — lines that gate E2EE on `ReportDataBindingPassed()`
    are safe if the function is updated, but verify no other string
    literals reference old names.
-5. **`internal/verify/factory.go`** — the `newReportDataVerifier`,
+6. **`internal/verify/factory.go`** — the `newReportDataVerifier`,
    `newAttester`, `supplyChainPolicy`, `e2eeEnabledByDefault`, and
    `chatPathForProvider` switch blocks reference provider names. Factor name
    strings emitted by these functions must also be updated.
-6. **`validateAllowFail()`** in `internal/config/config.go` — validates
+7. **`validateAllowFail()`** in `internal/config/config.go` — validates
    against `KnownFactors`. After the rename, existing user `teep.toml`
    files with `allow_fail = ["tdx_hardware_config"]` will fail validation
    at startup because the factor name is no longer recognized. **This is
-   correct fail-closed behavior** — unrecognized config entries must produce
+   a breaking user-facing change.** Unrecognized config entries must produce
    an error (per AGENTS.md: "Unknown or misspelled config values MUST be
    rejected at startup"). Users must update their config to use the new
    `tee_*` names.
-7. **Default allow-fail lists** in `internal/defaults/defaults.go` — update
+8. **Default allow-fail lists** in `internal/defaults/defaults.go` — update
    all `tdx_*` entries in per-provider defaults.
-8. **Documentation** — update `docs/measurement_allowlists.md`,
+9. **`cmd/teep/help.go`** — contains `"tdx_reportdata_binding"` in
+   human-readable factor descriptions (user-visible output).
+10. **`README.md` and `README_ADVANCED.md`** — extensive references to
+   `tdx_*` factor names with descriptions in factor tables.
+11. **Documentation** — update `docs/measurement_allowlists.md`,
    `docs/api_support.md`, and any other docs referencing `tdx_*` factors.
-9. **Test assertions** — update all test files that assert on `tdx_*` factor
-   name strings.
+12. **Test assertions** — update all test files that assert on `tdx_*` factor
+   name strings. There are at least 9 integration test files with string
+   literal references to `tdx_*` factor names.
 
 This rename should be applied across all providers (not just Tinfoil) as a
 prerequisite or co-requisite commit. Until the rename lands, Tinfoil can
@@ -2738,7 +2709,11 @@ New Go module dependencies:
    downgrade: the attester always requests nonce-based attestation and rejects
    any response without a `report_data` structured field.
 
-10. **Independent V3 verification coverage**: Public client libraries may have
+10. **WebSocket `/v1/realtime` reduced defense-in-depth**: Deferred to
+   `tinfoil_endpoints.md`. WebSocket has no EHBP body-layer encryption;
+   relies solely on attested TLS.
+
+11. **Independent V3 verification coverage**: Public client libraries may have
    incomplete V3 verification coverage. Teep must maintain independent V3
    verification (envelope signature, REPORTDATA hash, GPU evidence hash
    binding, and nonce checks) and fixture-based regression tests.

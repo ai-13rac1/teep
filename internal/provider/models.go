@@ -45,6 +45,7 @@ func (l *genericModelLister) ListModels(ctx context.Context) ([]json.RawMessage,
 		return nil, fmt.Errorf("models: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+l.apiKey)
+	SetUserAgent(req)
 
 	resp, err := l.client.Do(req)
 	if err != nil {
@@ -72,12 +73,15 @@ func (l *genericModelLister) ListModels(ctx context.Context) ([]json.RawMessage,
 }
 
 // modelEntry covers commonly used OpenAI-compatible model object fields plus
-// known provider extensions (NEAR AI). This avoids jsonstrict.Unmarshal
+// known provider extensions (NEAR AI, Tinfoil). This avoids jsonstrict.Unmarshal
 // false positives for fields this code intentionally accepts; it is not an
 // exhaustive schema for all standard OpenAI model fields.
 //
 // Common OpenAI-compatible fields here: id, object, created, owned_by
 // NEAR AI extensions:                 pricing, context_length, architecture.
+// Tinfoil extensions:                 context_window, endpoints, multimodal,
+//
+//	reasoning, tool_calling, type.
 type modelEntry struct {
 	ID            string          `json:"id"`
 	Object        string          `json:"object"`
@@ -86,6 +90,14 @@ type modelEntry struct {
 	Pricing       json.RawMessage `json:"pricing"`
 	ContextLength json.RawMessage `json:"context_length"`
 	Architecture  json.RawMessage `json:"architecture"`
+
+	// Tinfoil extensions.
+	ContextWindow json.RawMessage `json:"context_window"`
+	Endpoints     json.RawMessage `json:"endpoints"`
+	Multimodal    json.RawMessage `json:"multimodal"`
+	Reasoning     json.RawMessage `json:"reasoning"`
+	ToolCalling   json.RawMessage `json:"tool_calling"`
+	Type          string          `json:"type"`
 }
 
 // ownedByModelLister wraps a genericModelLister and keeps only models whose

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/13rac1/teep/internal/provider"
 )
 
 const (
@@ -128,6 +130,7 @@ func (r *ModelResolver) fetchModels(ctx context.Context) (map[string]string, err
 		return nil, fmt.Errorf("chutes: build models request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
+	provider.SetUserAgent(req)
 
 	resp, err := r.client.Do(req)
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/13rac1/teep/internal/tlsct"
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
@@ -288,6 +289,7 @@ func (rc *RekorClient) fetchRekorUUIDs(ctx context.Context, digest string) ([]st
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	tlsct.SetUserAgent(req)
 
 	resp, err := rc.httpClient.Do(req)
 	if err != nil {
@@ -323,6 +325,7 @@ func (rc *RekorClient) fetchRekorEntry(ctx context.Context, uuid string) (*rekor
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	tlsct.SetUserAgent(req)
 
 	resp, err := rc.httpClient.Do(req)
 	if err != nil {

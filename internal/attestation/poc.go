@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/jsonstrict"
+	"github.com/13rac1/teep/internal/tlsct"
 )
 
 // PoCPeers lists the Proof of Cloud trust-server endpoints operated by
@@ -399,6 +400,7 @@ func (c *PoCClient) postJSON(ctx context.Context, baseURL, path string, payload 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	tlsct.SetUserAgent(req)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
