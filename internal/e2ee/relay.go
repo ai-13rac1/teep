@@ -1176,13 +1176,13 @@ func extractChunkMeta(data string, session Decryptor, endpoint EndpointType) (ch
 
 // toolCallDelta is the streaming delta format for a single tool call entry.
 type toolCallDelta struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
 	Index    *int   `json:"index"`
 	Function *struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function,omitempty"`
 }
 
 // mergeToolCallDelta merges a streaming tool_call delta into the accumulated

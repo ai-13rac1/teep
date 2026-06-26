@@ -391,13 +391,13 @@ func doE2EEStreamTest(req *http.Request, session e2ee.Decryptor, version string)
 			Object            string `json:"object"`
 			Created           int64  `json:"created"`
 			Model             string `json:"model"`
-			SystemFingerprint string `json:"system_fingerprint"`
+			SystemFingerprint string `json:"system_fingerprint,omitempty"`
 			Choices           []struct {
 				Index        int `json:"index"`
-				Delta        any `json:"delta"`
-				FinishReason any `json:"finish_reason"`
-			} `json:"choices"`
-			Usage any `json:"usage"`
+				Delta        any `json:"delta,omitempty"`
+				FinishReason any `json:"finish_reason,omitempty"`
+			} `json:"choices,omitempty"`
+			Usage any `json:"usage,omitempty"`
 		}
 		if _, _, err := jsonstrict.UnmarshalWarn([]byte(data), &chunk, "e2ee SSE chunk"); err != nil {
 			return &attestation.E2EETestResult{
