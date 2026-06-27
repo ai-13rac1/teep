@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/html"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -283,5 +286,337 @@ func TestBuildDashboardData_MultiProvider(t *testing.T) {
 	t.Logf("chutes: upstream=%s e2ee=%s", cp.Upstream, cp.E2EE)
 	if cp.E2EE != "disabled" {
 		t.Errorf("chutes E2EE = %q, want 'disabled'", cp.E2EE)
+	}
+}
+
+// newPopulatedServer returns a Server with providers, model stats, and a cached
+// attestation report for HTML rendering tests.
+func newPopulatedServer(t *testing.T) *Server {
+	t.Helper()
+	s := &Server{
+		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:    attestation.NewCache(10 * time.Minute),
+		negCache: attestation.NewNegativeCache(10 * time.Minute),
+		stats:    stats{startTime: time.Now().Add(-time.Hour), models: make(map[string]*modelStats)},
+		providers: map[string]*provider.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: "https://api.venice.ai",
+				E2EE:    true,
+			},
+			"chutes": {
+				Name:    "chutes",
+				BaseURL: "https://api.chutes.ai",
+				E2EE:    false,
+			},
+		},
+	}
+	s.stats.requests.Store(42)
+	s.stats.errors.Store(3)
+	s.stats.streaming.Store(30)
+	s.stats.nonStream.Store(12)
+	s.stats.e2ee.Store(25)
+	s.stats.plaintext.Store(17)
+	s.stats.cacheHits.Store(10)
+	s.stats.cacheMisses.Store(5)
+
+	ms := &modelStats{}
+	ms.requests.Store(10)
+	ms.errors.Store(1)
+	ms.lastVerifyMs.Store(200)
+	ms.lastTokDurMs.Store(1000)
+	ms.lastTokCount.Store(50)
+	ms.lastRequestAt.Store(time.Now().Add(-10 * time.Second).Unix())
+	s.stats.modelsMu.Lock()
+	s.stats.models["venice/test-model"] = ms
+	s.stats.modelsMu.Unlock()
+
+	// Cache an attestation report so the dashboard has enclave data.
+	s.cache.Put("venice", "test-model", &attestation.VerificationReport{
+		Provider: "venice",
+		Model:    "test-model",
+		Passed:   8,
+		Failed:   2,
+		Factors: []attestation.FactorResult{
+			{Name: attestation.FactorNonceMatch, Status: attestation.Pass, Tier: attestation.TierCore, Enforced: true, Detail: "nonces match"},
+			{Name: attestation.FactorTEEQuotePresent, Status: attestation.Pass, Tier: attestation.TierCore, Enforced: true, Detail: "TDX quote present"},
+			{Name: attestation.FactorE2EECapable, Status: attestation.Pass, Tier: attestation.TierBinding, Enforced: true, Detail: "ECDH key present"},
+			{Name: attestation.FactorE2EEUsable, Status: attestation.Pass, Tier: attestation.TierBinding, Enforced: true, Detail: "round-trip ok"},
+			{Name: attestation.FactorTLSKeyBinding, Status: attestation.NotApplicable, Tier: attestation.TierSupplyChain, Enforced: false, Detail: "E2EE provider"},
+			{Name: attestation.FactorBuildTransparency, Status: attestation.Fail, Tier: attestation.TierSupplyChain, Enforced: false, Detail: "image not found"},
+		},
+	})
+	return s
+}
+
+// findAttr returns the value of the named attribute on an HTML node, or "".
+func findAttr(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+// findByID walks the HTML tree and returns the first node with the given id attribute.
+func findByID(n *html.Node, id string) *html.Node {
+	if n.Type == html.ElementNode && findAttr(n, "id") == id {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findByID(c, id); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func TestHandleIndex_Status(t *testing.T) {
+	s := newPopulatedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/html; charset=utf-8", ct)
+	}
+}
+
+func TestHandleIndex_ValidHTML(t *testing.T) {
+	s := newPopulatedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	body := rec.Body.String()
+	doc, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("HTML parse error: %v", err)
+	}
+
+	// Verify key structural elements exist.
+	for _, id := range []string{"addr", "uptime", "seal", "verdict", "enclaves", "metrics"} {
+		if findByID(doc, id) == nil {
+			t.Errorf("element with id=%q not found in dashboard HTML", id)
+		}
+	}
+}
+
+func TestHandleIndex_ContainsInitialJSON(t *testing.T) {
+	s := newPopulatedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	body := rec.Body.String()
+
+	// __INITIAL__ must be replaced — it should not appear in the output.
+	if strings.Contains(body, "__INITIAL__") {
+		t.Error("dashboard HTML still contains __INITIAL__ placeholder")
+	}
+
+	// The inlined JSON should contain provider and listen_addr data.
+	if !strings.Contains(body, `"listen_addr"`) {
+		t.Error("dashboard HTML missing inlined listen_addr JSON")
+	}
+	if !strings.Contains(body, `"venice"`) {
+		t.Error("dashboard HTML missing inlined venice provider data")
+	}
+	if !strings.Contains(body, `"chutes"`) {
+		t.Error("dashboard HTML missing inlined chutes provider data")
+	}
+}
+
+func TestHandleIndex_InitialJSONValid(t *testing.T) {
+	s := newPopulatedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	body := rec.Body.String()
+
+	// Extract the JSON from "window.__last = {...};"
+	const prefix = "window.__last = "
+	idx := strings.Index(body, prefix)
+	if idx < 0 {
+		t.Fatal("cannot find window.__last assignment in dashboard HTML")
+	}
+	jsonStart := idx + len(prefix)
+	// Find the closing semicolon.
+	jsonEnd := strings.Index(body[jsonStart:], ";\n")
+	if jsonEnd < 0 {
+		t.Fatal("cannot find end of window.__last JSON")
+	}
+	jsonStr := body[jsonStart : jsonStart+jsonEnd]
+
+	var data dashboardData
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		t.Fatalf("inlined JSON is not valid dashboardData: %v", err)
+	}
+	if data.ListenAddr != "127.0.0.1:8337" {
+		t.Errorf("ListenAddr = %q, want 127.0.0.1:8337", data.ListenAddr)
+	}
+	if len(data.Providers) != 2 {
+		t.Errorf("Providers len = %d, want 2", len(data.Providers))
+	}
+	if len(data.Attestations) != 1 {
+		t.Errorf("Attestations len = %d, want 1", len(data.Attestations))
+	}
+	if data.Requests.Total != 42 {
+		t.Errorf("Requests.Total = %d, want 42", data.Requests.Total)
+	}
+	if data.Cache.HitRate != "67%" {
+		t.Errorf("Cache.HitRate = %q, want 67%%", data.Cache.HitRate)
+	}
+}
+
+func TestHandleIndex_AttestationData(t *testing.T) {
+	s := newPopulatedServer(t)
+	data := s.buildDashboardData()
+
+	if len(data.Attestations) != 1 {
+		t.Fatalf("Attestations len = %d, want 1", len(data.Attestations))
+	}
+	a := data.Attestations[0]
+	if a.Provider != "venice" {
+		t.Errorf("Provider = %q, want venice", a.Provider)
+	}
+	if a.Model != "test-model" {
+		t.Errorf("Model = %q, want test-model", a.Model)
+	}
+	if a.Passed != 8 {
+		t.Errorf("Passed = %d, want 8", a.Passed)
+	}
+	if a.E2EE != "usable" {
+		t.Errorf("E2EE = %q, want usable", a.E2EE)
+	}
+
+	// Verify factor flattening.
+	if len(a.Factors) != 6 {
+		t.Fatalf("Factors len = %d, want 6", len(a.Factors))
+	}
+	if a.Factors[0].Name != attestation.FactorNonceMatch {
+		t.Errorf("Factors[0].Name = %q, want %q", a.Factors[0].Name, attestation.FactorNonceMatch)
+	}
+	if a.Factors[0].Status != "pass" {
+		t.Errorf("Factors[0].Status = %q, want pass", a.Factors[0].Status)
+	}
+
+	// Verify tier rollup.
+	if len(a.Tiers) != 3 {
+		t.Fatalf("Tiers len = %d, want 3", len(a.Tiers))
+	}
+	core := a.Tiers[0]
+	if core.Passed != 2 || core.Total != 2 {
+		t.Errorf("Core tier: Passed=%d Total=%d, want 2/2", core.Passed, core.Total)
+	}
+}
+
+func TestHandleIndex_NoProviders(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	body := rec.Body.String()
+	_, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("HTML parse error with no providers: %v", err)
+	}
+}
+
+func TestHandleMetrics_Format(t *testing.T) {
+	s := newPopulatedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleMetrics(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain prefix", ct)
+	}
+
+	body := rec.Body.String()
+	for _, metric := range []string{
+		"teep_requests_total 42",
+		"teep_errors_total 3",
+		"teep_attestation_cache_hits_total 10",
+		"teep_attestation_cache_misses_total 5",
+		"teep_e2ee_sessions_total 25",
+		"teep_plaintext_sessions_total 17",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("metrics output missing %q", metric)
+		}
+	}
+}
+
+func TestHandleEvents_MaxConnections(t *testing.T) {
+	s := newPopulatedServer(t)
+
+	// Saturate SSE connection limit.
+	s.sseConns.Store(maxSSEConns)
+
+	req := httptest.NewRequest(http.MethodGet, "/events", http.NoBody)
+	rec := httptest.NewRecorder()
+	s.handleEvents(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 when at max SSE connections", rec.Code)
+	}
+}
+
+func TestDashFactorStatus(t *testing.T) {
+	tests := []struct {
+		status attestation.Status
+		want   string
+	}{
+		{attestation.Pass, "pass"},
+		{attestation.Fail, "fail"},
+		{attestation.Skip, "skip"},
+		{attestation.NotApplicable, "na"},
+		{attestation.Status(99), "skip"}, // unknown defaults to skip
+	}
+	for _, tt := range tests {
+		got := dashFactorStatus(tt.status)
+		if got != tt.want {
+			t.Errorf("dashFactorStatus(%d) = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestNanoAgo(t *testing.T) {
+	if got := nanoAgo(0); got != "—" {
+		t.Errorf("nanoAgo(0) = %q, want —", got)
+	}
+	recent := time.Now().Add(-5 * time.Second).UnixNano()
+	got := nanoAgo(recent)
+	if !strings.HasSuffix(got, "ago") {
+		t.Errorf("nanoAgo(%d) = %q, want suffix 'ago'", recent, got)
+	}
+}
+
+func TestTimestampPtr(t *testing.T) {
+	if got := timestampPtr(0); got != nil {
+		t.Errorf("timestampPtr(0) = %v, want nil", got)
+	}
+	ts := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC).UnixNano()
+	got := timestampPtr(ts)
+	if got == nil {
+		t.Fatal("timestampPtr non-zero = nil, want RFC3339 string")
+	}
+	if _, err := time.Parse(time.RFC3339, *got); err != nil {
+		t.Errorf("timestampPtr result %q is not valid RFC3339: %v", *got, err)
 	}
 }

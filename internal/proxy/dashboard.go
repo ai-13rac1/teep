@@ -256,6 +256,8 @@ func (s *Server) buildDashboardData() dashboardData {
 				tiers[idx].Passed++
 			case attestation.Fail:
 				tiers[idx].Failed++
+			case attestation.Skip, attestation.NotApplicable:
+				// Skip and N/A don't count toward passed or failed.
 			}
 		}
 
