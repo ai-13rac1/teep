@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/13rac1/teep/internal/attestation"
 )
 
 // factorInfo describes a single verification factor for the help system.
@@ -26,7 +28,7 @@ type tierInfo struct {
 var factorRegistry = []factorInfo{
 	// Tier 1: Core Attestation
 	{
-		Name:    "nonce_match",
+		Name:    attestation.FactorNonceMatch,
 		Tier:    1,
 		Summary: "Response nonce matches request",
 		Description: "Verifies that the nonce returned in the attestation response " +
@@ -35,7 +37,7 @@ var factorRegistry = []factorInfo{
 			"from a previous session.",
 	},
 	{
-		Name:    "tee_quote_present",
+		Name:    attestation.FactorTEEQuotePresent,
 		Tier:    1,
 		Summary: "TDX quote is present in response",
 		Description: "Checks that the intel_quote field exists in the attestation " +
@@ -45,7 +47,7 @@ var factorRegistry = []factorInfo{
 			"is possible.",
 	},
 	{
-		Name:    "tee_quote_structure",
+		Name:    attestation.FactorTEEQuoteStructure,
 		Tier:    1,
 		Summary: "TDX quote parses as valid QuoteV4/V5",
 		Description: "Parses the TDX quote binary and verifies it conforms to the " +
@@ -57,7 +59,7 @@ var factorRegistry = []factorInfo{
 			"non-genuine attestation source.",
 	},
 	{
-		Name:    "tee_cert_chain",
+		Name:    attestation.FactorTEECertChain,
 		Tier:    1,
 		Summary: "Intel root CA certificate chain valid",
 		Description: "Verifies the X.509 certificate chain embedded in the TDX " +
@@ -66,7 +68,7 @@ var factorRegistry = []factorInfo{
 			"spoofed.",
 	},
 	{
-		Name:    "tee_quote_signature",
+		Name:    attestation.FactorTEEQuoteSignature,
 		Tier:    1,
 		Summary: "TDX quote signature verified",
 		Description: "Verifies the ECDSA signature over the TDX quote body using " +
@@ -74,7 +76,7 @@ var factorRegistry = []factorInfo{
 			"quote has not been tampered with since generation.",
 	},
 	{
-		Name:    "tee_debug_disabled",
+		Name:    attestation.FactorTEEDebugDisabled,
 		Tier:    1,
 		Summary: "Debug bit is 0 (production enclave)",
 		Description: "Checks that the TD_ATTRIBUTES debug bit in the TDX quote is " +
@@ -83,7 +85,7 @@ var factorRegistry = []factorInfo{
 			"workloads must never run in debug mode.",
 	},
 	{
-		Name:    "tee_measurement",
+		Name:    attestation.FactorTEEMeasurement,
 		Tier:    1,
 		Summary: "TEE measurement matches policy",
 		Description: "Checks that the TEE measurement values match the configured " +
@@ -94,7 +96,7 @@ var factorRegistry = []factorInfo{
 			"MRSEAM/MRTD policy is configured.",
 	},
 	{
-		Name:    "tee_hardware_config",
+		Name:    attestation.FactorTEEHardwareConfig,
 		Tier:    1,
 		Summary: "RTMR0 matches measurement policy",
 		Description: "Checks that RTMR0 from the TDX quote matches the configured " +
@@ -105,7 +107,7 @@ var factorRegistry = []factorInfo{
 			"no RTMR0 policy is configured.",
 	},
 	{
-		Name:    "tee_boot_config",
+		Name:    attestation.FactorTEEBootConfig,
 		Tier:    1,
 		Summary: "RTMR1/RTMR2 match measurement policy",
 		Description: "Checks that RTMR1 and RTMR2 from the TDX quote match the " +
@@ -116,7 +118,7 @@ var factorRegistry = []factorInfo{
 			"policy is configured.",
 	},
 	{
-		Name:    "signing_key_present",
+		Name:    attestation.FactorSigningKeyPresent,
 		Tier:    1,
 		Summary: "Enclave public key present in response",
 		Description: "Checks that the signing_key field exists in the attestation " +
@@ -124,9 +126,19 @@ var factorRegistry = []factorInfo{
 			"generated inside the TEE for key exchange, not for signing. " +
 			"Without it, E2EE communication with the enclave is not possible.",
 	},
+	{
+		Name:    attestation.FactorResponseSchema,
+		Tier:    1,
+		Summary: "Attestation response matches expected schema",
+		Description: "Checks that the attestation response JSON contains only " +
+			"expected fields and no expected fields are missing. Unknown fields " +
+			"may indicate a changed or untested API version; missing fields may " +
+			"indicate an incomplete attestation. Tinfoil enforces this factor " +
+			"(unknown fields block verification); other providers allow failure.",
+	},
 	// Tier 2: Binding & Crypto
 	{
-		Name:    "tee_reportdata_binding",
+		Name:    attestation.FactorTEEReportData,
 		Tier:    2,
 		Summary: "REPORTDATA binds enclave key to quote",
 		Description: "Verifies that the TDX REPORTDATA field contains a " +
@@ -138,7 +150,7 @@ var factorRegistry = []factorInfo{
 			"Without this binding, E2EE is security theater.",
 	},
 	{
-		Name:    "intel_pcs_collateral",
+		Name:    attestation.FactorIntelPCSCollateral,
 		Tier:    2,
 		Summary: "Intel PCS collateral fetched",
 		Description: "Verifies that collateral (TCB info, CRLs) was successfully " +
@@ -147,7 +159,7 @@ var factorRegistry = []factorInfo{
 			"Skipped in --offline mode or when the Intel PCS is unreachable.",
 	},
 	{
-		Name:    "tee_tcb_current",
+		Name:    attestation.FactorTEETCBCurrent,
 		Tier:    2,
 		Summary: "TEE TCB status from Intel PCS",
 		Description: "Evaluates the TCB status returned by Intel PCS collateral " +
@@ -158,7 +170,7 @@ var factorRegistry = []factorInfo{
 			"mode, shows only the raw TEE_TCB_SVN bytes.",
 	},
 	{
-		Name:    "tee_tcb_not_revoked",
+		Name:    attestation.FactorTEETCBNotRevoked,
 		Tier:    2,
 		Summary: "TCB firmware not revoked by Intel",
 		Description: "Checks that the TDX TCB status from Intel PCS collateral is " +
@@ -170,7 +182,7 @@ var factorRegistry = []factorInfo{
 			"--offline mode or when Intel PCS collateral is unavailable.",
 	},
 	{
-		Name:    "nvidia_payload_present",
+		Name:    attestation.FactorNvidiaPayloadPresent,
 		Tier:    2,
 		Summary: "NVIDIA attestation payload present",
 		Description: "Checks that the nvidia_payload field exists in the attestation " +
@@ -179,7 +191,7 @@ var factorRegistry = []factorInfo{
 			"genuine NVIDIA GPU with confidential computing enabled.",
 	},
 	{
-		Name:    "nvidia_signature",
+		Name:    attestation.FactorNvidiaSignature,
 		Tier:    2,
 		Summary: "NVIDIA payload signature verified",
 		Description: "Verifies the cryptographic signature on the NVIDIA attestation " +
@@ -188,7 +200,7 @@ var factorRegistry = []factorInfo{
 			"the token against NVIDIA's JWKS (JSON Web Key Set) endpoint.",
 	},
 	{
-		Name:    "nvidia_claims",
+		Name:    attestation.FactorNvidiaClaims,
 		Tier:    2,
 		Summary: "NVIDIA attestation claims valid",
 		Description: "Validates the claims within the NVIDIA attestation payload, " +
@@ -197,7 +209,7 @@ var factorRegistry = []factorInfo{
 			"claims. For JWTs, checks the overall attestation result.",
 	},
 	{
-		Name:    "nvidia_nonce_client_bound",
+		Name:    attestation.FactorNvidiaClientNonce,
 		Tier:    2,
 		Summary: "NVIDIA nonce bound directly to client",
 		Description: "Verifies that the nonce embedded in the NVIDIA GPU attestation " +
@@ -207,7 +219,7 @@ var factorRegistry = []factorInfo{
 			"the nonce.",
 	},
 	{
-		Name:    "nvidia_nras_verified",
+		Name:    attestation.FactorNvidiaNRAS,
 		Tier:    2,
 		Summary: "NVIDIA NRAS RIM measurement verification",
 		Description: "Posts the GPU attestation evidence (EAT) to NVIDIA's Remote " +
@@ -222,7 +234,7 @@ var factorRegistry = []factorInfo{
 			"in --offline mode or when the payload is JWT (already NRAS-verified).",
 	},
 	{
-		Name:    "e2ee_capable",
+		Name:    attestation.FactorE2EECapable,
 		Tier:    2,
 		Summary: "Enclave key supports E2EE key exchange",
 		Description: "Validates that the enclave public key is a well-formed " +
@@ -232,7 +244,7 @@ var factorRegistry = []factorInfo{
 			"Encryption Scheme).",
 	},
 	{
-		Name:    "e2ee_usable",
+		Name:    attestation.FactorE2EEUsable,
 		Tier:    2,
 		Summary: "E2EE test inference succeeded",
 		Description: "Performs a live E2EE test inference using the attested " +
@@ -245,7 +257,7 @@ var factorRegistry = []factorInfo{
 	},
 	// Tier 3: Supply Chain & Channel Integrity
 	{
-		Name:    "tls_key_binding",
+		Name:    attestation.FactorTLSKeyBinding,
 		Tier:    3,
 		Summary: "No TLS key in attestation",
 		Description: "No TLS certificate public key is embedded in the attestation " +
@@ -255,7 +267,7 @@ var factorRegistry = []factorInfo{
 			"is the single most critical gap for end-to-end security.",
 	},
 	{
-		Name:    "cpu_gpu_chain",
+		Name:    attestation.FactorCPUGPUChain,
 		Tier:    3,
 		Summary: "No CPU-GPU attestation binding",
 		Description: "The CPU (TDX) and GPU (NVIDIA) attestations are verified " +
@@ -280,7 +292,7 @@ var factorRegistry = []factorInfo{
 			"the TDX quote.",
 	},
 	{
-		Name:    "nvswitch_binding",
+		Name:    attestation.FactorNVSwitchBinding,
 		Tier:    3,
 		Summary: "NVSwitch fabric verification",
 		Description: "On multi-GPU nodes with NVLink (e.g. 8x Hopper), NVSwitch " +
@@ -292,7 +304,7 @@ var factorRegistry = []factorInfo{
 			"evidence.",
 	},
 	{
-		Name:    "measured_model_weights",
+		Name:    attestation.FactorMeasuredWeights,
 		Tier:    3,
 		Summary: "No model weight hashes",
 		Description: "The attestation does not include hashes of the model weight " +
@@ -304,7 +316,7 @@ var factorRegistry = []factorInfo{
 			"measurement of weights into an RTMR register.",
 	},
 	{
-		Name:    "build_transparency_log",
+		Name:    attestation.FactorBuildTransparency,
 		Tier:    3,
 		Summary: "No build transparency log",
 		Description: "No Sigstore bundle or equivalent build transparency log entry " +
@@ -316,7 +328,7 @@ var factorRegistry = []factorInfo{
 			"matches a specific audited source revision.",
 	},
 	{
-		Name:    "cpu_id_registry",
+		Name:    attestation.FactorCPUIDRegistry,
 		Tier:    3,
 		Summary: "CPU ID verified against Proof of Cloud",
 		Description: "The CPU PPID is extracted from the PCK certificate embedded in " +
@@ -329,7 +341,7 @@ var factorRegistry = []factorInfo{
 			"extracted PPID.",
 	},
 	{
-		Name:    "compose_binding",
+		Name:    attestation.FactorComposeBinding,
 		Tier:    3,
 		Summary: "app_compose hash matches MRConfigID",
 		Description: "Verifies that the SHA-256 hash of the app_compose manifest " +
@@ -340,7 +352,7 @@ var factorRegistry = []factorInfo{
 			"This proves the TEE is running the declared container images.",
 	},
 	{
-		Name:    "sigstore_verification",
+		Name:    attestation.FactorSigstoreVerify,
 		Tier:    3,
 		Summary: "Container images in Sigstore transparency log",
 		Description: "Extracts container image sha256 digests from the docker-compose " +
@@ -350,7 +362,7 @@ var factorRegistry = []factorInfo{
 			"signed provenance. Skipped when no image digests are found.",
 	},
 	{
-		Name:    "sigstore_code_verified",
+		Name:    attestation.FactorSigstoreCode,
 		Tier:    3,
 		Summary: "Sigstore code measurements verified",
 		Description: "Tinfoil-specific: fetches the Sigstore DSSE bundle from the " +
@@ -361,7 +373,7 @@ var factorRegistry = []factorInfo{
 			"code measurements match. Skipped for non-Tinfoil providers.",
 	},
 	{
-		Name:    "event_log_integrity",
+		Name:    attestation.FactorEventLogIntegrity,
 		Tier:    3,
 		Summary: "Event log replays to match quote RTMRs",
 		Description: "Replays the TDX event log by extending each entry's SHA-384 " +
@@ -374,7 +386,7 @@ var factorRegistry = []factorInfo{
 	},
 	// Tier 4: Gateway Attestation (nearcloud only)
 	{
-		Name:    "gateway_nonce_match",
+		Name:    attestation.FactorGWNonceMatch,
 		Tier:    4,
 		Summary: "Gateway nonce matches request",
 		Description: "Verifies that the nonce returned by the cloud-api.near.ai gateway " +
@@ -382,7 +394,7 @@ var factorRegistry = []factorInfo{
 			"own TDX enclave and has a separate nonce from the model attestation.",
 	},
 	{
-		Name:    "gateway_tee_quote_present",
+		Name:    attestation.FactorGWQuotePresent,
 		Tier:    4,
 		Summary: "Gateway TDX quote present and parsed",
 		Description: "Checks that the gateway's intel_quote field exists in the " +
@@ -391,7 +403,7 @@ var factorRegistry = []factorInfo{
 			"TDX enclave.",
 	},
 	{
-		Name:    "gateway_tee_quote_structure",
+		Name:    attestation.FactorGWQuoteStructure,
 		Tier:    4,
 		Summary: "Gateway TDX quote valid QuoteV4/V5",
 		Description: "Parses the gateway's TDX quote and verifies it conforms to " +
@@ -399,7 +411,7 @@ var factorRegistry = []factorInfo{
 			"prefix for comparison against published reference values.",
 	},
 	{
-		Name:    "gateway_tee_cert_chain",
+		Name:    attestation.FactorGWCertChain,
 		Tier:    4,
 		Summary: "Gateway Intel root CA chain valid",
 		Description: "Verifies the X.509 certificate chain in the gateway's TDX quote " +
@@ -407,7 +419,7 @@ var factorRegistry = []factorInfo{
 			"attestation comes from genuine Intel hardware.",
 	},
 	{
-		Name:    "gateway_tee_quote_signature",
+		Name:    attestation.FactorGWQuoteSignature,
 		Tier:    4,
 		Summary: "Gateway TDX quote signature verified",
 		Description: "Verifies the ECDSA signature on the gateway's TDX quote body " +
@@ -415,7 +427,7 @@ var factorRegistry = []factorInfo{
 			"gateway quote has not been tampered with.",
 	},
 	{
-		Name:    "gateway_tee_debug_disabled",
+		Name:    attestation.FactorGWDebugDisabled,
 		Tier:    4,
 		Summary: "Gateway debug bit is 0 (production)",
 		Description: "Checks that the gateway's TD_ATTRIBUTES debug bit is not set. " +
@@ -423,7 +435,7 @@ var factorRegistry = []factorInfo{
 			"passing through the API gateway.",
 	},
 	{
-		Name:    "gateway_tee_measurement",
+		Name:    attestation.FactorGWMeasurement,
 		Tier:    4,
 		Summary: "Gateway MRSEAM/MRTD match policy",
 		Description: "Checks that the gateway TDX MRSEAM and MRTD values match " +
@@ -432,7 +444,7 @@ var factorRegistry = []factorInfo{
 			"image. Skipped when no gateway MRSEAM/MRTD policy is configured.",
 	},
 	{
-		Name:    "gateway_tee_hardware_config",
+		Name:    attestation.FactorGWHardwareConfig,
 		Tier:    4,
 		Summary: "Gateway RTMR0 matches policy",
 		Description: "Checks that the gateway RTMR0 from the TDX quote matches the " +
@@ -441,7 +453,7 @@ var factorRegistry = []factorInfo{
 			"RTMR0 policy is configured.",
 	},
 	{
-		Name:    "gateway_tee_boot_config",
+		Name:    attestation.FactorGWBootConfig,
 		Tier:    4,
 		Summary: "Gateway RTMR1/RTMR2 match policy",
 		Description: "Checks that the gateway RTMR1 and RTMR2 from the TDX quote " +
@@ -450,7 +462,7 @@ var factorRegistry = []factorInfo{
 			"when no gateway RTMR1/RTMR2 policy is configured.",
 	},
 	{
-		Name:    "gateway_tee_reportdata_binding",
+		Name:    attestation.FactorGWReportData,
 		Tier:    4,
 		Summary: "Gateway REPORTDATA binds TLS fingerprint + nonce",
 		Description: "Verifies the gateway TDX quote REPORTDATA field. " +
@@ -459,7 +471,7 @@ var factorRegistry = []factorInfo{
 			"Fails if the gateway uses an unknown REPORTDATA scheme.",
 	},
 	{
-		Name:    "gateway_compose_binding",
+		Name:    attestation.FactorGWComposeBinding,
 		Tier:    4,
 		Summary: "Gateway compose hash matches MRConfigID",
 		Description: "Verifies that the SHA-256 hash of the gateway's app_compose " +
@@ -467,7 +479,7 @@ var factorRegistry = []factorInfo{
 			"binding the gateway's deployment manifest to its hardware attestation.",
 	},
 	{
-		Name:    "gateway_cpu_id_registry",
+		Name:    attestation.FactorGWCPUIDRegistry,
 		Tier:    4,
 		Summary: "Gateway CPU registered in Proof of Cloud",
 		Description: "Checks whether the gateway host machine is registered in the " +
@@ -475,7 +487,7 @@ var factorRegistry = []factorInfo{
 			"hardware provenance for the gateway CVM when online checks are enabled.",
 	},
 	{
-		Name:    "gateway_event_log_integrity",
+		Name:    attestation.FactorGWEventLogIntegrity,
 		Tier:    4,
 		Summary: "Gateway event log replayed, RTMRs match quote",
 		Description: "Replays the gateway's TDX event log entries to recompute " +
@@ -491,7 +503,7 @@ var tierRegistry = []tierInfo{
 		Number: 1,
 		Name:   "Core Attestation",
 		Label:  "Tier 1: Core Attestation",
-		Description: "Factors 1-7. Validates that a TDX quote is present, " +
+		Description: "Factors 1-11. Validates that a TDX quote is present, " +
 			"structurally valid, properly signed by Intel hardware, and not " +
 			"from a debug enclave. Also checks the nonce for replay protection " +
 			"and that an enclave public key exists for E2EE. A Tier 1 failure means " +
@@ -501,7 +513,7 @@ var tierRegistry = []tierInfo{
 		Number: 2,
 		Name:   "Binding & Crypto",
 		Label:  "Tier 2: Binding & Crypto",
-		Description: "Factors 8-16. Validates cross-component binding: the enclave " +
+		Description: "Factors 12-22. Validates cross-component binding: the enclave " +
 			"public key is bound to the TDX REPORTDATA (preventing key " +
 			"substitution attacks), NVIDIA GPU attestation is present and " +
 			"locally verified, NVIDIA NRAS RIM measurement comparison " +
@@ -514,7 +526,7 @@ var tierRegistry = []tierInfo{
 		Number: 3,
 		Name:   "Supply Chain & Channel Integrity",
 		Label:  "Tier 3: Supply Chain & Channel Integrity",
-		Description: "Factors 17-24. The gold standard for TEE verification. " +
+		Description: "Factors 23-32. The gold standard for TEE verification. " +
 			"Covers TLS key binding, CPU-GPU attestation chain, measured " +
 			"model weights, build transparency logs, hardware identity " +
 			"registry, compose manifest binding, Sigstore verification, " +
@@ -525,7 +537,7 @@ var tierRegistry = []tierInfo{
 		Number: 4,
 		Name:   "Gateway Attestation",
 		Label:  "Tier 4: Gateway Attestation",
-		Description: "Factors 25-32. Only applies to the nearcloud provider " +
+		Description: "Factors 33-45. Only applies to the nearcloud provider " +
 			"(cloud-api.near.ai). Verifies the API gateway itself runs in " +
 			"an Intel TDX enclave with its own TDX quote, certificate chain, " +
 			"and compose binding. This proves all traffic is routed through " +

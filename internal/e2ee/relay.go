@@ -1176,23 +1176,21 @@ func extractChunkMeta(data string, session Decryptor, endpoint EndpointType) (ch
 
 // toolCallDelta is the streaming delta format for a single tool call entry.
 type toolCallDelta struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
 	Index    *int   `json:"index"`
 	Function *struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function,omitempty"`
 }
 
 // mergeToolCallDelta merges a streaming tool_call delta into the accumulated
 // tool calls map, keyed by index. Arguments are concatenated across chunks.
 func mergeToolCallDelta(calls map[int]*reassembledToolCall, raw json.RawMessage) error {
 	var d toolCallDelta
-	if unknown, err := jsonstrict.Unmarshal(raw, &d); err != nil {
+	if _, _, err := jsonstrict.UnmarshalWarn(raw, &d, "e2ee SSE data"); err != nil {
 		return fmt.Errorf("parse tool_call delta: %w", err)
-	} else if len(unknown) > 0 {
-		slog.Debug("unexpected JSON fields", "fields", unknown, "context", "e2ee SSE data")
 	}
 	if d.Index == nil {
 		return errors.New("tool_call delta missing required index field")
