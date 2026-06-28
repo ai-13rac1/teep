@@ -385,6 +385,31 @@ func TestSupplyChainOpenTelemetrySignerRecognition(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
 }
 
+func TestSupplyChainNearcloudAlpineSignerRecognition(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234"
+	in := &attestation.ReportInput{
+		Provider:          "nearcloud",
+		Raw:               raw,
+		SupplyChainPolicy: nearcloud.SupplyChainPolicy(),
+		GatewayImageRepos: []string{"alpine"},
+		DigestToRepo:      map[string]string{digest: "alpine"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:            digest,
+			HasCert:           true,
+			SignatureVerified: true,
+			OIDCIssuer:        neardirect.GithubOIDC,
+			SubjectURI:        "https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
+			SourceRepo:        "docker/github-builder-experimental",
+		}},
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
 func TestSupplyChainComponentRecognitionNanoGPTComposeOnly(t *testing.T) {
 	nonce := attestation.NewNonce()
 	raw := attestation.BuildMinimalRawForTest(nonce, attestation.ValidSigningKeyForTest(t))

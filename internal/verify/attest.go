@@ -152,7 +152,14 @@ func verifyNearcloudGateway(
 }
 
 // checkSigstore checks sigstore digests and fetches Rekor provenance for matches.
-func checkSigstore(ctx context.Context, digests []string, client *http.Client, offline bool) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
+func checkSigstore(
+	ctx context.Context,
+	digests []string,
+	digestToRepo map[string]string,
+	scPolicy *attestation.SupplyChainPolicy,
+	client *http.Client,
+	offline bool,
+) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
 	if len(digests) == 0 || offline {
 		return nil, nil
 	}
@@ -178,7 +185,7 @@ func checkSigstore(ctx context.Context, digests []string, client *http.Client, o
 	if len(okDigests) == 0 {
 		return sigstoreResults, nil
 	}
-	rekorResults := rc.FetchRekorProvenances(ctx, okDigests)
+	rekorResults := rc.FetchRekorProvenancesForPolicy(ctx, okDigests, digestToRepo, scPolicy)
 	for i := range rekorResults {
 		prov := &rekorResults[i]
 		d := okDigests[i]

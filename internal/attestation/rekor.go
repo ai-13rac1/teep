@@ -152,6 +152,60 @@ type RekorProvenance struct {
 // a raw-public-key entry (F-23: mitigates front-running where an attacker
 // inserts a raw-key entry before the legitimate Fulcio-signed entry).
 func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) RekorProvenance {
+	return rc.fetchRekorProvenance(ctx, digest, nil)
+}
+
+// FetchRekorProvenanceForImage queries Rekor for a digest and, when img has a
+// component-specific signature policy, prefers an entry that satisfies it. This
+// avoids accepting unrelated downstream attestations that merely reference the
+// same digest.
+func (rc *RekorClient) FetchRekorProvenanceForImage(ctx context.Context, digest string, img *ImageProvenance) RekorProvenance {
+	return rc.fetchRekorProvenance(ctx, digest, img)
+}
+
+// FetchRekorProvenances fetches provenance for each digest concurrently.
+// It is the batch analog of FetchRekorProvenance.
+func (rc *RekorClient) FetchRekorProvenances(ctx context.Context, digests []string) []RekorProvenance {
+	results := make([]RekorProvenance, len(digests))
+	var wg sync.WaitGroup
+	for i, d := range digests {
+		wg.Add(1)
+		go func(i int, d string) {
+			defer wg.Done()
+			results[i] = rc.FetchRekorProvenance(ctx, d)
+		}(i, d)
+	}
+	wg.Wait()
+	return results
+}
+
+// FetchRekorProvenancesForPolicy fetches provenance for each digest
+// concurrently, preferring entries that match the component-specific policy for
+// that digest when one is available.
+func (rc *RekorClient) FetchRekorProvenancesForPolicy(
+	ctx context.Context,
+	digests []string,
+	digestToRepo map[string]string,
+	policy *SupplyChainPolicy,
+) []RekorProvenance {
+	results := make([]RekorProvenance, len(digests))
+	var wg sync.WaitGroup
+	for i, d := range digests {
+		wg.Add(1)
+		go func(i int, d string) {
+			defer wg.Done()
+			var img *ImageProvenance
+			if policy != nil {
+				img = policy.Lookup(digestToRepo[d])
+			}
+			results[i] = rc.FetchRekorProvenanceForImage(ctx, d, img)
+		}(i, d)
+	}
+	wg.Wait()
+	return results
+}
+
+func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, img *ImageProvenance) RekorProvenance {
 	uuids, err := rc.fetchRekorUUIDs(ctx, digest)
 	if err != nil {
 		return RekorProvenance{Digest: digest, Err: fmt.Errorf("search Rekor: %w", err)}
@@ -160,10 +214,12 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 		return RekorProvenance{Digest: digest, Err: fmt.Errorf("no Rekor entries for sha256:%s", digest)}
 	}
 
+	preferPolicyMatch := hasComponentSignaturePolicy(img)
 	// Try each UUID; prefer one whose verifier is a Fulcio certificate.
 	// This prevents a front-running attack where an adversary inserts a
 	// raw-key entry first, causing us to skip build-provenance verification.
 	var rawKeyFallback *RekorProvenance
+	var fulcioFallback *RekorProvenance
 	var lastErr error
 	for _, uuid := range uuids {
 		entry, err := rc.fetchRekorEntry(ctx, uuid)
@@ -193,14 +249,17 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 		if block.Type == "PUBLIC KEY" {
 			// Raw public key — no Fulcio provenance. Keep as fallback and
 			// continue looking for an entry with a Fulcio certificate.
+			h := sha256.Sum256(block.Bytes)
+			p := RekorProvenance{
+				Digest:         digest,
+				HasCert:        false,
+				KeyFingerprint: hex.EncodeToString(h[:]),
+			}
+			rc.verifyRekorEntry(entry, &p)
+			if preferPolicyMatch && rekorMatchesImagePolicy(&p, img) {
+				return p
+			}
 			if rawKeyFallback == nil {
-				h := sha256.Sum256(block.Bytes)
-				p := RekorProvenance{
-					Digest:         digest,
-					HasCert:        false,
-					KeyFingerprint: hex.EncodeToString(h[:]),
-				}
-				rc.verifyRekorEntry(entry, &p)
 				rawKeyFallback = &p
 			}
 			continue
@@ -224,14 +283,17 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 		// has no build-provenance OIDs so OIDCIssuer is empty. Treat it like
 		// a raw-key fallback and keep looking for a real Fulcio entry.
 		if prov.OIDCIssuer == "" {
+			p := RekorProvenance{
+				Digest:           digest,
+				HasCert:          false,
+				HasNonFulcioCert: true,
+				KeyFingerprint:   prov.KeyFingerprint,
+			}
+			rc.verifyRekorEntry(entry, &p)
+			if preferPolicyMatch && rekorMatchesImagePolicy(&p, img) {
+				return p
+			}
 			if rawKeyFallback == nil {
-				p := RekorProvenance{
-					Digest:           digest,
-					HasCert:          false,
-					HasNonFulcioCert: true,
-					KeyFingerprint:   prov.KeyFingerprint,
-				}
-				rc.verifyRekorEntry(entry, &p)
 				rawKeyFallback = &p
 			}
 			continue
@@ -246,7 +308,22 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 		// Verify the Signed Entry Timestamp (SET) and inclusion proof.
 		rc.verifyRekorEntry(entry, prov)
 
+		if preferPolicyMatch {
+			if rekorMatchesImagePolicy(prov, img) {
+				return *prov
+			}
+			if fulcioFallback == nil {
+				p := *prov
+				fulcioFallback = &p
+			}
+			continue
+		}
+
 		return *prov
+	}
+
+	if fulcioFallback != nil {
+		return *fulcioFallback
 	}
 
 	// No Fulcio-backed entry found; return raw-key fallback if available.
@@ -260,20 +337,26 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 	return RekorProvenance{Digest: digest, Err: fmt.Errorf("no usable Rekor entry for sha256:%s", digest)}
 }
 
-// FetchRekorProvenances fetches provenance for each digest concurrently.
-// It is the batch analog of FetchRekorProvenance.
-func (rc *RekorClient) FetchRekorProvenances(ctx context.Context, digests []string) []RekorProvenance {
-	results := make([]RekorProvenance, len(digests))
-	var wg sync.WaitGroup
-	for i, d := range digests {
-		wg.Add(1)
-		go func(i int, d string) {
-			defer wg.Done()
-			results[i] = rc.FetchRekorProvenance(ctx, d)
-		}(i, d)
+func hasComponentSignaturePolicy(img *ImageProvenance) bool {
+	if img == nil {
+		return false
 	}
-	wg.Wait()
-	return results
+	switch img.Provenance {
+	case FulcioSigned:
+		return img.OIDCIssuer != "" && (img.OIDCIdentity != "" || len(img.OIDCIdentities) > 0) && len(img.SourceRepos) > 0
+	case SigstorePresent:
+		return img.KeyFingerprint != ""
+	default:
+		return false
+	}
+}
+
+func rekorMatchesImagePolicy(prov *RekorProvenance, img *ImageProvenance) bool {
+	if prov == nil || img == nil {
+		return false
+	}
+	_, failed := verifyComponentSignature(prov, img, img.Repo, false)
+	return !failed
 }
 
 // fetchRekorUUIDs calls POST /api/v1/index/retrieve to search for log entries

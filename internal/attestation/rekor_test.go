@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -208,6 +209,70 @@ func TestFetchRekorProvenance_RawPublicKey(t *testing.T) {
 	}
 	if prov.OIDCIssuer != "" {
 		t.Errorf("OIDCIssuer should be empty, got %q", prov.OIDCIssuer)
+	}
+}
+
+func TestFetchRekorProvenanceForImage_PrefersPolicyMatch(t *testing.T) {
+	const nonMatchingUUID = "24296fb24b8ad77anonmatching"
+	const matchingUUID = "24296fb24b8ad77amatching"
+
+	block, _ := pem.Decode([]byte(realPublicKeyPEM))
+	if block == nil {
+		t.Fatal("decode test public key PEM")
+	}
+	h := sha256.Sum256(block.Bytes)
+	keyFingerprint := hex.EncodeToString(h[:])
+
+	entries := map[string][]byte{
+		nonMatchingUUID: buildMockEntryResponse(nonMatchingUUID, buildMockDSSEBody(realFulcioCertPEM)),
+		matchingUUID:    buildMockEntryResponse(matchingUUID, buildMockDSSEBody(realPublicKeyPEM)),
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/index/retrieve":
+			w.Header().Set("Content-Type", "application/json")
+			resp, _ := json.Marshal([]string{nonMatchingUUID, matchingUUID})
+			w.Write(resp)
+		case "/api/v1/log/entries/retrieve":
+			var req struct {
+				EntryUUIDs []string `json:"entryUUIDs"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if len(req.EntryUUIDs) != 1 {
+				t.Fatalf("entryUUIDs = %v, want one", req.EntryUUIDs)
+			}
+			entry, ok := entries[req.EntryUUIDs[0]]
+			if !ok {
+				t.Fatalf("unexpected UUID %q", req.EntryUUIDs[0])
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(entry)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	img := &ImageProvenance{
+		Repo:           "example/raw-key",
+		Provenance:     SigstorePresent,
+		KeyFingerprint: keyFingerprint,
+	}
+
+	prov := rc.FetchRekorProvenanceForImage(context.Background(), testDigest, img)
+	if prov.Err != nil {
+		t.Fatalf("unexpected error: %v", prov.Err)
+	}
+	if prov.HasCert {
+		t.Fatal("expected matching raw-key entry, got Fulcio cert")
+	}
+	if prov.KeyFingerprint != keyFingerprint {
+		t.Fatalf("KeyFingerprint = %q, want %q", prov.KeyFingerprint, keyFingerprint)
 	}
 }
 

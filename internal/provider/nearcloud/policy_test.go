@@ -1,6 +1,7 @@
 package nearcloud_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -76,5 +77,30 @@ func TestSupplyChainPolicyTrustsOpenTelemetrySigner(t *testing.T) {
 	}
 	if !p.TrustedProviderSigner(img) {
 		t.Fatal("OpenTelemetry signer should be trusted provider-wide")
+	}
+}
+
+func TestSupplyChainPolicyTrustsAlpineSigner(t *testing.T) {
+	p := nearcloud.SupplyChainPolicy()
+	img := p.Lookup("alpine")
+	if img == nil {
+		t.Fatal("alpine component missing from policy")
+	}
+	if img.ModelTier || !img.GatewayTier {
+		t.Fatalf("alpine component tiers: model=%v gateway=%v, want gateway only", img.ModelTier, img.GatewayTier)
+	}
+	if img.Provenance != attestation.FulcioSigned {
+		t.Fatalf("alpine provenance = %v, want FulcioSigned", img.Provenance)
+	}
+	for _, wantIdentity := range []string{
+		"https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
+		"https://github.com/crazy-max/docker-github-builder/.github/workflows/bake.yml@refs/heads/main",
+	} {
+		if !slices.Contains(img.OIDCIdentities, wantIdentity) {
+			t.Fatalf("alpine OIDC identities = %v, missing %q", img.OIDCIdentities, wantIdentity)
+		}
+	}
+	if !p.TrustedProviderSigner(img) {
+		t.Fatal("alpine signer should be trusted provider-wide")
 	}
 }

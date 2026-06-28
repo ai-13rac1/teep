@@ -124,7 +124,8 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	}
 
 	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
-	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, client, opts.Offline)
+	scPolicy := supplyChainPolicy(opts.ProviderName)
+	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, digestToRepo, scPolicy, client, opts.Offline)
 
 	if opts.CapturedE2EE != nil {
 		e2eeResult = opts.CapturedE2EE
@@ -149,7 +150,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		AllowFail:              config.MergedAllowFail(opts.ProviderName, cfg, opts.Offline),
 		Policy:                 mergedPolicy,
 		GatewayPolicy:          mergedGWPolicy,
-		SupplyChainPolicy:      supplyChainPolicy(opts.ProviderName),
+		SupplyChainPolicy:      scPolicy,
 		TDX:                    tdxResult,
 		SEV:                    sevResult,
 		Nvidia:                 nvidiaResult,

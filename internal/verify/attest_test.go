@@ -140,7 +140,7 @@ func TestVerifyNearcloudGateway_NoQuote(t *testing.T) {
 
 func TestCheckSigstore_Empty(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{}, nil, false)
+	sig, rekor := checkSigstore(ctx, []string{}, nil, nil, nil, false)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results for empty digests, got %v", sig)
 	}
@@ -155,7 +155,7 @@ func TestCheckSigstore_Empty(t *testing.T) {
 func TestCheckSigstore_Online_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, &http.Client{}, false)
+	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, nil, nil, &http.Client{}, false)
 	t.Logf("checkSigstore canceled ctx: sig=%v rekor=%v", sig, rekor)
 	// We don't assert specific values — just ensure no panic and code is exercised.
 }
@@ -201,7 +201,7 @@ func TestCheckSigstore_Found_EntryFetchError(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -233,7 +233,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -251,7 +251,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 
 func TestCheckSigstore_Offline(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, true)
+	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, nil, nil, true)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results in offline mode, got %v", sig)
 	}

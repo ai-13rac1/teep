@@ -57,3 +57,10 @@ func TestSupplyChainPolicyTrustsOpenTelemetrySigner(t *testing.T) {
 		t.Fatal("OpenTelemetry signer should be trusted provider-wide")
 	}
 }
+
+func TestSupplyChainPolicyDoesNotIncludeAlpine(t *testing.T) {
+	p := neardirect.SupplyChainPolicy()
+	if img := p.Lookup("alpine"); img != nil {
+		t.Fatalf("neardirect should not include alpine, got %+v", *img)
+	}
+}
