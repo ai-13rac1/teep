@@ -298,6 +298,8 @@ func verifyCapture(ctx context.Context, captureDir, originalReport string, cfgLo
 	return nil
 }
 
+const reportFactorNameWidth = 33
+
 // FormatReport renders a VerificationReport as a human-readable string.
 func FormatReport(r *attestation.VerificationReport) string {
 	var b strings.Builder
@@ -330,7 +332,7 @@ func FormatReport(r *attestation.VerificationReport) string {
 			currentTier = f.Tier
 		}
 		icon := statusIcon(f.Status)
-		line := fmt.Sprintf("  %s %-26s %s", icon, f.Name, f.Detail)
+		line := fmt.Sprintf("  %s %-*s %s", icon, reportFactorNameWidth, f.Name, f.Detail)
 		switch {
 		case f.Status == attestation.NotApplicable:
 			// no enforcement tag for N/A factors
