@@ -1465,22 +1465,26 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			s.logInferenceBlock(ctx, "read_request_body", ep.name, "", "", http.StatusBadRequest, err)
 			http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
 			return
 		}
 
 		model, stream, err := ep.parseRequest(r, body)
 		if err != nil {
+			s.logInferenceBlock(ctx, "parse_request", ep.name, "", "", http.StatusBadRequest, err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if model == "" {
+			s.logInferenceBlock(ctx, "missing_model", ep.name, "", "", http.StatusBadRequest, errors.New("model field is required"))
 			http.Error(w, `"model" field is required`, http.StatusBadRequest)
 			return
 		}
 
 		prov, upstreamModel, ok := s.resolveModel(model)
 		if !ok {
+			s.logInferenceBlock(ctx, "resolve_model", ep.name, "", model, http.StatusBadRequest, fmt.Errorf("unknown model %q", model))
 			http.Error(w, fmt.Sprintf("unknown model %q: use provider:model format (e.g. venice:qwen3-5b)", model), http.StatusBadRequest)
 			return
 		}
@@ -1503,6 +1507,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		body, err = rewriteModelInBody(r.Header.Get("Content-Type"), body, ep.contentType, upstreamModel)
 		if err != nil {
+			// This error log is the WARN+ block record for request normalization failures.
 			slog.ErrorContext(ctx, "rewrite model in body", "provider", prov.Name, "model", upstreamModel, "err", err)
 			http.Error(w, "failed to normalize request body", normalizationStatusCode(err))
 			return
@@ -1511,8 +1516,12 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		endpointPath := ep.endpointPath(prov)
 		if endpointPath == "" {
 			if ep.unsupported != "" {
+				s.logInferenceBlock(ctx, "unsupported_endpoint", ep.name, prov.Name, upstreamModel, http.StatusBadRequest,
+					fmt.Errorf("provider %q does not support %s", prov.Name, ep.unsupported))
 				http.Error(w, fmt.Sprintf("provider %q does not support %s", prov.Name, ep.unsupported), http.StatusBadRequest)
 			} else {
+				s.logInferenceBlock(ctx, "missing_endpoint_path", ep.name, prov.Name, upstreamModel, http.StatusInternalServerError,
+					fmt.Errorf("provider %q has no path configured for %s", prov.Name, ep.name))
 				http.Error(w, fmt.Sprintf("provider %q has no path configured for %s", prov.Name, ep.name), http.StatusInternalServerError)
 			}
 			return
@@ -1520,6 +1529,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		if ep.preRouteGuard != nil {
 			if errMsg, block := ep.preRouteGuard(prov); block {
+				s.logInferenceBlock(ctx, "pre_route_guard", ep.name, prov.Name, upstreamModel, http.StatusBadRequest, errors.New(errMsg))
 				http.Error(w, errMsg, http.StatusBadRequest)
 				return
 			}
@@ -1556,6 +1566,12 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 			status = "neg_cached"
 			s.stats.errors.Add(1)
 			ms.errors.Add(1)
+			if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
+				s.logReportBlockedFactors(ctx, cached, prov, upstreamModel, "negative_cache_block")
+			} else {
+				s.logInferenceBlock(ctx, "negative_cache_block", ep.name, prov.Name, upstreamModel, http.StatusServiceUnavailable,
+					errors.New("attestation recently failed"))
+			}
 			http.Error(w,
 				fmt.Sprintf("attestation recently failed for %s/%s; try again later", prov.Name, upstreamModel),
 				http.StatusServiceUnavailable)
@@ -1673,7 +1689,7 @@ func (s *Server) relayWithRetry(
 			}
 			s.stats.errors.Add(1)
 			ms.errors.Add(1)
-			slog.ErrorContext(ctx, "upstream roundtrip failed", "provider", prov.Name, "model", upstreamModel, "err", err)
+			s.logUpstreamRoundtripFailure(ctx, prov.Name, upstreamModel, endpointPath, code, err)
 			if !ri.headerSent {
 				http.Error(w, msg, code)
 				return result
@@ -1700,6 +1716,7 @@ func (s *Server) relayWithRetry(
 			// Non-200 upstream: for Chutes, this may be instance-level.
 			// doUpstreamRoundtrip already handles retryable HTTP codes, so
 			// reaching here means the code is not retryable. Forward as-is.
+			s.logUpstreamStatus(ctx, prov.Name, upstreamModel, endpointPath, resp.StatusCode)
 			if !ri.headerSent {
 				result.status = fmt.Sprintf("upstream_%d", resp.StatusCode)
 				w.WriteHeader(resp.StatusCode)
@@ -1724,7 +1741,13 @@ func (s *Server) relayWithRetry(
 			if ms != nil {
 				ms.errors.Add(1)
 			}
-			slog.ErrorContext(ctx, "e2ee session missing; aborting response", "status", result.status)
+			// This error log is the WARN+ block record for missing E2EE sessions.
+			slog.ErrorContext(ctx, "e2ee session missing; aborting response",
+				"provider", prov.Name, "model", upstreamModel,
+				"factor", attestation.FactorE2EEUsable,
+				"tier", attestation.TierBinding,
+				"detail", "E2EE metadata present without an established session",
+				"status", result.status)
 			if !ri.headerSent {
 				http.Error(w, "e2ee session not established", http.StatusInternalServerError)
 				return result
@@ -1828,6 +1851,7 @@ func (s *Server) classifyRelayOutcome(
 	// to the client. Set status so the caller does not promote e2ee_usable.
 	s.stats.errors.Add(1)
 	ms.errors.Add(1)
+	// This error log is the WARN+ block record for non-decryption relay failures.
 	slog.ErrorContext(ctx, "relay failed", "provider", prov.Name, "model", upstreamModel, "err", relayErr)
 	return "relay_failed"
 }
@@ -1865,18 +1889,22 @@ func (s *Server) handleE2EEDecryptionFailure(
 	// a concurrent reader may still see it briefly. Keep the report detail
 	// sanitized: relayErr may wrap lower-level decrypt errors that include
 	// upstream content, which must never be exposed via the report endpoint.
+	detail := "E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")"
 	if cachedReport, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		cloned := cachedReport.Clone()
-		cloned.MarkE2EEFailed("E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
+		cloned.MarkE2EEFailed(detail)
 		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 	}
-
 	// Invalidate caches to force full re-attestation on the next request.
 	s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 	s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 
 	slog.ErrorContext(ctx, "E2EE decryption failed; caches invalidated",
-		"provider", prov.Name, "model", upstreamModel, "err", relayErr)
+		"provider", prov.Name, "model", upstreamModel,
+		"factor", attestation.FactorE2EEUsable,
+		"tier", attestation.TierBinding,
+		"detail", detail,
+		"err", relayErr)
 	return "e2ee_decrypt_failed"
 }
 
@@ -1892,8 +1920,12 @@ func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWrite
 	}
 	if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 		if !cached.ReportDataBindingPassed() {
+			// This error log is the WARN+ block record for the tee_reportdata_binding failure.
 			slog.ErrorContext(ctx, "E2EE required but tee_reportdata_binding not passed; refusing request",
-				"provider", prov.Name, "model", upstreamModel)
+				"provider", prov.Name, "model", upstreamModel,
+				"factor", attestation.FactorTEEReportData,
+				"tier", attestation.TierBinding,
+				"detail", "E2EE required but REPORTDATA binding not verified")
 			http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
 			return false
 		}
@@ -1907,15 +1939,23 @@ func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWrite
 		// cannot guarantee the stale SPKI entry will be evicted, risking
 		// a nil report on the next pinned request.
 		if prov.SPKIDomainForModel == nil {
+			// This error log is the WARN+ block record for pinned SPKI config failures.
 			slog.ErrorContext(ctx, "E2EE pinned provider has no SPKIDomainForModel; cannot evict SPKI cache; refusing request",
-				"provider", prov.Name, "model", upstreamModel)
+				"provider", prov.Name, "model", upstreamModel,
+				"factor", attestation.FactorE2EEUsable,
+				"tier", attestation.TierBinding,
+				"detail", "pinned E2EE attestation recovery cannot resolve SPKI cache domain")
 			http.Error(w, "E2EE pinned provider configuration error", http.StatusInternalServerError)
 			return false
 		}
 		domain, ok := prov.SPKIDomainForModel(ctx, upstreamModel)
 		if !ok || domain == "" {
+			// This error log is the WARN+ block record for pinned SPKI resolution failures.
 			slog.ErrorContext(ctx, "E2EE pinned provider could not resolve SPKI domain; refusing request",
-				"provider", prov.Name, "model", upstreamModel)
+				"provider", prov.Name, "model", upstreamModel,
+				"factor", attestation.FactorE2EEUsable,
+				"tier", attestation.TierBinding,
+				"detail", "pinned E2EE attestation recovery could not resolve SPKI cache domain")
 			http.Error(w, "E2EE SPKI domain resolution failed", http.StatusInternalServerError)
 			return false
 		}
@@ -1943,8 +1983,12 @@ func (s *Server) pinnedPostDispatchE2EE(
 	// we cannot verify the signing key is bound to the TDX quote.
 	if report == nil {
 		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
+		// This error log is the WARN+ block record for missing pinned attestation reports.
 		slog.ErrorContext(ctx, "E2EE required but no attestation report available",
-			"provider", prov.Name, "model", upstreamModel)
+			"provider", prov.Name, "model", upstreamModel,
+			"factor", attestation.FactorTEEReportData,
+			"tier", attestation.TierBinding,
+			"detail", "no attestation report available to verify REPORTDATA binding")
 		http.Error(w, "E2EE required but no attestation report available; refusing request", http.StatusBadGateway)
 		return false
 	}
@@ -1953,8 +1997,12 @@ func (s *Server) pinnedPostDispatchE2EE(
 	// E2EE degrades to plaintext.
 	if !report.ReportDataBindingPassed() {
 		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
+		// This error log is the WARN+ block record for the tee_reportdata_binding failure.
 		slog.ErrorContext(ctx, "E2EE required but tee_reportdata_binding not passed; refusing request",
-			"provider", prov.Name, "model", upstreamModel)
+			"provider", prov.Name, "model", upstreamModel,
+			"factor", attestation.FactorTEEReportData,
+			"tier", attestation.TierBinding,
+			"detail", "E2EE required but REPORTDATA binding not verified")
 		http.Error(w, "E2EE required but REPORTDATA binding not verified; refusing plaintext", http.StatusBadGateway)
 		return false
 	}
@@ -1970,8 +2018,12 @@ func (s *Server) pinnedPostDispatchE2EE(
 		} else {
 			s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 			s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+			// This error log is the WARN+ block record for stale pinned e2ee_usable failures.
 			slog.ErrorContext(ctx, "E2EE previously failed; cached pinned attestation insufficient for recovery",
-				"provider", prov.Name, "model", upstreamModel)
+				"provider", prov.Name, "model", upstreamModel,
+				"factor", attestation.FactorE2EEUsable,
+				"tier", attestation.TierBinding,
+				"detail", "previous E2EE decryption failure requires fresh re-attestation")
 			s.stats.errors.Add(1)
 			http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)
 			return false
@@ -2035,6 +2087,7 @@ func (s *Server) handlePinnedChat(
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(ctx, &pinnedReq)
 	if err != nil {
 		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
+		// This error log is the WARN+ block record for pinned chat connection failures.
 		slog.ErrorContext(ctx, "pinned chat failed", "provider", prov.Name, "model", upstreamModel, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
@@ -2075,6 +2128,7 @@ func (s *Server) handlePinnedChat(
 
 	// Relay the response.
 	if pinnedResp.StatusCode != http.StatusOK {
+		s.logUpstreamStatus(ctx, prov.Name, upstreamModel, endpointPath, pinnedResp.StatusCode)
 		w.WriteHeader(pinnedResp.StatusCode)
 		_, _ = io.Copy(w, io.LimitReader(pinnedResp.Body, 10<<20))
 		return
@@ -2110,20 +2164,24 @@ func (s *Server) handlePinnedPostRelay(
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
 		s.e2eeFailed.Store(providerModelKey{prov.Name, cacheModelFor(ctx, upstreamModel)}, true)
+		detail := "pinned E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")"
 
 		// Demote e2ee_usable in the cached report so the report endpoint
 		// reflects the failure before the cache entry is deleted. Keep detail
 		// sanitized: relayErr may include upstream content.
 		if cachedReport, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
 			cloned := cachedReport.Clone()
-			cloned.MarkE2EEFailed("pinned E2EE decryption failed (see server logs, req=" + reqid.FromContext(ctx) + ")")
+			cloned.MarkE2EEFailed(detail)
 			s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), cloned)
 		}
-
 		s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 		s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 		slog.ErrorContext(ctx, "pinned E2EE decryption failed; caches invalidated",
-			"provider", prov.Name, "model", upstreamModel, "err", relayErr)
+			"provider", prov.Name, "model", upstreamModel,
+			"factor", attestation.FactorE2EEUsable,
+			"tier", attestation.TierBinding,
+			"detail", detail,
+			"err", relayErr)
 		return
 	}
 
@@ -2131,6 +2189,7 @@ func (s *Server) handlePinnedPostRelay(
 	if relayErr != nil {
 		s.stats.errors.Add(1)
 		ms.errors.Add(1)
+		// This error log is the WARN+ block record for pinned relay failures.
 		slog.ErrorContext(ctx, "pinned relay failed", "provider", prov.Name, "model", upstreamModel, "err", relayErr)
 		return
 	}
@@ -2176,6 +2235,7 @@ func (s *Server) attestAndCache(
 		if report == nil {
 			s.stats.errors.Add(1)
 			ms.errors.Add(1)
+			// fetchAndVerify logs the attestation fetch failure at Error before returning nil.
 			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
 			return &attestResult{AttestDur: time.Since(attestStart)}, "attest_failed"
 		}
@@ -2223,17 +2283,90 @@ func (s *Server) enforceReport(ctx context.Context, w http.ResponseWriter,
 		return true
 	}
 	if s.cfg.Force {
+		s.logReportBlockedFactors(ctx, report, prov, model, "force_bypass")
 		slog.WarnContext(ctx, "--force: bypassing blocked attestation",
 			"provider", prov.Name, "model", model,
 			"e2ee_will_activate", report.ReportDataBindingPassed())
 		return true
 	}
+	s.logReportBlockedFactors(ctx, report, prov, model, "block_inference")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	if err := json.NewEncoder(w).Encode(report); err != nil {
 		slog.ErrorContext(ctx, "encode response", "error", err)
 	}
 	return false
+}
+
+func (s *Server) logReportBlockedFactors(
+	ctx context.Context,
+	report *attestation.VerificationReport,
+	prov *provider.Provider,
+	model string,
+	action string,
+) {
+	if report == nil {
+		return
+	}
+	for _, f := range report.BlockedFactors() {
+		s.logRuntimeFactorBlock(ctx, prov, model, action, f)
+	}
+}
+
+func (s *Server) logRuntimeFactorBlock(
+	ctx context.Context,
+	prov *provider.Provider,
+	model string,
+	action string,
+	f attestation.FactorResult,
+) {
+	providerName := ""
+	if prov != nil {
+		providerName = prov.Name
+	}
+	slog.WarnContext(ctx, "enforced verification factor failed",
+		"action", action,
+		"provider", providerName,
+		"model", model,
+		"factor", f.Name,
+		"tier", f.Tier,
+		"detail", f.Detail,
+	)
+}
+
+func (s *Server) logInferenceBlock(
+	ctx context.Context,
+	action string,
+	endpoint string,
+	providerName string,
+	model string,
+	statusCode int,
+	err error,
+) {
+	attrs := []any{
+		"action", action,
+		"endpoint", endpoint,
+		"provider", providerName,
+		"model", model,
+		"status", statusCode,
+	}
+	if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	if statusCode == http.StatusTooManyRequests {
+		slog.InfoContext(ctx, "inference blocked", attrs...)
+		return
+	}
+	slog.WarnContext(ctx, "inference blocked", attrs...)
+}
+
+func (s *Server) logUpstreamStatus(ctx context.Context, providerName, model, path string, statusCode int) {
+	s.logInferenceBlock(ctx, "upstream_status", path, providerName, model, statusCode,
+		fmt.Errorf("upstream returned HTTP %d", statusCode))
+}
+
+func (s *Server) logUpstreamRoundtripFailure(ctx context.Context, providerName, model, path string, statusCode int, err error) {
+	s.logInferenceBlock(ctx, "upstream_roundtrip_failed", path, providerName, model, statusCode, err)
 }
 
 // relayResponse dispatches the upstream response to the correct relay function
@@ -2831,6 +2964,7 @@ func (s *Server) handlePinnedNonChat(
 	pinnedResp, err := prov.PinnedHandler.HandlePinned(reqCtx, &pinnedReq)
 	if err != nil {
 		s.negCache.Record(prov.Name, cacheModelFor(ctx, upstreamModel))
+		// This error log is the WARN+ block record for pinned request connection failures.
 		slog.ErrorContext(ctx, "pinned request failed", "provider", prov.Name, "model", upstreamModel, "path", endpointPath, "err", err)
 		http.Error(w, fmt.Sprintf("pinned connection failed: %v", err), http.StatusBadGateway)
 		return
@@ -2871,6 +3005,7 @@ func (s *Server) handlePinnedNonChat(
 		if pinnedResp.Session != nil {
 			defer pinnedResp.Session.Zero()
 		}
+		s.logUpstreamStatus(ctx, prov.Name, upstreamModel, endpointPath, pinnedResp.StatusCode)
 		w.WriteHeader(pinnedResp.StatusCode)
 		_, _ = io.Copy(w, io.LimitReader(pinnedResp.Body, 10<<20))
 		return
@@ -2917,8 +3052,12 @@ func (s *Server) clearE2EEFailureIfFresh(
 	}
 	s.cache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
 	s.signingKeyCache.Delete(prov.Name, cacheModelFor(ctx, upstreamModel))
+	// This error log is the WARN+ block record for stale e2ee_usable failures.
 	slog.ErrorContext(ctx, "E2EE previously failed; cached attestation insufficient for recovery",
-		"provider", prov.Name, "model", upstreamModel)
+		"provider", prov.Name, "model", upstreamModel,
+		"factor", attestation.FactorE2EEUsable,
+		"tier", attestation.TierBinding,
+		"detail", "previous E2EE decryption failure requires fresh re-attestation")
 	s.stats.errors.Add(1)
 	ms.errors.Add(1)
 	http.Error(w, "E2EE previously failed; re-attestation required", http.StatusServiceUnavailable)

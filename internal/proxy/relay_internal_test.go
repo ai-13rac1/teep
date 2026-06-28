@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -654,6 +655,16 @@ func blockedReport() *attestation.VerificationReport {
 	}
 }
 
+func captureSlog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
 func TestEnforceReport_NilReport(t *testing.T) {
 	s := newMinimalServer()
 	s.cfg = &config.Config{}
@@ -699,6 +710,90 @@ func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+func TestEnforceReport_BlockedLogsFailingFactor(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: false}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	logs := captureSlog(t, func() {
+		_ = s.enforceReport(t.Context(), w, blockedReport(), prov, "model")
+	})
+
+	for _, want := range []string{
+		"enforced verification factor failed",
+		"action=block_inference",
+		"provider=venice",
+		"model=model",
+		"factor=tee_quote_present",
+		"tier=model",
+		"detail=\"no quote\"",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("log output missing %q:\n%s", want, logs)
+		}
+	}
+}
+
+func TestHandleE2EEDecryptionFailure_LogsSingleError(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "venice"}
+	ms := &modelStats{}
+	logs := captureSlog(t, func() {
+		_ = s.handleE2EEDecryptionFailure(t.Context(), prov, "model", ms, false, "", errors.New("decrypt error"))
+	})
+
+	for _, want := range []string{
+		"level=ERROR",
+		"msg=\"E2EE decryption failed; caches invalidated\"",
+		"provider=venice",
+		"model=model",
+		"factor=e2ee_usable",
+		"tier=\"Tier 2: Binding & Crypto\"",
+		"detail=\"E2EE decryption failed",
+		"err=\"decrypt error\"",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("log output missing %q:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "enforced verification factor failed") {
+		t.Fatalf("unexpected duplicate factor log:\n%s", logs)
+	}
+}
+
+func TestLogUpstreamStatusWarnsExceptRateLimit(t *testing.T) {
+	s := newMinimalServer()
+	warnLogs := captureSlog(t, func() {
+		s.logUpstreamStatus(t.Context(), "venice", "model", "/v1/chat/completions", http.StatusUnauthorized)
+	})
+	for _, want := range []string{
+		"level=WARN",
+		"msg=\"inference blocked\"",
+		"action=upstream_status",
+		"provider=venice",
+		"model=model",
+		"status=401",
+	} {
+		if !strings.Contains(warnLogs, want) {
+			t.Fatalf("401 log output missing %q:\n%s", want, warnLogs)
+		}
+	}
+
+	rateLimitLogs := captureSlog(t, func() {
+		s.logUpstreamStatus(t.Context(), "venice", "model", "/v1/chat/completions", http.StatusTooManyRequests)
+	})
+	for _, want := range []string{
+		"level=INFO",
+		"msg=\"inference blocked\"",
+		"action=upstream_status",
+		"status=429",
+	} {
+		if !strings.Contains(rateLimitLogs, want) {
+			t.Fatalf("429 log output missing %q:\n%s", want, rateLimitLogs)
+		}
 	}
 }
 
