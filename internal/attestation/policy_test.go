@@ -352,6 +352,39 @@ func TestSupplyChainComponentRecognitionFactors(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
 }
 
+func TestSupplyChainOpenTelemetrySignerRecognition(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234"
+	const otelKeyFingerprint = "a8bd282038915eaf2ca9ac7d4cc2605ce6e7ae8aed5b19b06370e285f8a9d72e"
+	in := &attestation.ReportInput{
+		Provider:          "neardirect",
+		Raw:               raw,
+		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
+		ImageRepos:        []string{"otel/opentelemetry-collector-contrib"},
+		DigestToRepo:      map[string]string{digest: "otel/opentelemetry-collector-contrib"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:            digest,
+			HasCert:           false,
+			KeyFingerprint:    otelKeyFingerprint,
+			SETVerified:       true,
+			InclusionVerified: true,
+		}},
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+
+	in.Provider = "nearcloud"
+	in.SupplyChainPolicy = nearcloud.SupplyChainPolicy()
+	in.GatewayImageRepos = []string{"otel/opentelemetry-collector-contrib"}
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
 func TestSupplyChainComponentRecognitionNanoGPTComposeOnly(t *testing.T) {
 	nonce := attestation.NewNonce()
 	raw := attestation.BuildMinimalRawForTest(nonce, attestation.ValidSigningKeyForTest(t))
