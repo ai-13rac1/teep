@@ -70,6 +70,22 @@
   .card-head:hover { background: var(--surface-2); }
   .card-name { font-family: var(--mono); font-size: 0.92rem; color: var(--ink); flex: 1; }
   .card-name .prov { color: var(--dim); }
+  .card-meta {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
+    margin-top: 4px;
+  }
+  .card-meta .sep { color: var(--line); }
+  .card-desc {
+    font-size: 0.76rem; color: var(--dim); margin-top: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  }
+  .meta-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+  .meta-pill {
+    font-family: var(--mono); font-size: 0.58rem; font-weight: 500; letter-spacing: 0.04em;
+    padding: 2px 6px; border-radius: 999px; background: var(--surface-2);
+    color: var(--dim); border: 1px solid var(--line);
+  }
   .chev { color: var(--faint); transition: transform 0.18s ease; flex-shrink: 0; }
   .card-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
   .card-body { display: none; padding: 0 16px 15px; }
@@ -299,7 +315,67 @@ function renderReport(report) {
   return h;
 }
 
-function modelCard(id) {
+function fmtCtx(n) {
+  if (!n || n <= 0) return "";
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M ctx";
+  if (n >= 1000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + "k ctx";
+  return n + " ctx";
+}
+
+function modelMeta(m) {
+  var parts = [];
+  // Context window — providers use different field names.
+  var ctx = m.context_length || m.context_window ||
+    (m.model_spec && m.model_spec.availableContextTokens) || 0;
+  if (ctx > 0) parts.push(fmtCtx(ctx));
+  // Type.
+  if (m.type) parts.push(esc(m.type));
+  // Quantization.
+  if (m.quantization) parts.push(esc(m.quantization));
+  // Owner.
+  if (m.owned_by) parts.push(esc(m.owned_by));
+  if (!parts.length) return "";
+  return '<div class="card-meta">' + parts.join('<span class="sep">\u00b7</span>') + '</div>';
+}
+
+function modelPills(m) {
+  var pills = [];
+  // Capabilities from booleans.
+  if (m.multimodal) pills.push("multimodal");
+  if (m.tool_calling) pills.push("tools");
+  if (m.reasoning) pills.push("reasoning");
+  // Capabilities from supported_features array.
+  var feats = m.supported_features || [];
+  for (var i = 0; i < feats.length; i++) {
+    if (pills.indexOf(feats[i]) === -1) pills.push(feats[i]);
+  }
+  // Modalities.
+  var inMod = m.input_modalities || [];
+  var outMod = m.output_modalities || [];
+  for (var j = 0; j < inMod.length; j++) {
+    var label = inMod[j] + " in";
+    if (pills.indexOf(label) === -1) pills.push(label);
+  }
+  for (var k = 0; k < outMod.length; k++) {
+    var olabel = outMod[k] + " out";
+    if (pills.indexOf(olabel) === -1) pills.push(olabel);
+  }
+  if (!pills.length) return "";
+  var h = '<div class="meta-pills">';
+  for (var p = 0; p < pills.length; p++) {
+    h += '<span class="meta-pill">' + esc(pills[p]) + '</span>';
+  }
+  return h + '</div>';
+}
+
+function modelDesc(m) {
+  var desc = m.description || (m.model_spec && m.model_spec.description) || "";
+  if (!desc) return "";
+  return '<div class="card-desc">' + esc(desc) + '</div>';
+}
+
+function modelCard(m) {
+  var id = m._id;
   var parts = id.split(":");
   var prov = parts[0] || "";
   var name = parts.slice(1).join(":") || id;
@@ -307,11 +383,15 @@ function modelCard(id) {
 
   return '<div class="card" data-model="' + esc(id) + '">' +
     '<button class="card-head" aria-expanded="' + open + '" data-toggle="' + esc(id) + '">' +
-      '<span class="card-name"><span class="prov">' + esc(prov) + ':</span>' + esc(name) + '</span>' +
+      '<div style="flex:1; min-width:0">' +
+        '<div class="card-name"><span class="prov">' + esc(prov) + ':</span>' + esc(name) + '</div>' +
+        modelMeta(m) + modelDesc(m) +
+      '</div>' +
       '<span class="chev">\u25b8</span>' +
     '</button>' +
     '<div class="card-body">' +
-      '<div class="card-actions">' +
+      modelPills(m) +
+      '<div class="card-actions" style="margin-top:10px">' +
         '<button class="btn btn-attest" data-attest="' + esc(id) + '">Attest</button>' +
         '<button class="btn btn-infer" data-infer="' + esc(id) + '">Infer</button>' +
       '</div>' +
@@ -326,9 +406,9 @@ function renderModels() {
   var html = "";
   var shown = 0;
   for (var i = 0; i < allModels.length; i++) {
-    var id = allModels[i];
-    if (ft && id.toLowerCase().indexOf(ft) === -1) continue;
-    html += modelCard(id);
+    var m = allModels[i];
+    if (ft && m._id.toLowerCase().indexOf(ft) === -1) continue;
+    html += modelCard(m);
     shown++;
   }
   if (allModels.length === 0) {
@@ -443,10 +523,11 @@ fetch("/v1/models").then(function(r) { return r.json(); }).then(function(data) {
   var models = (data.data || []);
   allModels = [];
   for (var i = 0; i < models.length; i++) {
-    var id = models[i].id || models[i].name;
-    if (id) allModels.push(id);
+    var m = models[i];
+    var id = m.id || m.name;
+    if (id) { m._id = id; allModels.push(m); }
   }
-  allModels.sort();
+  allModels.sort(function(a, b) { return a._id < b._id ? -1 : a._id > b._id ? 1 : 0; });
   renderModels();
 }).catch(function(err) {
   el("status").textContent = "Failed to load models: " + err.message;
