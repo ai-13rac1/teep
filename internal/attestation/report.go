@@ -1929,7 +1929,10 @@ func evalComposeProviderSignerRecognition(in *ReportInput) FactorResult {
 	checked := 0
 	for i := range in.Rekor {
 		r := &in.Rekor[i]
-		repo := in.DigestToRepo[r.Digest]
+		repo, failure := componentRepoForDigest(in, r, FactorProviderSigner)
+		if failure != nil {
+			return *failure
+		}
 		img := scPolicy.Lookup(repo)
 		if img != nil && img.Provenance == ComposeBindingOnly {
 			continue
@@ -2007,7 +2010,10 @@ func evalComposeComponentSignatureRecognition(in *ReportInput) FactorResult {
 	checked := 0
 	for i := range in.Rekor {
 		r := &in.Rekor[i]
-		repo := in.DigestToRepo[r.Digest]
+		repo, failure := componentRepoForDigest(in, r, FactorComponentSignature)
+		if failure != nil {
+			return *failure
+		}
 		img := scPolicy.Lookup(repo)
 		if img != nil && img.Provenance == ComposeBindingOnly {
 			continue
@@ -2030,6 +2036,15 @@ func evalComposeComponentSignatureRecognition(in *ReportInput) FactorResult {
 	}
 	return FactorResult{Tier: TierSupplyChain, Name: FactorComponentSignature, Status: Pass,
 		Detail: fmt.Sprintf("%d component signature policy match(es)", checked)}
+}
+
+func componentRepoForDigest(in *ReportInput, r *RekorProvenance, factorName string) (string, *FactorResult) {
+	repo := strings.TrimSpace(in.DigestToRepo[r.Digest])
+	if repo != "" {
+		return repo, nil
+	}
+	return "", &FactorResult{Tier: TierSupplyChain, Name: factorName, Status: Fail,
+		Detail: fmt.Sprintf("component digest %q has no associated component repo name", r.Digest)}
 }
 
 func verifyComponentSignature(r *RekorProvenance, img *ImageProvenance, repo string, requireProviderSigner bool) (string, bool) {

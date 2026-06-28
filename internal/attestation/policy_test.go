@@ -352,6 +352,40 @@ func TestSupplyChainComponentRecognitionFactors(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
 }
 
+func TestSupplyChainSignatureRecognitionFailsWithoutComponentRepoMapping(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	in := &attestation.ReportInput{
+		Provider:          "neardirect",
+		Raw:               raw,
+		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
+		ImageRepos:        []string{"nearaidev/renamed-compose-manager"},
+		DigestToRepo:      map[string]string{},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:        digest,
+			HasCert:       true,
+			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:    "https://token.actions.githubusercontent.com",
+			SourceRepo:    "nearai/compose-manager",
+			SourceRepoURL: "https://github.com/nearai/compose-manager",
+			SourceCommit:  "0123456789abcdef",
+			RunnerEnv:     "github-hosted",
+		}},
+	}
+
+	for name, factors := range map[string][]attestation.FactorResult{
+		"provider_signer":     attestation.EvalProviderSignerRecognitionForTest(in),
+		"component_signature": attestation.EvalComponentSignatureRecognitionForTest(in),
+	} {
+		f := attestation.AssertSingleFactorForTest(t, factors, attestation.Fail)
+		if !strings.Contains(f.Detail, "no associated component repo name") {
+			t.Fatalf("%s detail should mention missing component repo mapping: %s", name, f.Detail)
+		}
+	}
+}
+
 func TestSupplyChainOpenTelemetrySignerRecognition(t *testing.T) {
 	nonce := attestation.NewNonce()
 	sigKey := attestation.ValidSigningKeyForTest(t)
