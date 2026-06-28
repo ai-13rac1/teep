@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -38,6 +39,15 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 
 	// Build report via the full pipeline.
 	modelPolicy, _ := defaults.MeasurementDefaults("tinfoil_v3_cloud")
+	notCompared := errors.New("not implemented / no supply chain data")
+	tinfoilSC := &attestation.TinfoilSupplyChainResult{
+		ComponentRepos:   []string{"tinfoilsh/confidential-model-router"},
+		SigstoreVerified: true,
+		SigstoreDetail:   "Sigstore DSSE verified for tinfoilsh/confidential-model-router",
+		Components:       []attestation.TinfoilComponentResult{{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true}},
+		CodeMatchErr:     notCompared,
+		HWMatchErr:       notCompared,
+	}
 	report := attestation.BuildReport(&attestation.ReportInput{
 		Provider:               "tinfoil_v3_cloud",
 		Model:                  env.manifest.Model,
@@ -46,6 +56,7 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 		SEV:                    sevResult,
 		Policy:                 modelPolicy,
 		AllowFail:              attestation.TinfoilCloudDefaultAllowFail,
+		TinfoilSC:              tinfoilSC,
 		E2EEConfigured:         true,
 		Inapplicable:           tinfoil.InapplicableFactors(),
 		ProviderUsesTLSBinding: true,
@@ -181,6 +192,10 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 		"signing_key_present",
 		"e2ee_capable",
 		"tls_key_binding",
+		"build_transparency_log",
+		"component_recognition",
+		"provider_signer_recognition",
+		"component_signature_recognition",
 	})
 
 	// Must Skip: factors not applicable to SEV-SNP, factors that depend on
@@ -215,7 +230,6 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 	// Not Applicable: factors handled by Tinfoil's applicability layer.
 	for _, name := range []string{
 		"compose_binding",
-		"build_transparency_log",
 		"sigstore_verification",
 		"event_log_integrity",
 		"nvidia_nonce_client_bound",

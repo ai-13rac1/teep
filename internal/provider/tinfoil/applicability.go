@@ -14,9 +14,8 @@ func InapplicableFactors() attestation.InapplicableFactors {
 		"nvidia_nras_verified":      "NRAS is an EAT-JWT cloud service; Tinfoil uses direct SPDM verification",
 
 		// Supply chain: Tinfoil uses Sigstore DSSE, not compose/Rekor model.
-		"compose_binding":        "Tinfoil uses Sigstore DSSE, not compose-based binding",
-		"build_transparency_log": "Tinfoil uses Sigstore DSSE, not Rekor compose provenance",
-		"sigstore_verification":  "Tinfoil uses Sigstore DSSE, not per-image cosign verification",
-		"event_log_integrity":    "Tinfoil does not expose TDX event logs",
+		"compose_binding":       "Tinfoil uses Sigstore DSSE, not compose-based binding",
+		"sigstore_verification": "Tinfoil uses Sigstore DSSE, not per-image cosign verification",
+		"event_log_integrity":   "Tinfoil does not expose TDX event logs",
 	}
 }

@@ -437,7 +437,7 @@ func TestVerifyTinfoilSupplyChain_NonTinfoilFormat(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{BackendFormat: attestation.FormatDstack}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, nil, "tinfoil_v3_direct", "model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result != nil {
 		t.Errorf("verifyTinfoilSupplyChain for non-Tinfoil format: expected nil, got %v", result)
 	}
@@ -447,7 +447,7 @@ func TestVerifyTinfoilSupplyChain_TinfoilFormat_Offline(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{BackendFormat: attestation.FormatTinfoil}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, nil, "tinfoil_v3_direct", "llama3-3-70b",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("verifyTinfoilSupplyChain offline: expected non-nil result")
 	}
@@ -462,7 +462,7 @@ func TestVerifyTinfoilSupplyChain_GPUBindingFromSEV(t *testing.T) {
 		ReportDataBindingDetail: "gpu_bound=true, nvswitch_bound=true",
 	}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, sev, "tinfoil_v3_direct", "test-model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -482,7 +482,7 @@ func TestVerifyTinfoilSupplyChain_GPUBindingFromTDX(t *testing.T) {
 		ParseErr:                errors.New("not a real TDX quote"), // prevent TDX policy checks
 	}
 	result := verifyTinfoilSupplyChain(ctx, raw, tdx, nil, "tinfoil_v3_direct", "test-model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -686,7 +686,7 @@ func TestVerifyTinfoilSupplyChain_TDXPolicyCheck(t *testing.T) {
 	tdxResult := &attestation.TDXVerifyResult{} // ParseErr == nil
 	// Use a model name that maps to a known repo. RepoForModel("gemma4-31b")
 	// returns "tinfoilsh/confidential-gemma4-31b".
-	result := verifyTinfoilSupplyChain(ctx, raw, tdxResult, nil, "tinfoil_v3_direct", "gemma4-31b", attestation.MeasurementPolicy{}, true)
+	result := verifyTinfoilSupplyChain(ctx, raw, tdxResult, nil, "tinfoil_v3_direct", "gemma4-31b", attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}

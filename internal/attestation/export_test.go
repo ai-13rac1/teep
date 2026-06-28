@@ -6,6 +6,9 @@ import "testing"
 
 var EvalSigstoreVerificationForTest = evalSigstoreVerification
 var EvalBuildTransparencyLogForTest = evalBuildTransparencyLog
+var EvalComponentRecognitionForTest = evalComponentRecognition
+var EvalProviderSignerRecognitionForTest = evalProviderSignerRecognition
+var EvalComponentSignatureRecognitionForTest = evalComponentSignatureRecognition
 var EvalE2EEUsableForTest = evalE2EEUsable
 
 func BuildMinimalRawForTest(nonce Nonce, signingKey string) *RawAttestation {

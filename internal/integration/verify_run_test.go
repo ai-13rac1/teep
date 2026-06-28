@@ -216,9 +216,10 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		report.Passed, report.Failed, report.Skipped)
 
 	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
-	// GPU evidence captured. verify.Run resolves model via the proxy
-	// discovery endpoint, fetches per-enclave attestation from the real
-	// backend enclave (e.g. gemma4-31b-1.inf10.tinfoil.sh).
+	// GPU evidence captured. The fixture predates github-proxy.tinfoil.sh
+	// capture entries, so component identity is recognized but enforced
+	// Sigstore transparency/signature factors fail closed on missing replay
+	// evidence.
 	assertMustPass(t, report, []string{
 		"nonce_match",
 		"tee_quote_present",
@@ -237,9 +238,15 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		"nvidia_signature",
 		"nvidia_claims",
 		"cpu_gpu_chain",
+		"component_recognition",
+	})
+	assertMustFail(t, report, []string{
+		"build_transparency_log",
+		"provider_signer_recognition",
+		"component_signature_recognition",
 		"sigstore_code_verified",
 		"measured_model_weights",
-	})
+	}, "missing Tinfoil Sigstore replay evidence")
 
 	if report.Passed < 18 {
 		t.Errorf("expected at least 18 passing factors, got %d", report.Passed)
