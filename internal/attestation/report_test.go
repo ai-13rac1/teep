@@ -548,20 +548,20 @@ func TestEvalResponseSchema(t *testing.T) {
 	}
 }
 
-func TestEvalResponseSchema_TinfoilEnforced(t *testing.T) {
-	// FactorResponseSchema must NOT be in tinfoil allow_fail lists so it is
-	// enforced (unknown/missing fields block the attestation).
-	if slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema must not be in TinfoilCloudDefaultAllowFail")
+func TestEvalResponseSchema_TinfoilAllowFail(t *testing.T) {
+	// FactorResponseSchema is in tinfoil allow_fail lists while V3 attestation
+	// schema compatibility settles.
+	if !slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema missing from TinfoilCloudDefaultAllowFail")
 	}
-	if slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema must not be in TinfoilDirectDefaultAllowFail")
+	if !slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema missing from TinfoilDirectDefaultAllowFail")
 	}
 }
 
 func TestEvalResponseSchema_OtherProvidersAllowFail(t *testing.T) {
-	// FactorResponseSchema should be in non-tinfoil allow_fail lists
-	// (warn-and-continue behavior).
+	// FactorResponseSchema should be in allow_fail lists (warn-and-continue
+	// behavior).
 	if !slices.Contains(DefaultAllowFail, FactorResponseSchema) {
 		t.Error("FactorResponseSchema missing from DefaultAllowFail")
 	}

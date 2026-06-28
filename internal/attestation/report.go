@@ -342,7 +342,7 @@ var ChutesDefaultAllowFail = []string{
 // Tinfoil runs its own TEE stack (TDX or SEV-SNP) with Sigstore supply chain
 // verification instead of compose-based binding.
 //
-// REPORTDATA binding, and Sigstore code verification are enforced.
+// REPORTDATA binding and Sigstore code verification are enforced.
 // cpu_id_registry is allowed to fail because Tinfoil does not participate in
 // Proof of Cloud. intel_pcs_collateral is allowed because SEV-SNP uses AMD
 // KDS instead of Intel PCS. SEV-SNP certificate-chain and quote-signature
@@ -350,6 +350,8 @@ var ChutesDefaultAllowFail = []string{
 // tinfoil_v3_cloud. NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
 // reported but currently allowed to fail by default, due to the hashing
 // issue documented in docs/attestation_gaps/tinfoil_nvidia_json.md
+// response_schema is allowed to fail while Tinfoil V3 attestation schema
+// compatibility settles.
 // tee_boot_config is enforced: hardware platform measurements (MRTD + RTMR0)
 // must match the Sigstore-attested tinfoilsh/hardware-measurements registry
 // for TDX enclaves.
@@ -364,16 +366,19 @@ var TinfoilCloudDefaultAllowFail = []string{
 	FactorCPUGPUChain,
 	FactorNVSwitchBinding,
 	FactorComponentRecognition,
+	FactorResponseSchema,
 }
 
 // TinfoilDirectDefaultAllowFail is the tinfoil_v3_direct default allow_fail
 // list. Direct inference attests per-model enclaves; NVSwitch binding is
-// reported but currently allowed to fail by default.
+// reported but currently allowed to fail by default. response_schema is
+// allowed to fail while Tinfoil V3 attestation schema compatibility settles.
 var TinfoilDirectDefaultAllowFail = []string{
 	FactorCPUIDRegistry,
 	FactorIntelPCSCollateral,
 	FactorNVSwitchBinding,
 	FactorComponentRecognition,
+	FactorResponseSchema,
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.
