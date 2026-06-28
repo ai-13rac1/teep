@@ -387,10 +387,12 @@ outputs, rather than narrative interpretation.
    chain fails/skip, this gap is `Open`.
 
 3. **GPU-to-CPU binding gap (Option 2):**
-   `Closed` only when both `cpu_gpu_chain` and `nvidia_gpu_attestation` are
-   `Pass` in the same verification event, including topology-conditional
-   NVSwitch requirements. Any missing required evidence, hash mismatch,
-   malformed normalization input, or SPDM failure makes it `Open`.
+   `Closed` only when `cpu_gpu_chain` and the NVIDIA evidence factors
+   (`nvidia_payload_present`, `nvidia_signature`, and `nvidia_claims`) pass in
+   the same verification event. A failed factor that is allowed by policy may
+   avoid request blocking, but the gap remains `Open`. Missing required
+   evidence, malformed normalization input, SPDM failure, or an unresolved
+   topology-required NVSwitch failure makes it `Open`.
 
 4. **TEE.fail key-extraction gap:**
    Always `Open` until an independent CPU identity registry / anti-relay
@@ -417,6 +419,12 @@ Status interpretation rules:
    provider/hop are required and fail-closed.
 - A row marked `Open` means the property is not cryptographically established
    at that verifier boundary, even if adjacent checks pass.
+- For cloud-mode details, see
+  [tinfoil_cloud_integrity.md](../../attestation_gaps/tinfoil_cloud_integrity.md).
+  The core factor rule is that teep-verified factors apply to the router
+  enclave unless the factor detail explicitly says otherwise. Backend
+  inference-enclave integrity is router-enforced, not independently
+  client-enforced by teep in `tinfoil_v3_cloud`.
 
 Replay/downgrade status rules (both providers):
 - Attestation replay resistance is `Closed` only when nonce generation is
@@ -683,6 +691,23 @@ router enclave (after EHBP decryption). The router is Tinfoil-operated and
 its code is Sigstore-attested, so this is an accepted risk. Users requiring
 inference-enclave-direct encryption should use `tinfoil_v3_direct`.
 
+**Factor validation implications**:
+- `tls_key_binding`, `e2ee_capable`, `e2ee_usable`,
+  `nonce_in_reportdata`, and `tee_reportdata_binding` validate the router
+  attestation and router EHBP/TLS keys.
+- `build_transparency_log`, `component_recognition`,
+  `provider_signer_recognition`, `component_signature_recognition`,
+  `sigstore_code_verified`, and `measured_model_weights` validate the router
+  component (`tinfoilsh/confidential-model-router`) and the router code path
+  that performs backend admission control.
+- GPU and NVSwitch factors for `tinfoil_v3_cloud` describe the attested router
+  boundary visible to teep. They must not be interpreted as client-enforced
+  proof that the selected model inference enclave had fresh GPU/SPDM evidence
+  for a specific request.
+- Policies requiring inference-enclave end-to-end encryption, fresh
+  client-verifiable backend evidence, or client-enforced backend GPU/SPDM
+  state should use `tinfoil_v3_direct` or fail closed for cloud mode.
+
 ### Authentication Chain 3b: Direct Inference Connection — `tinfoil_v3_direct` only
 
 In `tinfoil_v3_direct`, teep verifies the inference enclave directly and
@@ -866,13 +891,19 @@ apply, and absent GPU evidence must fail closed.
 
 Status rules:
 - `cpu_gpu_chain` is `Closed` only when `cpu_gpu_chain=Pass` and
-   `nvidia_gpu_attestation=Pass` in the same verification event.
+   required NVIDIA evidence factors pass in the same verification event.
+   Policy may allow a failing factor not to block inference, but that does not
+   close the GPU-chain gap.
 - For `tinfoil_v3_cloud`, GPU-chain closure is scoped to the router enclave at
    the teep verification boundary.
 - For `tinfoil_v3_direct`, GPU-chain closure is scoped to the inference enclave
    directly verified by teep.
 - Missing required evidence, malformed normalization inputs, hash mismatch,
    SPDM failure, or required NVSwitch absence makes the gap `Open`.
+- The known NVSwitch JSON re-encoding mismatch is reported as a separate
+  `nvswitch_binding` failure; it does not by itself make `cpu_gpu_chain` fail
+  when the GPU evidence hash and REPORTDATA hash verify with the reported
+  NVSwitch hash.
 
 #### TEE.fail Implications for Tinfoil
 
@@ -924,14 +955,19 @@ Status rule:
 3. When DCEA/vTPM support becomes available, add verification support.
 4. `cpu_gpu_chain`: `Pass` only when GPU evidence is present and its hash is
    verified in REPORTDATA (missing GPU evidence = `Fail`).
-5. `nvidia_gpu_attestation`: `Pass` only when GPU SPDM evidence is present
-   and verifies per GPU (missing GPU evidence = `Fail`).
+5. `nvidia_payload_present`, `nvidia_signature`, and `nvidia_claims`: `Pass`
+   only when GPU SPDM evidence is present and verifies per GPU (missing GPU
+   evidence = `Fail`).
 6. NVSwitch evidence is topology-conditional: if GPU evidence indicates an
    NVSwitch-backed topology (for example 8-GPU HGX Hopper / mesh fabric),
    `nvswitch` evidence and `report_data.nvswitch_evidence_hash` are required;
    8-GPU Blackwell (B200/B300) may legitimately omit NVSwitch evidence under
-   MPT; if required evidence is missing or mismatched, both `cpu_gpu_chain` and
-   `nvidia_gpu_attestation` must be `Fail`.
+   MPT; if required evidence is missing, malformed, or cryptographically
+   invalid, GPU/NVSwitch-related factors must fail closed. If the evidence is
+   present but only the raw JSON hash mismatches because of the known
+   server-side re-encoding bug, `nvswitch_binding` fails while
+   `tee_reportdata_binding` and `cpu_gpu_chain` may still pass through the
+   reported-hash workaround described below.
 
 #### REPORTDATA Verification
 
@@ -946,10 +982,16 @@ Status rule:
    (i.e., `sha256.Sum256([]byte(rawGPUMessage))`) without re-encoding.
 3. Recompute `nvswitch_evidence_hash = SHA-256(raw_nvswitch_json)` from the
    `nvswitch` field (if present; omitted from hash input when absent). Same raw-byte
-   requirement as the GPU evidence hash above.
+   requirement as the GPU evidence hash above. For the known Tinfoil
+   NVSwitch JSON re-encoding issue, teep records the raw-byte mismatch and
+   then verifies REPORTDATA with the reported `nvswitch_evidence_hash` so the
+   TLS SPKI, HPKE key, nonce, and GPU evidence hash remain hardware-bound.
+   See
+   [tinfoil_nvswitch_json.md](../../attestation_gaps/tinfoil_nvswitch_json.md)
+   for the detailed server-side cause.
 4. Enforce field/hash consistency:
     - `gpu` evidence is REQUIRED. If `gpu` is absent or empty, fail closed
-       and set both `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
+       and set `cpu_gpu_chain` and NVIDIA evidence factors to `Fail`.
     - If `gpu` is present, `report_data.gpu_evidence_hash` must be present and
        equal the recomputed hash (constant-time compare via
        `subtle.ConstantTimeCompare`, consistent with the REPORTDATA comparison
@@ -960,8 +1002,8 @@ Status rule:
       2. Set `gpu_count = len(gpu.evidences)`.
       3. Inspect `gpu.evidences[*].arch` values to detect GPU architectures.
       4. If `gpu_count == 8` AND any GPU arch value is unrecognized (not
-         `HOPPER` and not `BLACKWELL`), fail closed and set both
-         `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`. Unknown
+         `HOPPER` and not `BLACKWELL`), fail closed and set `cpu_gpu_chain`
+         and NVIDIA evidence factors to `Fail`. Unknown
          architectures on 8-GPU systems must not silently skip NVSwitch
          verification.
       5. If `gpu_count == 8` AND at least one GPU arch is `HOPPER`, set
@@ -971,13 +1013,17 @@ Status rule:
          set `nvswitch_expected = false`.
       7. If required fields for this derivation are malformed, missing, or
          ambiguous (for example `gpu` present but `gpu.evidences` missing),
-         fail closed and set both `cpu_gpu_chain` and
-         `nvidia_gpu_attestation` to `Fail`.
+         fail closed and set `cpu_gpu_chain` and NVIDIA evidence factors to
+         `Fail`.
     - If `nvswitch_expected` is true, `nvswitch` evidence is REQUIRED and
-       `report_data.nvswitch_evidence_hash` must be present and equal the
-       recomputed hash (constant-time compare); missing/mismatch is a
-       fail-closed error and sets both
-       `cpu_gpu_chain` and `nvidia_gpu_attestation` to `Fail`.
+       `report_data.nvswitch_evidence_hash` must be present. Raw-byte hash
+       equality is required for `nvswitch_binding=Pass`. Missing evidence,
+       missing hash, malformed evidence, or invalid SPDM evidence is
+       fail-closed. A hash mismatch caused by the known server-side JSON
+       re-encoding bug is isolated to `nvswitch_binding`: teep verifies
+       REPORTDATA using the reported hash value, sets `nvswitch_bound=false`
+       in detail, and leaves `cpu_gpu_chain` able to pass when GPU evidence
+       hash binding succeeds.
     - If `nvswitch_expected` is false (for example single-GPU systems or
        8-GPU Blackwell MPT systems),
        `nvswitch` may be absent.
@@ -993,13 +1039,24 @@ Status rule:
 7. Verify each GPU evidence SPDM report (nonce matches client nonce,
    certificate chain validates against NVIDIA root).
 8. If `nvswitch_expected` is true, verify NVSwitch evidence and fail closed
-   on missing/invalid evidence. If `nvswitch_expected` is false, NVSwitch
-   verification is not required.
+   on missing/invalid evidence. If only the raw JSON bytes fail to hash to the
+   reported value, preserve REPORTDATA verification with the reported hash and
+   fail `nvswitch_binding` with a server-side JSON re-encoding detail. If
+   `nvswitch_expected` is false, NVSwitch verification is not required.
 
 This gives both `tinfoil_v3_cloud` and `tinfoil_v3_direct` three properties:
 - **GPU attestation binding**: GPU evidence hash is hardware-authenticated via CPU quote REPORTDATA.
 - **Client nonce freshness**: Nonce in REPORTDATA proves attestation is fresh.
 - **NVSwitch topology**: NVSwitch evidence validates the 8-GPU Hopper interconnect when required.
+
+With the NVSwitch workaround active, factor behavior is:
+- `tee_reportdata_binding`: `Pass` when the REPORTDATA hash verifies using
+  the reported NVSwitch hash; detail includes `nvswitch_bound=false`.
+- `cpu_gpu_chain`: `Pass` when `GPUHashBound=true`, because GPU evidence,
+  TLS SPKI, HPKE key, and nonce are still authenticated by REPORTDATA.
+- `nvswitch_binding`: `Fail` when `NVSwitchExpected=true` and
+  `NVSwitchHashBound=false`, with detail identifying the server-side JSON
+  re-encoding mismatch.
 
 ### Attestation Freshness
 
@@ -1416,7 +1473,10 @@ even if strict schema validation is loosened for forward compatibility):
     - Determine `nvswitch_expected` with the normalization algorithm defined
       in "REPORTDATA Verification" above.
     - If `nvswitch_expected` is true, `nvswitch` field and
-       `report_data.nvswitch_evidence_hash` are required and must match.
+       `report_data.nvswitch_evidence_hash` are required. Matching raw bytes
+       set `nvswitch_bound=true`; the known JSON re-encoding mismatch sets
+       `nvswitch_bound=false`, verifies REPORTDATA with the reported hash, and
+       fails only the `nvswitch_binding` factor.
     - If `nvswitch_expected` is false (including Blackwell B200/B300 MPT
        systems), `nvswitch` may be absent.
     - Verify all hex strings in `report_data` are exactly 64 characters when
@@ -2563,7 +2623,7 @@ detail-string level.
 | `measured_model_weights` | `enforced` (transitive) | Model weights attested via dm-verity + Sigstore chain |
 | `nonce_in_reportdata` | `enforced` | Client nonce in REPORTDATA hash |
 | `cpu_gpu_chain` | `enforced` for direct; `allow_fail` for cloud | GPU evidence hash is verified in REPORTDATA; cloud currently allows this factor to fail while live GPU evidence compatibility settles |
-| `nvswitch_binding` | `allow_fail` (default) | NVSwitch evidence/hash are reported separately when topology implies NVSwitch |
+| `nvswitch_binding` | `allow_fail` (default) | NVSwitch evidence/hash are reported separately when topology implies NVSwitch; fails for the known Tinfoil server-side JSON re-encoding mismatch while REPORTDATA/GPU binding can still pass |
 | `nvidia_payload_present`, `nvidia_signature`, `nvidia_claims` | `enforced` for direct; `allow_fail` for cloud | NVIDIA SPDM evidence is checked when present; cloud currently allows these factors to fail while live GPU evidence compatibility settles |
 | `response_schema` | `allow_fail` (default) | V3 attestation response schema compatibility signal |
 
