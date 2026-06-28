@@ -670,7 +670,7 @@ type ReportInput struct {
 	E2EEConfigured bool
 
 	// Inapplicable maps factor names to reasons they don't apply to this
-	// provider's attestation format. Nil means all factors are applicable.
+	// provider's attestation format. Nil uses DefaultInapplicableFactors.
 	Inapplicable InapplicableFactors
 
 	// ProviderUsesTLSBinding declares that the provider performs live TLS
@@ -702,6 +702,11 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		allowFailSet[name] = true
 	}
 
+	inapplicable := in.Inapplicable
+	if inapplicable == nil {
+		inapplicable = DefaultInapplicableFactors()
+	}
+
 	evaluators := buildEvaluators(in.GatewayTDX != nil)
 	var factors []FactorResult
 	for _, eval := range evaluators {
@@ -713,7 +718,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 
 	// Override inapplicable factors before Skip→Fail promotion.
 	for i := range factors {
-		if reason, ok := in.Inapplicable[factors[i].Name]; ok {
+		if reason, ok := inapplicable[factors[i].Name]; ok {
 			factors[i].Status = NotApplicable
 			factors[i].Detail = reason
 		}
