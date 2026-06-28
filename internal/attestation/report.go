@@ -2029,7 +2029,7 @@ func evalComposeComponentSignatureRecognition(in *ReportInput) FactorResult {
 			Detail: "no signed components present in attested compose"}
 	}
 	return FactorResult{Tier: TierSupplyChain, Name: FactorComponentSignature, Status: Pass,
-		Detail: fmt.Sprintf("%d component signature polic(ies) matched", checked)}
+		Detail: fmt.Sprintf("%d component signature policy match(es)", checked)}
 }
 
 func verifyComponentSignature(r *RekorProvenance, img *ImageProvenance, repo string, requireProviderSigner bool) (string, bool) {
