@@ -545,6 +545,7 @@ func TestPinnedPreDispatchE2EE_DomainResolutionFails(t *testing.T) {
 func TestPinnedPreDispatchE2EE_CacheMissEvictsSPKI(t *testing.T) {
 	s := newMinimalServer()
 	w := httptest.NewRecorder()
+	s.spkiCache.Add("api.near.ai", "abcd")
 	prov := &provider.Provider{
 		Name:          "neardirect",
 		E2EE:          true,
@@ -558,6 +559,31 @@ func TestPinnedPreDispatchE2EE_CacheMissEvictsSPKI(t *testing.T) {
 	t.Logf("proceed = %v, status = %d", proceed, w.Code)
 	if !proceed {
 		t.Error("expected proceed=true after SPKI eviction")
+	}
+	if s.spkiCache.Contains("api.near.ai", "abcd") {
+		t.Error("expected SPKI domain to be evicted on pinned report cache miss")
+	}
+}
+
+func TestPinnedPreDispatchPlaintext_CacheMissEvictsSPKI(t *testing.T) {
+	s := newMinimalServer()
+	w := httptest.NewRecorder()
+	s.spkiCache.Add("api.near.ai", "abcd")
+	prov := &provider.Provider{
+		Name:          "neardirect",
+		E2EE:          false,
+		PinnedHandler: &noopPinnedHandler{},
+		SPKIDomainForModel: func(_ context.Context, _ string) (string, bool) {
+			return "api.near.ai", true
+		},
+	}
+	proceed := s.pinnedPreDispatchE2EE(context.Background(), w, prov, "model")
+	t.Logf("proceed = %v, status = %d", proceed, w.Code)
+	if !proceed {
+		t.Error("expected proceed=true after SPKI eviction")
+	}
+	if s.spkiCache.Contains("api.near.ai", "abcd") {
+		t.Error("expected SPKI domain to be evicted for plaintext pinned report cache miss")
 	}
 }
 

@@ -426,6 +426,7 @@ func (h *PinnedHandler) attestOnConn(
 		GatewayEventLog:   gwRaw.EventLog,
 		GatewayPolicy:     h.gatewayPolicy,
 		E2EEConfigured:    true,
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 	return report, raw.SigningKey, nil
 }

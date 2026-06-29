@@ -1909,18 +1909,15 @@ func (s *Server) handleE2EEDecryptionFailure(
 	return "e2ee_decrypt_failed"
 }
 
-// pinnedPreDispatchE2EE checks REPORTDATA binding on cached attestation
-// before making a pinned request. Returns false if the request must be aborted.
+// pinnedPreDispatchE2EE checks cached pinned attestation state before making a
+// pinned request. Returns false if the request must be aborted.
 //
 // When the attestation report cache is empty but the SPKI cache may still hold
 // a live entry, the SPKI domain is evicted so the pinned handler performs full
 // re-attestation on this connection instead of returning a nil report.
 func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWriter, prov *provider.Provider, upstreamModel string) bool {
-	if !prov.E2EE {
-		return true
-	}
 	if cached, ok := s.cache.Get(prov.Name, cacheModelFor(ctx, upstreamModel)); ok {
-		if !cached.ReportDataBindingPassed() {
+		if prov.E2EE && !cached.ReportDataBindingPassed() {
 			// This error log is the WARN+ block record for the tee_reportdata_binding failure.
 			slog.ErrorContext(ctx, "E2EE required but tee_reportdata_binding not passed; refusing request",
 				"provider", prov.Name, "model", upstreamModel,
@@ -1931,9 +1928,10 @@ func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWrite
 			return false
 		}
 	} else if prov.PinnedHandler != nil {
-		// Attestation report cache miss (expired or never populated) on a
-		// pinned provider. Evict the SPKI domain so the pinned handler
-		// treats this as an SPKI miss, forcing fresh attestation.
+		// Attestation report cache miss (expired, never populated, or
+		// populated only for a different provider sharing this SPKI domain).
+		// Evict the SPKI domain so the pinned handler treats this as an SPKI
+		// miss, forcing fresh attestation for this provider/model.
 		//
 		// Use SPKIDomainForModel to resolve the correct SPKI cache key.
 		// If unavailable, fail closed — an unresolvable domain means we
@@ -1941,23 +1939,23 @@ func (s *Server) pinnedPreDispatchE2EE(ctx context.Context, w http.ResponseWrite
 		// a nil report on the next pinned request.
 		if prov.SPKIDomainForModel == nil {
 			// This error log is the WARN+ block record for pinned SPKI config failures.
-			slog.ErrorContext(ctx, "E2EE pinned provider has no SPKIDomainForModel; cannot evict SPKI cache; refusing request",
+			slog.ErrorContext(ctx, "pinned provider has no SPKIDomainForModel; cannot evict SPKI cache; refusing request",
 				"provider", prov.Name, "model", upstreamModel,
-				"factor", attestation.FactorE2EEUsable,
+				"factor", attestation.FactorTEEReportData,
 				"tier", attestation.TierBinding,
-				"detail", "pinned E2EE attestation recovery cannot resolve SPKI cache domain")
-			http.Error(w, "E2EE pinned provider configuration error", http.StatusInternalServerError)
+				"detail", "pinned attestation recovery cannot resolve SPKI cache domain")
+			http.Error(w, "pinned provider configuration error", http.StatusInternalServerError)
 			return false
 		}
 		domain, ok := prov.SPKIDomainForModel(ctx, upstreamModel)
 		if !ok || domain == "" {
 			// This error log is the WARN+ block record for pinned SPKI resolution failures.
-			slog.ErrorContext(ctx, "E2EE pinned provider could not resolve SPKI domain; refusing request",
+			slog.ErrorContext(ctx, "pinned provider could not resolve SPKI domain; refusing request",
 				"provider", prov.Name, "model", upstreamModel,
-				"factor", attestation.FactorE2EEUsable,
+				"factor", attestation.FactorTEEReportData,
 				"tier", attestation.TierBinding,
-				"detail", "pinned E2EE attestation recovery could not resolve SPKI cache domain")
-			http.Error(w, "E2EE SPKI domain resolution failed", http.StatusInternalServerError)
+				"detail", "pinned attestation recovery could not resolve SPKI cache domain")
+			http.Error(w, "pinned SPKI domain resolution failed", http.StatusInternalServerError)
 			return false
 		}
 		s.spkiCache.DeleteDomain(domain)

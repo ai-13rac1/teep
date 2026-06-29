@@ -367,6 +367,7 @@ func (h *PinnedHandler) attestOnConn(
 		Sigstore:          sigstoreResults,
 		Rekor:             rekorResults,
 		E2EEConfigured:    true,
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 	return report, raw.SigningKey, nil
 }

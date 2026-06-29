@@ -69,7 +69,6 @@ func integrationNearDirectConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -88,7 +87,6 @@ func integrationNearDirectE2EEConfig(t *testing.T) *config.Config {
 				E2EE:    true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 

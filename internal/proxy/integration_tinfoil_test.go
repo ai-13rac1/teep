@@ -146,7 +146,6 @@ func integrationTinfoilPlaintextConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -165,7 +164,6 @@ func integrationTinfoilE2EEConfig(t *testing.T) *config.Config {
 				E2EE:    true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -181,7 +179,6 @@ func integrationTinfoilDirectPlaintextConfig(t *testing.T) *config.Config {
 				E2EE:   false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -197,7 +194,6 @@ func integrationTinfoilDirectE2EEConfig(t *testing.T) *config.Config {
 				E2EE:   true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 

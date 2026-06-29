@@ -64,6 +64,20 @@ func computeTestServerSPKI(t *testing.T, srv *httptest.Server) string {
 	return conn.SPKI()
 }
 
+func allFactorsExcept(exclude ...string) []string {
+	ex := make(map[string]bool, len(exclude))
+	for _, n := range exclude {
+		ex[n] = true
+	}
+	var out []string
+	for _, n := range attestation.KnownFactors {
+		if !ex[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // nearcloudAttestationJSON builds a combined gateway+model attestation JSON
 // suitable for the nearcloud provider. Both gateway and model sections are
 // present with the given SPKI hash and nonce.
@@ -168,6 +182,77 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 	if !spkiCache.Contains(gatewayHost, spkiHash) {
 		t.Error("SPKI should be cached after successful attestation")
 	}
+}
+
+func TestHandlePinned_InapplicableNVSwitchDoesNotBlock(t *testing.T) {
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nearcloudAttestationJSON(spkiHash, nonceHex)))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.String(), http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	spkiCache := attestation.NewSPKICache()
+	handler := NewPinnedHandler(
+		spkiCache,
+		"test-key",
+		true,
+		allFactorsExcept(attestation.FactorNVSwitchBinding),
+		attestation.MeasurementPolicy{},
+		attestation.MeasurementPolicy{},
+		nil, nil, attestation.DefaultNVIDIAVerifier(), nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
+	})
+	handler.SetCTChecker(nil)
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if resp.Report == nil {
+		t.Fatal("expected report on SPKI miss")
+	}
+	if resp.Report.Blocked() {
+		t.Fatalf("report should not be blocked: %+v", resp.Report.BlockedFactors())
+	}
+	for _, f := range resp.Report.Factors {
+		if f.Name == attestation.FactorNVSwitchBinding {
+			if f.Status != attestation.NotApplicable {
+				t.Fatalf("nvswitch_binding status = %s, want N/A; detail=%s", f.Status, f.Detail)
+			}
+			return
+		}
+	}
+	t.Fatal("nvswitch_binding factor not found")
 }
 
 func TestHandlePinned_CacheHit(t *testing.T) {

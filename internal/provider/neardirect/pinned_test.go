@@ -574,6 +574,83 @@ func TestHandlePinned_CacheMiss(t *testing.T) {
 	}
 }
 
+func TestHandlePinned_InapplicableNVSwitchDoesNotBlock(t *testing.T) {
+	var spkiHash string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/attestation/report") {
+			nonceHex := r.URL.Query().Get("nonce")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(nearaiAttestationJSON(spkiHash, nonceHex)))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.String(), http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	spkiHash = computeTestServerSPKI(t, srv)
+	domain := hostFromURL(t, srv.URL)
+	endpointSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"endpoints":[{"domain":"%s","models":["test-model"]}]}`, domain)
+	}))
+	defer endpointSrv.Close()
+
+	handler := NewPinnedHandler(
+		newEndpointResolverForTest(endpointSrv.URL),
+		attestation.NewSPKICache(),
+		"test-key",
+		true,
+		allFactorsExcept(attestation.FactorNVSwitchBinding),
+		attestation.MeasurementPolicy{},
+		ReportDataVerifier{}, nil, attestation.DefaultNVIDIAVerifier(),
+		nil,
+	)
+	handler.setDialer(func(_ context.Context, _ string) (*tlsct.Conn, error) {
+		tc, err := tls.Dial("tcp", hostFromURL(t, srv.URL), testTLSConfig(srv))
+		if err != nil {
+			return nil, err
+		}
+		return tlsct.NewConn(tc)
+	})
+
+	resp, err := handler.HandlePinned(context.Background(), &provider.PinnedRequest{
+		Method:   "POST",
+		Path:     "/v1/chat/completions",
+		Endpoint: e2ee.EndpointChat,
+		Headers:  http.Header{"Content-Type": {"application/json"}},
+		Body:     []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+		Model:    "test-model",
+	})
+	if err != nil {
+		t.Fatalf("HandlePinned: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if resp.Report == nil {
+		t.Fatal("expected report on SPKI miss")
+	}
+	if resp.Report.Blocked() {
+		t.Fatalf("report should not be blocked: %+v", resp.Report.BlockedFactors())
+	}
+	for _, f := range resp.Report.Factors {
+		if f.Name == attestation.FactorNVSwitchBinding {
+			if f.Status != attestation.NotApplicable {
+				t.Fatalf("nvswitch_binding status = %s, want N/A; detail=%s", f.Status, f.Detail)
+			}
+			return
+		}
+	}
+	t.Fatal("nvswitch_binding factor not found")
+}
+
 func TestHandlePinned_CacheHitViaSetDialer(t *testing.T) {
 	var requestPaths []string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
