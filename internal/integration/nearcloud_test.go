@@ -156,7 +156,8 @@ func TestIntegration_NearCloud_Fixture(t *testing.T) {
 		Policy:            modelPolicy,
 		GatewayPolicy:     gatewayPolicy,
 		SupplyChainPolicy: nearcloud.SupplyChainPolicy(),
-		AllowFail:         attestation.NearcloudDefaultAllowFail,
+		AllowFail:         serveAllowFail("nearcloud"),
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)

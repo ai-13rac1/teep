@@ -126,7 +126,8 @@ func TestIntegration_NearDirect_Fixture(t *testing.T) {
 		Rekor:             rekorResults,
 		Policy:            modelPolicy,
 		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
-		AllowFail:         attestation.NeardirectDefaultAllowFail,
+		AllowFail:         serveAllowFail("neardirect"),
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)

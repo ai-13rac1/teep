@@ -105,7 +105,7 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 		PoC:               pocResult,
 		Policy:            modelPolicy,
 		SupplyChainPolicy: nil,
-		AllowFail:         attestation.ChutesDefaultAllowFail,
+		AllowFail:         serveAllowFail("chutes"),
 		E2EEConfigured:    true, // Chutes always uses E2EE
 		Inapplicable:      chutes.InapplicableFactors(),
 	})

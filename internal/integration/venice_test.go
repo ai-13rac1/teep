@@ -106,7 +106,8 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		Rekor:             rekorResults,
 		Policy:            modelPolicy,
 		SupplyChainPolicy: venice.SupplyChainPolicy(),
-		AllowFail:         attestation.DefaultAllowFail,
+		AllowFail:         serveAllowFail("venice"),
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
 	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)

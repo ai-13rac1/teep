@@ -10,6 +10,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/capture"
+	"github.com/13rac1/teep/internal/config"
 )
 
 // fixtureEnv holds shared state for a fixture integration test.
@@ -67,6 +68,10 @@ func findFixtureDir(t *testing.T, prefix string) string {
 		t.Skipf("no %s fixture in testdata/; run: teep verify %s --capture testdata/", prefix, prefix)
 	}
 	return filepath.Join("testdata", latest)
+}
+
+func serveAllowFail(providerName string) []string {
+	return config.MergedAllowFail(providerName, &config.Config{}, false)
 }
 
 // --- Assertion helpers ---
