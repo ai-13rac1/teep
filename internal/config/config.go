@@ -56,6 +56,7 @@ var DefaultAllowFail = attestation.DefaultAllowFail
 // the global DefaultAllowFail.
 var providerDefaultAllowFail = map[string][]string{
 	"chutes":            attestation.ChutesDefaultAllowFail,
+	"nanogpt":           attestation.NanoGPTDefaultAllowFail,
 	"nearcloud":         attestation.NearcloudDefaultAllowFail,
 	"neardirect":        attestation.NeardirectDefaultAllowFail,
 	"tinfoil_v3_cloud":  attestation.TinfoilCloudDefaultAllowFail,

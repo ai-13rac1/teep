@@ -316,6 +316,31 @@ var NeardirectDefaultAllowFail = []string{
 	FactorResponseSchema,
 }
 
+// NanoGPTDefaultAllowFail is the nanogpt-specific default allow_fail list.
+// NanoGPT currently exposes dstack-style evidence without consistently
+// replayable nonce binding, NVIDIA, compose, supply-chain, or event-log
+// integrity evidence, so only these known failing factors are allowed.
+var NanoGPTDefaultAllowFail = []string{
+	FactorNonceMatch,
+	FactorTEEMeasurement,
+	FactorTEEHardwareConfig,
+	FactorTEEBootConfig,
+	FactorResponseSchema,
+	FactorTEEReportData,
+	FactorNvidiaSignature,
+	FactorNvidiaClientNonce,
+	FactorNvidiaNRAS,
+	FactorE2EEUsable,
+	FactorTLSKeyBinding,
+	FactorCPUGPUChain,
+	FactorMeasuredWeights,
+	FactorComponentRecognition,
+	FactorCPUIDRegistry,
+	FactorComposeBinding,
+	FactorSigstoreVerify,
+	FactorEventLogIntegrity,
+}
+
 // ChutesDefaultAllowFail is the chutes-specific default allow_fail list.
 // Chutes runs sek8s inside Intel TDX VMs and supports NVIDIA GPU attestation.
 // Core TDX quote integrity (structure, cert chain, signature, debug mode,
