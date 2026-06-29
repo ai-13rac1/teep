@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,8 +49,8 @@ func loadFixture(t *testing.T, prefix string) fixtureEnv {
 	return fixtureEnv{manifest: manifest, entries: entries, client: client, nonce: nonce}
 }
 
-// findFixtureDir returns the lexicographically latest testdata directory
-// matching the given provider prefix (e.g. "venice", "neardirect", "nearcloud").
+// findFixtureDir returns the newest captured testdata directory matching the
+// given provider prefix (e.g. "venice", "neardirect", "nearcloud").
 func findFixtureDir(t *testing.T, prefix string) string {
 	t.Helper()
 	entries, err := os.ReadDir("testdata")
@@ -57,11 +58,19 @@ func findFixtureDir(t *testing.T, prefix string) string {
 		t.Fatalf("read testdata: %v", err)
 	}
 	var latest string
+	var latestCapturedAt time.Time
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), prefix+"_") {
-			if e.Name() > latest {
-				latest = e.Name()
-			}
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix+"_") {
+			continue
+		}
+		dir := filepath.Join("testdata", e.Name())
+		manifest, _, err := capture.Load(dir)
+		if err != nil {
+			t.Fatalf("load fixture manifest %s: %v", dir, err)
+		}
+		if latest == "" || manifest.CapturedAt.After(latestCapturedAt) {
+			latest = e.Name()
+			latestCapturedAt = manifest.CapturedAt
 		}
 	}
 	if latest == "" {
@@ -72,6 +81,27 @@ func findFixtureDir(t *testing.T, prefix string) string {
 
 func serveAllowFail(providerName string) []string {
 	return config.MergedAllowFail(providerName, &config.Config{}, false)
+}
+
+func fixtureE2EEResult(o *capture.E2EEOutcome) *attestation.E2EETestResult {
+	if o == nil {
+		return nil
+	}
+	result := &attestation.E2EETestResult{
+		Attempted: o.Attempted,
+		NoAPIKey:  o.NoAPIKey,
+		APIKeyEnv: o.APIKeyEnv,
+		Detail:    o.Detail,
+		KeyType:   o.KeyType,
+	}
+	if o.Failed {
+		msg := o.ErrMsg
+		if msg == "" {
+			msg = "(error message lost across capture boundary)"
+		}
+		result.Err = errors.New(msg)
+	}
+	return result
 }
 
 // --- Assertion helpers ---

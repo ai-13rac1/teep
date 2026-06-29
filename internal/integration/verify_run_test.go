@@ -36,6 +36,7 @@ func TestVerifyRun_Venice_Fixture(t *testing.T) {
 		Offline:      false,
 		Client:       env.client,
 		Nonce:        env.nonce,
+		CapturedE2EE: fixtureE2EEResult(env.manifest.E2EE),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -65,6 +66,7 @@ func TestVerifyRun_NearDirect_Fixture(t *testing.T) {
 		Offline:      false,
 		Client:       env.client,
 		Nonce:        env.nonce,
+		CapturedE2EE: fixtureE2EEResult(env.manifest.E2EE),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -125,6 +127,7 @@ func TestVerifyRun_WithCapture_Venice(t *testing.T) {
 		Client:       env.client,
 		Nonce:        env.nonce,
 		CaptureDir:   captureDir,
+		CapturedE2EE: fixtureE2EEResult(env.manifest.E2EE),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run with capture: %v", err)
@@ -160,6 +163,7 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 		Offline:      false,
 		Client:       env.client,
 		Nonce:        env.nonce,
+		CapturedE2EE: fixtureE2EEResult(env.manifest.E2EE),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -206,6 +210,7 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		Offline:      false,
 		Client:       env.client,
 		Nonce:        env.nonce,
+		CapturedE2EE: fixtureE2EEResult(env.manifest.E2EE),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -213,11 +218,8 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 	logReportScore(t, report)
 	assertNoEnforcedFailures(t, report)
 
-	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
-	// GPU evidence captured. The fixture predates github-proxy.tinfoil.sh
-	// capture entries, so component identity is recognized but enforced
-	// Sigstore transparency/signature factors fail closed on missing replay
-	// evidence.
+	// Tinfoil direct fixture is TDX with Intel PCS collateral, NVIDIA GPU
+	// evidence, and Tinfoil Sigstore supply-chain evidence captured.
 	assertMustPass(t, report, []string{
 		"nonce_match",
 		"tee_quote_present",
@@ -226,27 +228,27 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		"tee_quote_signature",
 		"tee_debug_disabled",
 		"tee_measurement",
+		"tee_boot_config",
 		"tee_reportdata_binding",
 		"tee_tcb_current",
 		"tee_tcb_not_revoked",
 		"signing_key_present",
 		"e2ee_capable",
+		"e2ee_usable",
 		"tls_key_binding",
 		"nvidia_payload_present",
 		"nvidia_signature",
 		"nvidia_claims",
 		"cpu_gpu_chain",
-		"component_recognition",
-	})
-	assertMustFail(t, report, []string{
+		"measured_model_weights",
 		"build_transparency_log",
+		"component_recognition",
 		"provider_signer_recognition",
 		"component_signature_recognition",
 		"sigstore_code_verified",
-		"measured_model_weights",
-	}, "missing Tinfoil Sigstore replay evidence")
+	})
 
-	if report.Passed < 18 {
-		t.Errorf("expected at least 18 passing factors, got %d", report.Passed)
+	if report.Passed < 24 {
+		t.Errorf("expected at least 24 passing factors, got %d", report.Passed)
 	}
 }

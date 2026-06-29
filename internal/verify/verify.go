@@ -140,7 +140,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	mergedPolicy := config.MergedMeasurementPolicy(opts.ProviderName, cfg, mDefaults)
 	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(opts.ProviderName, cfg, gwDefaults)
 
-	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, opts.Client)
+	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, client)
 
 	report = attestation.BuildReport(&attestation.ReportInput{
 		Provider:               opts.ProviderName,
