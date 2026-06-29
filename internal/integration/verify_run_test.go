@@ -41,6 +41,7 @@ func TestVerifyRun_Venice_Fixture(t *testing.T) {
 		t.Fatalf("verify.Run: %v", err)
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present", "signing_key_present"})
 
@@ -69,6 +70,7 @@ func TestVerifyRun_NearDirect_Fixture(t *testing.T) {
 		t.Fatalf("verify.Run: %v", err)
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 
@@ -102,6 +104,7 @@ func TestVerifyReplay_Venice_Fixture(t *testing.T) {
 		t.Error("expected non-empty report text")
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 }
@@ -130,6 +133,7 @@ func TestVerifyRun_WithCapture_Venice(t *testing.T) {
 		t.Fatal("expected non-nil report")
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	dirs, readErr := os.ReadDir(captureDir)
 	if readErr != nil {
@@ -161,6 +165,7 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 		t.Fatalf("verify.Run: %v", err)
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	// Tinfoil fixture is SEV-SNP with AMD KDS responses captured.
 	// verify.Run uses online SEV verifier; replay client serves KDS certs.
@@ -206,6 +211,7 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		t.Fatalf("verify.Run: %v", err)
 	}
 	logReportScore(t, report)
+	assertNoEnforcedFailures(t, report)
 
 	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
 	// GPU evidence captured. The fixture predates github-proxy.tinfoil.sh

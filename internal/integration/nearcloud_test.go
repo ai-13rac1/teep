@@ -213,6 +213,5 @@ func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport)
 	if report.Passed < 20 {
 		t.Errorf("expected at least 20 passing factors (model + gateway), got %d", report.Passed)
 	}
-	logReportScore(t, report)
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }

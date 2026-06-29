@@ -185,6 +185,26 @@ func logReportScore(t *testing.T, report *attestation.VerificationReport) {
 	t.Logf(msg, args...)
 }
 
+func logReportResult(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	logReportScore(t, report)
+	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	assertNoEnforcedFailures(t, report)
+}
+
+func assertNoEnforcedFailures(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	blocked := report.BlockedFactors()
+	if len(blocked) == 0 {
+		return
+	}
+	for _, f := range blocked {
+		t.Errorf("enforced factor failed: %s: %s", f.Name, f.Detail)
+	}
+}
+
 func logReportFactors(t *testing.T, report *attestation.VerificationReport) {
 	t.Helper()
 	for _, f := range report.Factors {

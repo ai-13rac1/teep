@@ -163,6 +163,5 @@ func assertNeardirectReport(t *testing.T, report *attestation.VerificationReport
 	if report.Passed < 10 {
 		t.Errorf("expected at least 10 passing factors, got %d", report.Passed)
 	}
-	logReportScore(t, report)
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }

@@ -160,8 +160,7 @@ func TestIntegration_TinfoilDirect_Fixture(t *testing.T) {
 	if report.Passed < 11 {
 		t.Errorf("expected at least 11 passing factors, got %d", report.Passed)
 	}
-	logReportScore(t, report)
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }
 
 func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
@@ -236,6 +235,5 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 	if report.Passed < 14 {
 		t.Errorf("expected at least 14 passing factors, got %d", report.Passed)
 	}
-	logReportScore(t, report)
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }

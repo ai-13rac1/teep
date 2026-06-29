@@ -140,6 +140,19 @@ func logReportScore(t *testing.T, report *attestation.VerificationReport) {
 		args = append(args, report.NotApplicableCount)
 	}
 	t.Logf(msg, args...)
+	assertNoEnforcedFailures(t, report)
+}
+
+func assertNoEnforcedFailures(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	blocked := report.BlockedFactors()
+	if len(blocked) == 0 {
+		return
+	}
+	for _, f := range blocked {
+		t.Errorf("enforced factor failed: %s: %s", f.Name, f.Detail)
+	}
 }
 
 func logReportFactor(t *testing.T, f attestation.FactorResult) {
