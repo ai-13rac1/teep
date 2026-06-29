@@ -108,7 +108,7 @@ func logFactorStatus(t *testing.T, r *attestation.VerificationReport, names ...s
 	t.Helper()
 	for _, name := range names {
 		f := findFactor(t, r, name)
-		t.Logf("%s: %s (%s)", name, f.Status, f.Detail)
+		t.Logf("%s: %s (%s)%s", name, f.Status, f.Detail, factorPolicySuffix(f))
 	}
 }
 
@@ -167,6 +167,47 @@ func assertRekorExercised(t *testing.T, sigstore []attestation.SigstoreResult, r
 
 func total(r *attestation.VerificationReport) int {
 	return r.Passed + r.Failed + r.Skipped
+}
+
+func logReportScore(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	msg := "Score: %d/%d passed, %d skipped, %d failed"
+	args := []any{report.Passed, total(report), report.Skipped, report.Failed}
+	if report.Failed > 0 {
+		msg += " (%d enforced, %d allowed)"
+		args = append(args, report.EnforcedFailed, report.AllowedFailed)
+	}
+	if report.NotApplicableCount > 0 {
+		msg += ", %d n/a"
+		args = append(args, report.NotApplicableCount)
+	}
+	t.Logf(msg, args...)
+}
+
+func logReportFactors(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+	for _, f := range report.Factors {
+		t.Logf("  [%s] %s: %s%s", f.Status, f.Name, f.Detail, factorPolicySuffix(f))
+	}
+}
+
+func factorPolicySuffix(f attestation.FactorResult) string {
+	tag := factorPolicyTag(f)
+	if tag == "" {
+		return ""
+	}
+	return "  " + tag
+}
+
+func factorPolicyTag(f attestation.FactorResult) string {
+	if f.Status == attestation.NotApplicable {
+		return ""
+	}
+	if f.Enforced {
+		return "[ENFORCED]"
+	}
+	return "[ALLOWED]"
 }
 
 func findFactor(t *testing.T, report *attestation.VerificationReport, name string) attestation.FactorResult {

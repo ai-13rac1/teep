@@ -40,9 +40,7 @@ func TestVerifyRun_Venice_Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
 	}
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
-		report.Passed, report.Passed+report.Failed+report.Skipped,
-		report.Passed, report.Failed, report.Skipped)
+	logReportScore(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present", "signing_key_present"})
 
@@ -70,9 +68,7 @@ func TestVerifyRun_NearDirect_Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
 	}
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
-		report.Passed, report.Passed+report.Failed+report.Skipped,
-		report.Passed, report.Failed, report.Skipped)
+	logReportScore(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 
@@ -105,7 +101,7 @@ func TestVerifyReplay_Venice_Fixture(t *testing.T) {
 	if reportText == "" {
 		t.Error("expected non-empty report text")
 	}
-	t.Logf("Score: %d/%d", report.Passed, report.Passed+report.Failed+report.Skipped)
+	logReportScore(t, report)
 
 	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present"})
 }
@@ -133,7 +129,7 @@ func TestVerifyRun_WithCapture_Venice(t *testing.T) {
 	if report == nil {
 		t.Fatal("expected non-nil report")
 	}
-	t.Logf("Score: %d/%d", report.Passed, report.Passed+report.Failed+report.Skipped)
+	logReportScore(t, report)
 
 	dirs, readErr := os.ReadDir(captureDir)
 	if readErr != nil {
@@ -164,9 +160,7 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
 	}
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
-		report.Passed, report.Passed+report.Failed+report.Skipped,
-		report.Passed, report.Failed, report.Skipped)
+	logReportScore(t, report)
 
 	// Tinfoil fixture is SEV-SNP with AMD KDS responses captured.
 	// verify.Run uses online SEV verifier; replay client serves KDS certs.
@@ -211,9 +205,7 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
 	}
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)",
-		report.Passed, report.Passed+report.Failed+report.Skipped,
-		report.Passed, report.Failed, report.Skipped)
+	logReportScore(t, report)
 
 	// Tinfoil direct fixture is TDX with Intel PCS collateral and NVIDIA
 	// GPU evidence captured. The fixture predates github-proxy.tinfoil.sh

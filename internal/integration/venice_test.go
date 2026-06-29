@@ -110,10 +110,7 @@ func TestIntegration_Venice_Fixture(t *testing.T) {
 		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	assertVeniceReport(t, report)
 }
@@ -146,5 +143,6 @@ func assertVeniceReport(t *testing.T, report *attestation.VerificationReport) {
 	if report.Passed < 10 {
 		t.Errorf("expected at least 10 passing factors, got %d", report.Passed)
 	}
+	logReportScore(t, report)
 	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
 }

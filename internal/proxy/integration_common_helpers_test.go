@@ -125,6 +125,46 @@ func findFactor(factors []attestation.FactorResult, name string) (attestation.Fa
 	return attestation.FactorResult{}, false
 }
 
+func logReportScore(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	total := report.Passed + report.Failed + report.Skipped
+	msg := "score: %d/%d passed, %d skipped, %d failed"
+	args := []any{report.Passed, total, report.Skipped, report.Failed}
+	if report.Failed > 0 {
+		msg += " (%d enforced, %d allowed)"
+		args = append(args, report.EnforcedFailed, report.AllowedFailed)
+	}
+	if report.NotApplicableCount > 0 {
+		msg += ", %d n/a"
+		args = append(args, report.NotApplicableCount)
+	}
+	t.Logf(msg, args...)
+}
+
+func logReportFactor(t *testing.T, f attestation.FactorResult) {
+	t.Helper()
+	t.Logf("  %s %s: %s%s", f.Status, f.Name, f.Detail, factorPolicySuffix(f))
+}
+
+func factorPolicySuffix(f attestation.FactorResult) string {
+	tag := factorPolicyTag(f)
+	if tag == "" {
+		return ""
+	}
+	return "  " + tag
+}
+
+func factorPolicyTag(f attestation.FactorResult) string {
+	if f.Status == attestation.NotApplicable {
+		return ""
+	}
+	if f.Enforced {
+		return "[ENFORCED]"
+	}
+	return "[ALLOWED]"
+}
+
 func TestIntegrationConfigsUseServeAllowFailPolicy(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -160,10 +160,7 @@ func TestIntegration_NearCloud_Fixture(t *testing.T) {
 		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	assertNearcloudReport(t, report)
 }
@@ -216,5 +213,6 @@ func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport)
 	if report.Passed < 20 {
 		t.Errorf("expected at least 20 passing factors (model + gateway), got %d", report.Passed)
 	}
+	logReportScore(t, report)
 	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
 }

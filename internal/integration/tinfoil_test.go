@@ -62,10 +62,7 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 		ProviderUsesTLSBinding: true,
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	assertTinfoilReport(t, report)
 }
@@ -140,10 +137,7 @@ func TestIntegration_TinfoilDirect_Fixture(t *testing.T) {
 		ProviderUsesTLSBinding: true,
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	// Direct fixture uses a real TDX inference enclave with GPU evidence.
 	// This lower-level test verifies TDX quote, REPORTDATA binding (with
@@ -166,6 +160,7 @@ func TestIntegration_TinfoilDirect_Fixture(t *testing.T) {
 	if report.Passed < 11 {
 		t.Errorf("expected at least 11 passing factors, got %d", report.Passed)
 	}
+	logReportScore(t, report)
 	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
 }
 
@@ -241,5 +236,6 @@ func assertTinfoilReport(t *testing.T, report *attestation.VerificationReport) {
 	if report.Passed < 14 {
 		t.Errorf("expected at least 14 passing factors, got %d", report.Passed)
 	}
+	logReportScore(t, report)
 	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
 }
