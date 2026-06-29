@@ -2,14 +2,12 @@ package proxy
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -58,8 +56,9 @@ type dashFactor struct {
 type dashTier struct {
 	Name   string `json:"name"`
 	Passed int    `json:"passed"`
-	Failed int    `json:"failed"`
-	Total  int    `json:"total"` // excludes N/A factors (not part of the score)
+	Failed int    `json:"failed"` // enforced failures (red)
+	Warned int    `json:"warned"` // allowed failures (yellow)
+	Total  int    `json:"total"`  // excludes N/A factors (not part of the score)
 }
 
 // dashFactorStatus maps an attestation.Status to the short lowercase token the
@@ -252,13 +251,13 @@ func (s *Server) buildDashboardData() dashboardData {
 				continue // N/A factors are not part of the score denominator
 			}
 			tiers[idx].Total++
-			switch f.Status {
-			case attestation.Pass:
+			switch {
+			case f.Status == attestation.Pass:
 				tiers[idx].Passed++
-			case attestation.Fail:
+			case f.Status == attestation.Fail && f.Enforced:
 				tiers[idx].Failed++
-			case attestation.Skip, attestation.NotApplicable:
-				// Skip and N/A don't count toward passed or failed.
+			case f.Status == attestation.Fail:
+				tiers[idx].Warned++
 			}
 		}
 
@@ -418,6 +417,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "teep_uptime_seconds %g\n", time.Since(s.stats.startTime).Seconds())
 }
 
+// dashboardTemplateData is the context passed to the "dashboard" template.
+type dashboardTemplateData struct {
+	InitialJSON template.JS
+}
+
 // handleIndex serves the live attestation dashboard at /.
 // The page is fully self-contained — no external fonts, scripts, or network
 // requests — so it works on an air-gapped loopback proxy. Initial data is
@@ -430,14 +434,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := strings.Replace(dashboardPage, "__INITIAL__", string(initial), 1)
-	if _, err := io.WriteString(w, page); err != nil {
+	data := dashboardTemplateData{InitialJSON: template.JS(initial)} //nolint:gosec // G203: initial is server-generated JSON from json.Marshal, not user input
+	if err := templates.ExecuteTemplate(w, "dashboard", data); err != nil {
 		slog.ErrorContext(r.Context(), "write dashboard", "err", err)
 	}
 }
-
-// dashboardPage is the complete self-contained dashboard. The single token
-// __INITIAL__ is replaced with the first data snapshot at request time.
-//
-//go:embed dashboard.html
-var dashboardPage string

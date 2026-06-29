@@ -9,11 +9,11 @@ import (
 	"golang.org/x/net/html"
 )
 
-func TestHandleTestPage_Status(t *testing.T) {
+func TestHandleExplorePage_Status(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/explore", http.NoBody)
 	rec := httptest.NewRecorder()
-	s.handleTestPage(rec, req)
+	s.handleExplorePage(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -23,54 +23,54 @@ func TestHandleTestPage_Status(t *testing.T) {
 	}
 }
 
-func TestHandleTestPage_ValidHTML(t *testing.T) {
+func TestHandleExplorePage_ValidHTML(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/test", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/explore", http.NoBody)
 	rec := httptest.NewRecorder()
-	s.handleTestPage(rec, req)
+	s.handleExplorePage(rec, req)
 
 	body := rec.Body.String()
 	if _, err := html.Parse(strings.NewReader(body)); err != nil {
 		t.Fatalf("HTML parse error: %v", err)
 	}
 	if !strings.Contains(body, "teep") {
-		t.Error("testing page missing 'teep' text")
+		t.Error("explore page missing 'teep' text")
 	}
 	if !strings.Contains(body, "/v1/models") {
-		t.Error("testing page missing /v1/models fetch")
+		t.Error("explore page missing /v1/models fetch")
 	}
 }
 
-func TestHandleTestAttest_InvalidJSON(t *testing.T) {
+func TestHandleExploreAttest_InvalidJSON(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/test/attest", strings.NewReader("{bad"))
+	req := httptest.NewRequest(http.MethodPost, "/explore/attest", strings.NewReader("{bad"))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.handleTestAttest(rec, req)
+	s.handleExploreAttest(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
-func TestHandleTestAttest_EmptyModel(t *testing.T) {
+func TestHandleExploreAttest_EmptyModel(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/test/attest", strings.NewReader(`{"model":""}`))
+	req := httptest.NewRequest(http.MethodPost, "/explore/attest", strings.NewReader(`{"model":""}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.handleTestAttest(rec, req)
+	s.handleExploreAttest(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
-func TestHandleTestAttest_UnknownProvider(t *testing.T) {
+func TestHandleExploreAttest_UnknownProvider(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/test/attest", strings.NewReader(`{"model":"nope:model"}`))
+	req := httptest.NewRequest(http.MethodPost, "/explore/attest", strings.NewReader(`{"model":"nope:model"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.handleTestAttest(rec, req)
+	s.handleExploreAttest(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -80,24 +80,24 @@ func TestHandleTestAttest_UnknownProvider(t *testing.T) {
 	}
 }
 
-func TestHandleTestInfer_InvalidJSON(t *testing.T) {
+func TestHandleExploreInfer_InvalidJSON(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/test/infer", strings.NewReader("{bad"))
+	req := httptest.NewRequest(http.MethodPost, "/explore/infer", strings.NewReader("{bad"))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.handleTestInfer(rec, req)
+	s.handleExploreInfer(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
-func TestHandleTestInfer_UnknownProvider(t *testing.T) {
+func TestHandleExploreInfer_UnknownProvider(t *testing.T) {
 	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/test/infer", strings.NewReader(`{"model":"nope:model"}`))
+	req := httptest.NewRequest(http.MethodPost, "/explore/infer", strings.NewReader(`{"model":"nope:model"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.handleTestInfer(rec, req)
+	s.handleExploreInfer(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)

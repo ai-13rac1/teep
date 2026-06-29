@@ -3,13 +3,14 @@ package proxy
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,16 +18,13 @@ import (
 	"github.com/13rac1/teep/internal/reqid"
 )
 
-//go:embed testing.html
-var testingPage string
-
-// testRequest is the JSON body for POST /test/attest and POST /test/infer.
-type testRequest struct {
+// exploreRequest is the JSON body for POST /explore/attest and POST /explore/infer.
+type exploreRequest struct {
 	Model string `json:"model"`
 }
 
-// testInferResponse is the JSON response for POST /test/infer.
-type testInferResponse struct {
+// exploreInferResponse is the JSON response for POST /explore/infer.
+type exploreInferResponse struct {
 	Model     string                          `json:"model"`
 	Response  string                          `json:"response"`
 	E2EE      bool                            `json:"e2ee"`
@@ -36,16 +34,49 @@ type testInferResponse struct {
 	Error     string                          `json:"error,omitempty"`
 }
 
-// handleTestPage serves the interactive testing page at GET /test.
-func (s *Server) handleTestPage(w http.ResponseWriter, _ *http.Request) {
+// exploreProviderInfo is the per-provider metadata injected into the explore template.
+type exploreProviderInfo struct {
+	Name   string `json:"name"`
+	Pinned bool   `json:"pinned"`
+	E2EE   bool   `json:"e2ee"`
+}
+
+// exploreTemplateData is the template data for the explore page.
+type exploreTemplateData struct {
+	ProvidersJSON template.JS
+}
+
+// handleExplorePage serves the interactive explore page at GET /explore.
+func (s *Server) handleExplorePage(w http.ResponseWriter, r *http.Request) {
+	infos := make([]exploreProviderInfo, 0, len(s.providers))
+	for _, p := range s.providers {
+		infos = append(infos, exploreProviderInfo{
+			Name:   p.Name,
+			Pinned: p.PinnedHandler != nil,
+			E2EE:   p.E2EE,
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+
+	raw, err := json.Marshal(infos)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "marshal provider info", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	data := exploreTemplateData{
+		ProvidersJSON: template.JS(raw), //nolint:gosec // G203: raw is server-generated JSON from json.Marshal, not user input
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if _, err := io.WriteString(w, testingPage); err != nil {
-		slog.Error("write testing page", "err", err)
+	if err := templates.ExecuteTemplate(w, "explore", data); err != nil {
+		slog.ErrorContext(r.Context(), "write explore page", "err", err)
 	}
 }
 
-// handleTestAttest triggers attestation for a model and returns the report.
-func (s *Server) handleTestAttest(w http.ResponseWriter, r *http.Request) {
+// handleExploreAttest triggers attestation for a model and returns the report.
+func (s *Server) handleExploreAttest(w http.ResponseWriter, r *http.Request) {
 	ctx := reqid.WithID(r.Context(), reqid.New())
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
@@ -53,7 +84,7 @@ func (s *Server) handleTestAttest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
-	var req testRequest
+	var req exploreRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
@@ -79,14 +110,15 @@ func (s *Server) handleTestAttest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// testInferPrompt is the hardcoded prompt for inference tests.
-const testInferPrompt = "Say hello in one word."
+const (
+	// exploreInferPrompt is the hardcoded prompt for inference tests.
+	exploreInferPrompt = "Say hello in one word."
+	// exploreInferMaxTokens is the max tokens for inference tests.
+	exploreInferMaxTokens = 16
+)
 
-// testInferMaxTokens is the max tokens for inference tests.
-const testInferMaxTokens = 16
-
-// handleTestInfer sends a test inference through the proxy's own handler.
-func (s *Server) handleTestInfer(w http.ResponseWriter, r *http.Request) {
+// handleExploreInfer sends a test inference through the proxy's own handler.
+func (s *Server) handleExploreInfer(w http.ResponseWriter, r *http.Request) {
 	ctx := reqid.WithID(r.Context(), reqid.New())
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
@@ -94,7 +126,7 @@ func (s *Server) handleTestInfer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
-	var req testRequest
+	var req exploreRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
@@ -107,9 +139,9 @@ func (s *Server) handleTestInfer(w http.ResponseWriter, r *http.Request) {
 
 	chatReq := map[string]any{
 		"model":      req.Model,
-		"max_tokens": testInferMaxTokens,
+		"max_tokens": exploreInferMaxTokens,
 		"messages": []map[string]string{
-			{"role": "user", "content": testInferPrompt},
+			{"role": "user", "content": exploreInferPrompt},
 		},
 	}
 	chatBody, err := json.Marshal(chatReq)
@@ -130,10 +162,10 @@ func (s *Server) handleTestInfer(w http.ResponseWriter, r *http.Request) {
 
 // loopbackInfer sends a chat completion request through the proxy's own
 // ServeHTTP, returning the parsed response or error details.
-func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) testInferResponse {
+func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) exploreInferResponse {
 	inner, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return testInferResponse{Model: model, Error: fmt.Sprintf("build request: %v", err)}
+		return exploreInferResponse{Model: model, Error: fmt.Sprintf("build request: %v", err)}
 	}
 	inner.Header.Set("Content-Type", "application/json")
 
@@ -148,14 +180,14 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) t
 		// Try to parse as a verification report (502 blocked response).
 		var report attestation.VerificationReport
 		if err := json.Unmarshal(respBody, &report); err == nil && report.Provider != "" {
-			return testInferResponse{
+			return exploreInferResponse{
 				Model:   model,
 				Blocked: true,
 				Report:  &report,
 				Error:   fmt.Sprintf("attestation blocked (HTTP %d)", result.StatusCode),
 			}
 		}
-		return testInferResponse{
+		return exploreInferResponse{
 			Model: model,
 			Error: fmt.Sprintf("HTTP %d: %s", result.StatusCode, bytes.TrimSpace(respBody)),
 		}
@@ -170,7 +202,7 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) t
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return testInferResponse{
+		return exploreInferResponse{
 			Model: model,
 			Error: fmt.Sprintf("failed to parse response: %v", err),
 		}
@@ -189,7 +221,7 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) t
 		e2ee = provOK && prov.E2EE && report.ReportDataBindingPassed()
 	}
 
-	return testInferResponse{
+	return exploreInferResponse{
 		Model:    model,
 		Response: responseText,
 		E2EE:     e2ee,
