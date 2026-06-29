@@ -328,6 +328,38 @@ var factorRegistry = []factorInfo{
 			"matches a specific audited source revision.",
 	},
 	{
+		Name:    attestation.FactorComponentRecognition,
+		Tier:    3,
+		Summary: "Component recognized for provider",
+		Description: "Checks whether attested supply-chain components are known " +
+			"for this provider and role. For compose-based providers, " +
+			"components are container image repositories and model/gateway " +
+			"tier membership. For Tinfoil, components are Sigstore-backed " +
+			"deployment repositories such as the router, per-model repo, " +
+			"or hardware-measurements repo. This factor is allowed to fail " +
+			"by default so repo renames and inventory drift are visible " +
+			"without weakening signature enforcement.",
+	},
+	{
+		Name:    attestation.FactorProviderSigner,
+		Tier:    3,
+		Summary: "Provider-wide signer recognized",
+		Description: "Checks whether each signed supply-chain component was " +
+			"signed by a signer trusted provider-wide. Provider-wide signers " +
+			"may include first-party provider builders and explicitly " +
+			"approved third-party signers. Unconstrained Sigstore presence " +
+			"does not satisfy this factor.",
+	},
+	{
+		Name:    attestation.FactorComponentSignature,
+		Tier:    3,
+		Summary: "Component signature policy matched",
+		Description: "Checks whether each signed supply-chain component matches " +
+			"its component-specific signature policy, such as a Fulcio OIDC " +
+			"issuer, workflow identity, source repository, key fingerprint, " +
+			"or Tinfoil Sigstore DSSE repository policy.",
+	},
+	{
 		Name:    attestation.FactorCPUIDRegistry,
 		Tier:    3,
 		Summary: "CPU ID verified against Proof of Cloud",
@@ -354,12 +386,12 @@ var factorRegistry = []factorInfo{
 	{
 		Name:    attestation.FactorSigstoreVerify,
 		Tier:    3,
-		Summary: "Container images in Sigstore transparency log",
-		Description: "Extracts container image sha256 digests from the docker-compose " +
+		Summary: "Components in Sigstore transparency log",
+		Description: "Extracts component sha256 digests from the docker-compose " +
 			"manifest inside app_compose and checks each against the Sigstore " +
 			"transparency log (search.sigstore.dev). Sigstore entries prove " +
-			"the images were built through a verifiable CI/CD pipeline with " +
-			"signed provenance. Skipped when no image digests are found.",
+			"the components were built through a verifiable CI/CD pipeline with " +
+			"signed provenance. Skipped when no component digests are found.",
 	},
 	{
 		Name:    attestation.FactorSigstoreCode,

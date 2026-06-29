@@ -544,6 +544,9 @@ func TestHandlePinnedChat_PinnedHandlerError(t *testing.T) {
 		Name:          "test",
 		E2EE:          false,
 		PinnedHandler: &errorPinnedHandler{err: errors.New("connection refused")},
+		SPKIDomainForModel: func(_ context.Context, _ string) (string, bool) {
+			return "test.example", true
+		},
 	}
 
 	rec := httptest.NewRecorder()
@@ -682,6 +685,9 @@ func TestHandlePinnedNonChat_PinnedHandlerError(t *testing.T) {
 		Name:          "test",
 		E2EE:          false,
 		PinnedHandler: &errorPinnedHandler{err: errors.New("upstream down")},
+		SPKIDomainForModel: func(_ context.Context, _ string) (string, bool) {
+			return "test.example", true
+		},
 	}
 
 	rec := httptest.NewRecorder()

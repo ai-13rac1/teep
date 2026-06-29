@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/multi"
@@ -75,7 +77,15 @@ func verifySEV(ctx context.Context, raw *attestation.RawAttestation, nonce attes
 
 // verifyNVIDIA runs NVIDIA EAT and NRAS verification.
 // Returns nil for either if not applicable.
-func verifyNVIDIA(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, client *http.Client, offline bool, nv *attestation.NVIDIAVerifier) (eat, nras *attestation.NvidiaVerifyResult) {
+func verifyNVIDIA(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	nonce attestation.Nonce,
+	client *http.Client,
+	offline bool,
+	nv *attestation.NVIDIAVerifier,
+	nrasJWTOpts ...jwt.ParserOption,
+) (eat, nras *attestation.NvidiaVerifyResult) {
 	if raw.NvidiaPayload != "" {
 		slog.DebugContext(ctx, "NVIDIA verification starting", "payload_len", len(raw.NvidiaPayload))
 		nvidiaStart := time.Now()
@@ -98,27 +108,38 @@ func verifyNVIDIA(ctx context.Context, raw *attestation.RawAttestation, nonce at
 	if !offline && raw.NvidiaPayload != "" && raw.NvidiaPayload[0] == '{' {
 		slog.DebugContext(ctx, "NVIDIA NRAS verification starting")
 		nrasStart := time.Now()
-		nras = nv.VerifyNRAS(ctx, raw.NvidiaPayload, client)
+		nras = nv.VerifyNRAS(ctx, raw.NvidiaPayload, client, nrasJWTOpts...)
 		slog.DebugContext(ctx, "NVIDIA NRAS verification complete", "elapsed", time.Since(nrasStart))
 	} else if !offline && len(raw.GPUEvidence) > 0 {
 		eatJSON := attestation.GPUEvidenceToEAT(raw.GPUEvidence, raw.Nonce)
 		slog.DebugContext(ctx, "NVIDIA NRAS verification starting (synthesized EAT)")
 		nrasStart := time.Now()
-		nras = nv.VerifyNRAS(ctx, eatJSON, client)
+		nras = nv.VerifyNRAS(ctx, eatJSON, client, nrasJWTOpts...)
 		slog.DebugContext(ctx, "NVIDIA NRAS verification complete (synthesized EAT)", "elapsed", time.Since(nrasStart))
 	}
 	return eat, nras
 }
 
+func nrasJWTParserOptions(verificationTime time.Time) []jwt.ParserOption {
+	if verificationTime.IsZero() {
+		return nil
+	}
+	return []jwt.ParserOption{
+		jwt.WithTimeFunc(func() time.Time { return verificationTime }),
+		jwt.WithLeeway(10 * time.Second),
+	}
+}
+
 // checkPoC runs a Proof of Cloud check for the given intel_quote.
 // Returns nil if offline or quote is empty.
-func checkPoC(ctx context.Context, quote string, client *http.Client, offline bool) *attestation.PoCResult {
+func checkPoC(ctx context.Context, quote string, client *http.Client, offline bool, verificationTime time.Time) *attestation.PoCResult {
 	if offline || quote == "" {
 		return nil
 	}
 	slog.Debug("Proof of Cloud check starting")
 	pocStart := time.Now()
-	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client)
+	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, client).
+		WithVerificationTime(verificationTime)
 	result := poc.CheckQuote(ctx, quote)
 	slog.Debug("Proof of Cloud check complete", "elapsed", time.Since(pocStart),
 		"registered", result != nil && result.Registered)
@@ -129,7 +150,7 @@ func checkPoC(ctx context.Context, quote string, client *http.Client, offline bo
 // providers that populate GatewayIntelQuote (nearcloud).
 func verifyNearcloudGateway(
 	ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce,
-	client *http.Client, offline bool, verifier attestation.TDXVerifier,
+	client *http.Client, offline bool, verifier attestation.TDXVerifier, verificationTime time.Time,
 ) (tdx *attestation.TDXVerifyResult, compose *attestation.ComposeBindingResult, poc *attestation.PoCResult) {
 	if raw.GatewayIntelQuote == "" {
 		return nil, nil, nil
@@ -146,13 +167,20 @@ func verifyNearcloudGateway(
 		compose = &attestation.ComposeBindingResult{Checked: true}
 		compose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, tdx.MRConfigID)
 	}
-	poc = checkPoC(ctx, raw.GatewayIntelQuote, client, offline)
+	poc = checkPoC(ctx, raw.GatewayIntelQuote, client, offline, verificationTime)
 	slog.Debug("gateway TDX verification complete")
 	return tdx, compose, poc
 }
 
 // checkSigstore checks sigstore digests and fetches Rekor provenance for matches.
-func checkSigstore(ctx context.Context, digests []string, client *http.Client, offline bool) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
+func checkSigstore(
+	ctx context.Context,
+	digests []string,
+	digestToRepo map[string]string,
+	scPolicy *attestation.SupplyChainPolicy,
+	client *http.Client,
+	offline bool,
+) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
 	if len(digests) == 0 || offline {
 		return nil, nil
 	}
@@ -178,7 +206,7 @@ func checkSigstore(ctx context.Context, digests []string, client *http.Client, o
 	if len(okDigests) == 0 {
 		return sigstoreResults, nil
 	}
-	rekorResults := rc.FetchRekorProvenances(ctx, okDigests)
+	rekorResults := rc.FetchRekorProvenancesForPolicy(ctx, okDigests, digestToRepo, scPolicy)
 	for i := range rekorResults {
 		prov := &rekorResults[i]
 		d := okDigests[i]
@@ -215,6 +243,7 @@ func verifyTinfoilSupplyChain(
 	providerName, modelName string,
 	policy attestation.MeasurementPolicy,
 	offline bool,
+	client *http.Client,
 ) *attestation.TinfoilSupplyChainResult {
 	if raw.BackendFormat != attestation.FormatTinfoil {
 		return nil
@@ -228,11 +257,13 @@ func verifyTinfoilSupplyChain(
 		sigstoreRepo = tinfoil.RepoForProvider(providerName, modelName)
 	}
 	if sigstoreRepo == "" {
-		return nil
+		return &attestation.TinfoilSupplyChainResult{
+			SigstoreErr: fmt.Errorf("no Tinfoil Sigstore repo for provider %q model %q", providerName, modelName),
+		}
 	}
 	slog.Debug("Tinfoil supply chain verification starting", "repo", sigstoreRepo)
 	start := time.Now()
-	result := &attestation.TinfoilSupplyChainResult{}
+	result := &attestation.TinfoilSupplyChainResult{ComponentRepos: []string{sigstoreRepo}}
 
 	// Check GPU hash bound from REPORTDATA verification detail.
 	bindingDetail := ""
@@ -262,15 +293,20 @@ func verifyTinfoilSupplyChain(
 	}
 
 	// Sigstore DSSE bundle verification.
-	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(offline))
+	if client == nil {
+		client = config.NewAttestationClient(offline)
+	}
+	sv := tinfoil.NewSigstoreVerifier(client)
 	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, sigstoreRepo)
 	if err != nil {
 		result.SigstoreErr = err
+		result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: sigstoreRepo, SigstoreErr: err})
 		slog.WarnContext(ctx, "Tinfoil Sigstore verification failed",
 			"repo", sigstoreRepo, "err", err)
 		return result
 	}
 	result.SigstoreVerified = true
+	result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: sigstoreRepo, SigstoreVerified: true})
 	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", sigstoreRepo, predicateType)
 
 	// Parse code measurements from the verified predicate.
@@ -297,13 +333,17 @@ func verifyTinfoilSupplyChain(
 		}
 
 		// Hardware measurement match (TDX only).
+		result.ComponentRepos = append(result.ComponentRepos, "tinfoilsh/hardware-measurements")
 		hwPredBytes, hwPredType, hwErr := sv.FetchAndVerify(ctx, "tinfoilsh/hardware-measurements")
 		switch {
 		case hwErr != nil:
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: hwErr})
 			result.HWMatchErr = fmt.Errorf("fetch hardware measurements: %w", hwErr)
 		case hwPredType != tinfoil.PredicateHardwareMeasurements:
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: fmt.Errorf("unexpected hardware predicate type %q", hwPredType)})
 			result.HWMatchErr = fmt.Errorf("unexpected hardware predicate type %q", hwPredType)
 		default:
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreVerified: true})
 			entries, parseErr := tinfoil.ParseHardwareMeasurements(hwPredBytes)
 			if parseErr != nil {
 				result.HWMatchErr = fmt.Errorf("parse hardware measurements: %w", parseErr)

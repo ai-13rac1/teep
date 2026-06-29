@@ -182,6 +182,55 @@ func TestFormatReport_FactorNamesPresent(t *testing.T) {
 	}
 }
 
+func TestFormatReport_LongFactorDetailsAlign(t *testing.T) {
+	r := &attestation.VerificationReport{
+		Provider:  "tinfoil_v3_direct",
+		Model:     "gemma4-31b",
+		Timestamp: time.Now(),
+		Factors: []attestation.FactorResult{
+			{
+				Name:     attestation.FactorProviderSigner,
+				Status:   attestation.Pass,
+				Detail:   "provider signer accepted",
+				Enforced: true,
+				Tier:     attestation.TierSupplyChain,
+			},
+			{
+				Name:     attestation.FactorComponentSignature,
+				Status:   attestation.Pass,
+				Detail:   "component signature accepted",
+				Enforced: true,
+				Tier:     attestation.TierSupplyChain,
+			},
+		},
+		Passed: 2,
+	}
+	out := FormatReport(r)
+
+	providerLine := reportLineContaining(t, out, attestation.FactorProviderSigner)
+	componentLine := reportLineContaining(t, out, attestation.FactorComponentSignature)
+	providerDetailCol := strings.Index(providerLine, "provider signer accepted")
+	componentDetailCol := strings.Index(componentLine, "component signature accepted")
+	if providerDetailCol < 0 || componentDetailCol < 0 {
+		t.Fatalf("detail missing from formatted lines:\n%s\n%s", providerLine, componentLine)
+	}
+	if providerDetailCol != componentDetailCol {
+		t.Fatalf("detail columns differ: provider=%d component=%d\n%s\n%s",
+			providerDetailCol, componentDetailCol, providerLine, componentLine)
+	}
+}
+
+func reportLineContaining(t *testing.T, report, substr string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(report, "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+	t.Fatalf("line containing %q not found in report:\n%s", substr, report)
+	return ""
+}
+
 func TestFormatReport_EmptyReport(t *testing.T) {
 	r := &attestation.VerificationReport{
 		Provider:  "test",

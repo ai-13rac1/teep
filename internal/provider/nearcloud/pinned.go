@@ -392,7 +392,8 @@ func (h *PinnedHandler) attestOnConn(
 	}
 	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
 
-	sigstoreResults, rekorResults := h.verifySigstore(ctx, allDigests)
+	scPolicy := SupplyChainPolicy()
+	sigstoreResults, rekorResults := h.verifySigstore(ctx, allDigests, digestToRepo, scPolicy)
 
 	allowFail := h.allowFail
 	if h.offline {
@@ -406,7 +407,7 @@ func (h *PinnedHandler) attestOnConn(
 		Nonce:             modelNonce,
 		AllowFail:         allowFail,
 		Policy:            h.policy,
-		SupplyChainPolicy: SupplyChainPolicy(),
+		SupplyChainPolicy: scPolicy,
 		ImageRepos:        modelCD.Repos,
 		GatewayImageRepos: gatewayCD.Repos,
 		DigestToRepo:      digestToRepo,
@@ -425,6 +426,7 @@ func (h *PinnedHandler) attestOnConn(
 		GatewayEventLog:   gwRaw.EventLog,
 		GatewayPolicy:     h.gatewayPolicy,
 		E2EEConfigured:    true,
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 	return report, raw.SigningKey, nil
 }
@@ -524,7 +526,7 @@ func (h *PinnedHandler) verifyGatewayTDX(
 	gatewayTDX := h.verifyQuote(ctx, gwRaw.IntelQuote)
 	if gatewayTDX.ParseErr == nil {
 		detail, rdErr := GatewayReportDataVerifier{}.Verify(
-			gatewayTDX.ReportData, gwRaw.TLSCertFingerprint, nonce)
+			gatewayTDX.ReportData, gwRaw.SigningAddress, gwRaw.TLSCertFingerprint, nonce)
 		gatewayTDX.ReportDataBindingErr = rdErr
 		gatewayTDX.ReportDataBindingDetail = detail
 	}
@@ -543,7 +545,10 @@ func (h *PinnedHandler) checkPoC(ctx context.Context, quote string) *attestation
 
 // verifySigstore checks sigstore digests and fetches Rekor provenance for matches.
 func (h *PinnedHandler) verifySigstore(
-	ctx context.Context, digests []string,
+	ctx context.Context,
+	digests []string,
+	digestToRepo map[string]string,
+	scPolicy *attestation.SupplyChainPolicy,
 ) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
 	if len(digests) == 0 || h.offline || h.rekorClient == nil {
 		return nil, nil
@@ -555,5 +560,5 @@ func (h *PinnedHandler) verifySigstore(
 			okDigests = append(okDigests, sr.Digest)
 		}
 	}
-	return sigstoreResults, h.rekorClient.FetchRekorProvenances(ctx, okDigests)
+	return sigstoreResults, h.rekorClient.FetchRekorProvenancesForPolicy(ctx, okDigests, digestToRepo, scPolicy)
 }

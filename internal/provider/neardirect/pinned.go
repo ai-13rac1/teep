@@ -367,6 +367,7 @@ func (h *PinnedHandler) attestOnConn(
 		Sigstore:          sigstoreResults,
 		Rekor:             rekorResults,
 		E2EEConfigured:    true,
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 	return report, raw.SigningKey, nil
 }
@@ -497,7 +498,7 @@ func (h *PinnedHandler) verifySupplyChain(
 				okDigests = append(okDigests, sr.Digest)
 			}
 		}
-		rekor = h.rekorClient.FetchRekorProvenances(ctx, okDigests)
+		rekor = h.rekorClient.FetchRekorProvenancesForPolicy(ctx, okDigests, digestToRepo, SupplyChainPolicy())
 	}
 
 	return compose, imageRepos, digestToRepo, sigstore, rekor

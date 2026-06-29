@@ -1,6 +1,7 @@
 package attestation_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Sigstore: allowlisted non-Rekor images (uses real supply chain policies)
+// Sigstore: allowlisted non-Rekor components (uses real supply chain policies)
 // ---------------------------------------------------------------------------
 
 func TestEvalSigstoreVerification_AllowlistedNonRekor(t *testing.T) {
@@ -74,14 +75,14 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 
 	t.Run("rejects_image_repo", func(t *testing.T) {
 		raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
-		f := attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
+		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
 			Raw:               raw,
 			SupplyChainPolicy: neardirect.SupplyChainPolicy(),
 			ImageRepos:        []string{"ghcr.io/attacker/router"},
 		}), attestation.Fail)
-		if !strings.Contains(f.Detail, "supply chain policy") {
-			t.Errorf("detail should mention supply chain policy: %s", f.Detail)
+		if !strings.Contains(f.Detail, "not recognized") {
+			t.Errorf("detail should mention component recognition: %s", f.Detail)
 		}
 	})
 
@@ -115,13 +116,13 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 
 	t.Run("rejects_gateway_only_image", func(t *testing.T) {
 		raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
-		f := attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
+		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
 			Raw:               raw,
 			SupplyChainPolicy: nearcloud.SupplyChainPolicy(), // has dstack-vpc-client as gateway-only
 			ImageRepos:        []string{"nearaidev/dstack-vpc-client"},
 		}), attestation.Fail)
-		if !strings.Contains(strings.ToLower(f.Detail), "model container policy") {
+		if !strings.Contains(strings.ToLower(f.Detail), "model component") {
 			t.Errorf("detail should mention model policy rejection: %s", f.Detail)
 		}
 	})
@@ -140,7 +141,7 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			SourceRepo:    "attacker/router",
 			SourceRepoURL: "https://github.com/attacker/router",
 		}}
-		f := attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
+		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
 			Raw:               raw,
 			SupplyChainPolicy: neardirect.SupplyChainPolicy(),
@@ -170,7 +171,7 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			SourceCommit:  "0123456789abcdef",
 			RunnerEnv:     "github-hosted",
 		}}
-		f := attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
+		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
 			Raw:               raw,
 			SupplyChainPolicy: neardirect.SupplyChainPolicy(),
@@ -209,7 +210,7 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 				KeyFingerprint: "0000000000000000000000000000000000000000000000000000000000000000",
 			},
 		}
-		f := attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
+		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
 			Raw:               raw,
 			SupplyChainPolicy: neardirect.SupplyChainPolicy(),
@@ -317,6 +318,191 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			Provider: "unknown",
 			Raw:      raw,
 		}), attestation.Fail)
+	})
+}
+
+func TestSupplyChainComponentRecognitionFactors(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	renamedRepo := "nearaidev/renamed-compose-manager"
+	rekor := []attestation.RekorProvenance{{
+		Digest:        digest,
+		HasCert:       true,
+		SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+		OIDCIssuer:    "https://token.actions.githubusercontent.com",
+		SourceRepo:    "nearai/compose-manager",
+		SourceRepoURL: "https://github.com/nearai/compose-manager",
+		SourceCommit:  "0123456789abcdef",
+		RunnerEnv:     "github-hosted",
+	}}
+	in := &attestation.ReportInput{
+		Provider:          "neardirect",
+		Raw:               raw,
+		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
+		ImageRepos:        []string{renamedRepo},
+		DigestToRepo:      map[string]string{digest: renamedRepo},
+		Rekor:             rekor,
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
+func TestSupplyChainSignatureRecognitionFailsWithoutComponentRepoMapping(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	in := &attestation.ReportInput{
+		Provider:          "neardirect",
+		Raw:               raw,
+		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
+		ImageRepos:        []string{"nearaidev/renamed-compose-manager"},
+		DigestToRepo:      map[string]string{},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:        digest,
+			HasCert:       true,
+			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:    "https://token.actions.githubusercontent.com",
+			SourceRepo:    "nearai/compose-manager",
+			SourceRepoURL: "https://github.com/nearai/compose-manager",
+			SourceCommit:  "0123456789abcdef",
+			RunnerEnv:     "github-hosted",
+		}},
+	}
+
+	for name, factors := range map[string][]attestation.FactorResult{
+		"provider_signer":     attestation.EvalProviderSignerRecognitionForTest(in),
+		"component_signature": attestation.EvalComponentSignatureRecognitionForTest(in),
+	} {
+		f := attestation.AssertSingleFactorForTest(t, factors, attestation.Fail)
+		if !strings.Contains(f.Detail, "no associated component repo name") {
+			t.Fatalf("%s detail should mention missing component repo mapping: %s", name, f.Detail)
+		}
+	}
+}
+
+func TestSupplyChainOpenTelemetrySignerRecognition(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234"
+	const otelKeyFingerprint = "a8bd282038915eaf2ca9ac7d4cc2605ce6e7ae8aed5b19b06370e285f8a9d72e"
+	in := &attestation.ReportInput{
+		Provider:          "neardirect",
+		Raw:               raw,
+		SupplyChainPolicy: neardirect.SupplyChainPolicy(),
+		ImageRepos:        []string{"otel/opentelemetry-collector-contrib"},
+		DigestToRepo:      map[string]string{digest: "otel/opentelemetry-collector-contrib"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:            digest,
+			HasCert:           false,
+			KeyFingerprint:    otelKeyFingerprint,
+			SETVerified:       true,
+			InclusionVerified: true,
+		}},
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+
+	in.Provider = "nearcloud"
+	in.SupplyChainPolicy = nearcloud.SupplyChainPolicy()
+	in.GatewayImageRepos = []string{"otel/opentelemetry-collector-contrib"}
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
+func TestSupplyChainNearcloudAlpineSignerRecognition(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234"
+	in := &attestation.ReportInput{
+		Provider:          "nearcloud",
+		Raw:               raw,
+		SupplyChainPolicy: nearcloud.SupplyChainPolicy(),
+		GatewayImageRepos: []string{"alpine"},
+		DigestToRepo:      map[string]string{digest: "alpine"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:            digest,
+			HasCert:           true,
+			SignatureVerified: true,
+			OIDCIssuer:        neardirect.GithubOIDC,
+			SubjectURI:        "https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
+			SourceRepo:        "docker/github-builder-experimental",
+		}},
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
+func TestSupplyChainComponentRecognitionNanoGPTComposeOnly(t *testing.T) {
+	nonce := attestation.NewNonce()
+	raw := attestation.BuildMinimalRawForTest(nonce, attestation.ValidSigningKeyForTest(t))
+	in := &attestation.ReportInput{
+		Provider:          "nanogpt",
+		Raw:               raw,
+		SupplyChainPolicy: nanogpt.SupplyChainPolicy(),
+		ImageRepos:        []string{"alpine"},
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.NotApplicable)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.NotApplicable)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.NotApplicable)
+}
+
+func TestSupplyChainComponentRecognitionTinfoil(t *testing.T) {
+	sc := &attestation.TinfoilSupplyChainResult{
+		ComponentRepos:   []string{"tinfoilsh/confidential-model-router", "tinfoilsh/hardware-measurements"},
+		SigstoreVerified: true,
+		SigstoreDetail:   "Sigstore DSSE verified for tinfoilsh/confidential-model-router",
+		Components: []attestation.TinfoilComponentResult{
+			{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
+			{Repo: "tinfoilsh/hardware-measurements", SigstoreVerified: true},
+		},
+	}
+	in := &attestation.ReportInput{TinfoilSC: sc}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
+func TestSupplyChainComponentRecognitionTinfoilFailures(t *testing.T) {
+	t.Run("unknown_repo", func(t *testing.T) {
+		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
+			ComponentRepos:   []string{"attacker/confidential-model-router"},
+			SigstoreVerified: true,
+			Components: []attestation.TinfoilComponentResult{
+				{Repo: "attacker/confidential-model-router", SigstoreVerified: true},
+			},
+		}}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("support_component_signature_error", func(t *testing.T) {
+		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
+			ComponentRepos: []string{"tinfoilsh/confidential-model-router", "tinfoilsh/hardware-measurements"},
+			Components: []attestation.TinfoilComponentResult{
+				{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
+				{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: errors.New("fetch failed")},
+			},
+		}}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
 	})
 }
 

@@ -75,6 +75,13 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 	if raw.NvidiaPayload != "" {
 		nvidiaResult = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, env.nonce)
 		t.Logf("NVIDIA EAT: format=%s sig_err=%v claims_err=%v", nvidiaResult.Format, nvidiaResult.SignatureErr, nvidiaResult.ClaimsErr)
+	} else if len(raw.GPUEvidence) > 0 {
+		serverNonce, parseErr := attestation.ParseNonce(raw.GPUVerificationNonce())
+		if parseErr != nil {
+			t.Fatalf("parse GPU verification nonce: %v", parseErr)
+		}
+		nvidiaResult = attestation.VerifyNVIDIAGPUDirect(ctx, raw.GPUEvidence, serverNonce)
+		t.Logf("NVIDIA GPU direct: format=%s sig_err=%v claims_err=%v", nvidiaResult.Format, nvidiaResult.SignatureErr, nvidiaResult.ClaimsErr)
 	}
 
 	// NVIDIA NRAS (time-pinned)
@@ -86,10 +93,19 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 		)
 		t.Logf("NRAS: format=%s sig_err=%v claims_err=%v result=%v",
 			nrasResult.Format, nrasResult.SignatureErr, nrasResult.ClaimsErr, nrasResult.OverallResult)
+	} else if len(raw.GPUEvidence) > 0 {
+		eatJSON := attestation.GPUEvidenceToEAT(raw.GPUEvidence, raw.Nonce)
+		nrasResult = attestation.DefaultNVIDIAVerifier().VerifyNRAS(ctx, eatJSON, env.client,
+			jwt.WithTimeFunc(func() time.Time { return env.manifest.CapturedAt }),
+			jwt.WithLeeway(10*time.Second),
+		)
+		t.Logf("NRAS synthesized EAT: format=%s sig_err=%v claims_err=%v result=%v",
+			nrasResult.Format, nrasResult.SignatureErr, nrasResult.ClaimsErr, nrasResult.OverallResult)
 	}
 
 	// PoC
-	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client)
+	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client).
+		WithVerificationTime(fixtureVerificationTime(&env))
 	pocResult := poc.CheckQuote(ctx, raw.IntelQuote)
 	t.Logf("PoC: registered=%v err=%v", pocResult.Registered, pocResult.Err)
 
@@ -105,15 +121,13 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 		PoC:               pocResult,
 		Policy:            modelPolicy,
 		SupplyChainPolicy: nil,
-		AllowFail:         attestation.ChutesDefaultAllowFail,
+		AllowFail:         serveAllowFail("chutes"),
+		E2EETest:          fixtureE2EEResult(env.manifest.E2EE),
 		E2EEConfigured:    true, // Chutes always uses E2EE
 		Inapplicable:      chutes.InapplicableFactors(),
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	assertChutesReport(t, report)
 }
@@ -132,7 +146,10 @@ func assertChutesReport(t *testing.T, report *attestation.VerificationReport) {
 		"signing_key_present",
 		"tee_reportdata_binding",
 		"nvidia_payload_present",
+		"nvidia_claims",
+		"nvidia_nonce_client_bound",
 		"e2ee_capable",
+		"e2ee_usable",
 	})
 
 	// Not Applicable: factors handled by Chutes' applicability layer.
@@ -150,13 +167,8 @@ func assertChutesReport(t *testing.T, report *attestation.VerificationReport) {
 	// Chutes uses whole-body E2EE and does not use pinned TLS key binding.
 	assertFactorStatus(t, report, "tls_key_binding", attestation.Skip)
 
-	// Fixture replay currently lacks data required for NVIDIA verification.
-	assertFactorStatus(t, report, "nvidia_nonce_client_bound", attestation.Fail)
-	assertFactorStatus(t, report, "nvidia_claims", attestation.Fail)
-	assertFactorStatus(t, report, "e2ee_usable", attestation.Skip)
-
 	if report.Passed < 10 {
 		t.Errorf("expected at least 10 passing factors, got %d", report.Passed)
 	}
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }

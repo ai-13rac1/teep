@@ -68,7 +68,6 @@ func integrationNearCloudConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -87,7 +86,6 @@ func integrationNearCloudE2EEConfig(t *testing.T) *config.Config {
 				E2EE:    true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -297,7 +295,7 @@ func runNearCloudAttestationReport(t *testing.T) {
 			t.Errorf("gateway factor %q not found in report", name)
 			continue
 		}
-		t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+		logReportFactor(t, f)
 	}
 
 	// Gateway TDX core factors should pass.
@@ -322,11 +320,10 @@ func runNearCloudAttestationReport(t *testing.T) {
 		if f.Status == attestation.Pass {
 			continue
 		}
-		t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+		logReportFactor(t, f)
 	}
 
-	t.Logf("score: %d/%d passed, %d skipped, %d failed",
-		report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+	logReportScore(t, &report)
 }
 
 func runNearCloudE2EEStreamingWithTools(t *testing.T) {

@@ -324,7 +324,6 @@ func newMockNearCloudProxyServer(t *testing.T, e2eeEnabled bool) *httptest.Serve
 				E2EE:    e2eeEnabled,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 
 	srv, err := proxy.New(cfg)
@@ -372,7 +371,6 @@ func newMockNeardirectE2EEServer(t *testing.T, e2eeEnabled bool) *httptest.Serve
 				E2EE:    e2eeEnabled,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 
 	srv, err := proxy.New(cfg)

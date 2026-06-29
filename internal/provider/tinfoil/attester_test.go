@@ -343,7 +343,7 @@ func TestInapplicableFactors(t *testing.T) {
 	}
 	expected := []string{
 		"nvidia_nonce_client_bound", "nvidia_nras_verified",
-		"compose_binding", "build_transparency_log",
+		"compose_binding",
 		"sigstore_verification", "event_log_integrity",
 	}
 	for _, name := range expected {
@@ -354,6 +354,9 @@ func TestInapplicableFactors(t *testing.T) {
 	// sigstore_code_verified should NOT be inapplicable for Tinfoil.
 	if _, ok := inapplicable["sigstore_code_verified"]; ok {
 		t.Error("sigstore_code_verified should be applicable for Tinfoil")
+	}
+	if _, ok := inapplicable["build_transparency_log"]; ok {
+		t.Error("build_transparency_log should be applicable for Tinfoil")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/provider"
@@ -92,7 +93,7 @@ func TestVerifyNVIDIA_EmptyPayload(t *testing.T) {
 
 func TestCheckPoC_Offline(t *testing.T) {
 	ctx := context.Background()
-	result := checkPoC(ctx, "some-quote", nil, true)
+	result := checkPoC(ctx, "some-quote", nil, true, time.Time{})
 	if result != nil {
 		t.Errorf("checkPoC offline: expected nil, got %v", result)
 	}
@@ -100,7 +101,7 @@ func TestCheckPoC_Offline(t *testing.T) {
 
 func TestCheckPoC_EmptyQuote(t *testing.T) {
 	ctx := context.Background()
-	result := checkPoC(ctx, "", nil, false)
+	result := checkPoC(ctx, "", nil, false, time.Time{})
 	if result != nil {
 		t.Errorf("checkPoC empty quote: expected nil, got %v", result)
 	}
@@ -110,7 +111,7 @@ func TestCheckPoC_Online_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately so PoC network calls fail fast
 	// Exercises the non-nil path (offline=false, quote non-empty) without live network.
-	result := checkPoC(ctx, "fake-quote", &http.Client{}, false)
+	result := checkPoC(ctx, "fake-quote", &http.Client{}, false, time.Time{})
 	t.Logf("checkPoC canceled ctx result: %v", result)
 	// result may be nil or non-nil depending on PoC quorum logic; we just ensure no panic.
 }
@@ -122,7 +123,7 @@ func TestCheckPoC_Online_CanceledContext(t *testing.T) {
 func TestVerifyNearcloudGateway_NoQuote(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{GatewayIntelQuote: ""}
-	tdx, compose, poc := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, attestation.VerifyTDXQuoteOffline)
+	tdx, compose, poc := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, attestation.VerifyTDXQuoteOffline, time.Time{})
 	if tdx != nil {
 		t.Errorf("expected nil tdx, got %v", tdx)
 	}
@@ -140,7 +141,7 @@ func TestVerifyNearcloudGateway_NoQuote(t *testing.T) {
 
 func TestCheckSigstore_Empty(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{}, nil, false)
+	sig, rekor := checkSigstore(ctx, []string{}, nil, nil, nil, false)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results for empty digests, got %v", sig)
 	}
@@ -155,7 +156,7 @@ func TestCheckSigstore_Empty(t *testing.T) {
 func TestCheckSigstore_Online_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, &http.Client{}, false)
+	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, nil, nil, &http.Client{}, false)
 	t.Logf("checkSigstore canceled ctx: sig=%v rekor=%v", sig, rekor)
 	// We don't assert specific values — just ensure no panic and code is exercised.
 }
@@ -201,7 +202,7 @@ func TestCheckSigstore_Found_EntryFetchError(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -233,7 +234,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -251,7 +252,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 
 func TestCheckSigstore_Offline(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, true)
+	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, nil, nil, true)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results in offline mode, got %v", sig)
 	}
@@ -437,7 +438,7 @@ func TestVerifyTinfoilSupplyChain_NonTinfoilFormat(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{BackendFormat: attestation.FormatDstack}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, nil, "tinfoil_v3_direct", "model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result != nil {
 		t.Errorf("verifyTinfoilSupplyChain for non-Tinfoil format: expected nil, got %v", result)
 	}
@@ -447,7 +448,7 @@ func TestVerifyTinfoilSupplyChain_TinfoilFormat_Offline(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{BackendFormat: attestation.FormatTinfoil}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, nil, "tinfoil_v3_direct", "llama3-3-70b",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("verifyTinfoilSupplyChain offline: expected non-nil result")
 	}
@@ -462,7 +463,7 @@ func TestVerifyTinfoilSupplyChain_GPUBindingFromSEV(t *testing.T) {
 		ReportDataBindingDetail: "gpu_bound=true, nvswitch_bound=true",
 	}
 	result := verifyTinfoilSupplyChain(ctx, raw, nil, sev, "tinfoil_v3_direct", "test-model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -482,7 +483,7 @@ func TestVerifyTinfoilSupplyChain_GPUBindingFromTDX(t *testing.T) {
 		ParseErr:                errors.New("not a real TDX quote"), // prevent TDX policy checks
 	}
 	result := verifyTinfoilSupplyChain(ctx, raw, tdx, nil, "tinfoil_v3_direct", "test-model",
-		attestation.MeasurementPolicy{}, true)
+		attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -513,7 +514,7 @@ func TestTruncTo(t *testing.T) {
 func TestVerifyNearcloudGateway_WithQuote_ParseError(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{GatewayIntelQuote: "not-a-real-tdx-quote"}
-	tdx, compose, poc := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, attestation.VerifyTDXQuoteOffline)
+	tdx, compose, poc := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, attestation.VerifyTDXQuoteOffline, time.Time{})
 	if tdx == nil {
 		t.Fatal("expected non-nil TDX result for non-empty GatewayIntelQuote")
 	}
@@ -640,7 +641,7 @@ func TestVerifyNearcloudGateway_ParseOK_NoCompose(t *testing.T) {
 	ctx := context.Background()
 	raw := &attestation.RawAttestation{GatewayIntelQuote: "fakequote"}
 	tdxResult := &attestation.TDXVerifyResult{} // ParseErr == nil
-	tdx, compose, _ := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, stubTDXVerifier(tdxResult))
+	tdx, compose, _ := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, stubTDXVerifier(tdxResult), time.Time{})
 	if tdx == nil {
 		t.Fatal("expected non-nil TDX result")
 	}
@@ -658,7 +659,7 @@ func TestVerifyNearcloudGateway_ParseOK_WithCompose(t *testing.T) {
 		GatewayAppCompose: `{"docker_compose_file":"services:\n  app:\n    image: myapp:latest\n"}`,
 	}
 	tdxResult := &attestation.TDXVerifyResult{} // ParseErr == nil, MRConfigID zero
-	tdx, compose, _ := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, stubTDXVerifier(tdxResult))
+	tdx, compose, _ := verifyNearcloudGateway(ctx, raw, attestation.Nonce{}, nil, true, stubTDXVerifier(tdxResult), time.Time{})
 	if tdx == nil {
 		t.Fatal("expected non-nil TDX result")
 	}
@@ -686,7 +687,7 @@ func TestVerifyTinfoilSupplyChain_TDXPolicyCheck(t *testing.T) {
 	tdxResult := &attestation.TDXVerifyResult{} // ParseErr == nil
 	// Use a model name that maps to a known repo. RepoForModel("gemma4-31b")
 	// returns "tinfoilsh/confidential-gemma4-31b".
-	result := verifyTinfoilSupplyChain(ctx, raw, tdxResult, nil, "tinfoil_v3_direct", "gemma4-31b", attestation.MeasurementPolicy{}, true)
+	result := verifyTinfoilSupplyChain(ctx, raw, tdxResult, nil, "tinfoil_v3_direct", "gemma4-31b", attestation.MeasurementPolicy{}, true, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}

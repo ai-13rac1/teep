@@ -120,7 +120,8 @@ func TestIntegration_NearCloud_Fixture(t *testing.T) {
 	assertRekorExercised(t, sigstoreResults, rekorResults)
 
 	// --- PoC (model + gateway) ---
-	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client)
+	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client).
+		WithVerificationTime(fixtureVerificationTime(&env))
 	pocResult := poc.CheckQuote(ctx, raw.IntelQuote)
 	t.Logf("PoC model: registered=%v err=%v", pocResult.Registered, pocResult.Err)
 
@@ -156,13 +157,12 @@ func TestIntegration_NearCloud_Fixture(t *testing.T) {
 		Policy:            modelPolicy,
 		GatewayPolicy:     gatewayPolicy,
 		SupplyChainPolicy: nearcloud.SupplyChainPolicy(),
-		AllowFail:         attestation.NearcloudDefaultAllowFail,
+		AllowFail:         serveAllowFail("nearcloud"),
+		E2EETest:          fixtureE2EEResult(env.manifest.E2EE),
+		Inapplicable:      attestation.DefaultInapplicableFactors(),
 	})
 
-	t.Logf("Score: %d/%d (passed=%d failed=%d skipped=%d)", report.Passed, total(report), report.Passed, report.Failed, report.Skipped)
-	for _, f := range report.Factors {
-		t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
-	}
+	logReportFactors(t, report)
 
 	assertNearcloudReport(t, report)
 }
@@ -215,5 +215,5 @@ func assertNearcloudReport(t *testing.T, report *attestation.VerificationReport)
 	if report.Passed < 20 {
 		t.Errorf("expected at least 20 passing factors (model + gateway), got %d", report.Passed)
 	}
-	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	logReportResult(t, report)
 }

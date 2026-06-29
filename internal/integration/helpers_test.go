@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/capture"
+	"github.com/13rac1/teep/internal/config"
 )
 
 // fixtureEnv holds shared state for a fixture integration test.
@@ -47,8 +49,21 @@ func loadFixture(t *testing.T, prefix string) fixtureEnv {
 	return fixtureEnv{manifest: manifest, entries: entries, client: client, nonce: nonce}
 }
 
-// findFixtureDir returns the lexicographically latest testdata directory
-// matching the given provider prefix (e.g. "venice", "neardirect", "nearcloud").
+func fixtureVerificationTime(env *fixtureEnv) time.Time {
+	if env == nil {
+		return time.Time{}
+	}
+	if env.manifest.CapturedAt.IsZero() {
+		return time.Time{}
+	}
+	if env.manifest.DurationMS <= 0 {
+		return env.manifest.CapturedAt
+	}
+	return env.manifest.CapturedAt.Add(time.Duration(env.manifest.DurationMS) * time.Millisecond)
+}
+
+// findFixtureDir returns the newest captured testdata directory matching the
+// given provider prefix (e.g. "venice", "neardirect", "nearcloud").
 func findFixtureDir(t *testing.T, prefix string) string {
 	t.Helper()
 	entries, err := os.ReadDir("testdata")
@@ -56,17 +71,50 @@ func findFixtureDir(t *testing.T, prefix string) string {
 		t.Fatalf("read testdata: %v", err)
 	}
 	var latest string
+	var latestCapturedAt time.Time
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), prefix+"_") {
-			if e.Name() > latest {
-				latest = e.Name()
-			}
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix+"_") {
+			continue
+		}
+		dir := filepath.Join("testdata", e.Name())
+		manifest, _, err := capture.Load(dir)
+		if err != nil {
+			t.Fatalf("load fixture manifest %s: %v", dir, err)
+		}
+		if latest == "" || manifest.CapturedAt.After(latestCapturedAt) {
+			latest = e.Name()
+			latestCapturedAt = manifest.CapturedAt
 		}
 	}
 	if latest == "" {
 		t.Skipf("no %s fixture in testdata/; run: teep verify %s --capture testdata/", prefix, prefix)
 	}
 	return filepath.Join("testdata", latest)
+}
+
+func serveAllowFail(providerName string) []string {
+	return config.MergedAllowFail(providerName, &config.Config{}, false)
+}
+
+func fixtureE2EEResult(o *capture.E2EEOutcome) *attestation.E2EETestResult {
+	if o == nil {
+		return nil
+	}
+	result := &attestation.E2EETestResult{
+		Attempted: o.Attempted,
+		NoAPIKey:  o.NoAPIKey,
+		APIKeyEnv: o.APIKeyEnv,
+		Detail:    o.Detail,
+		KeyType:   o.KeyType,
+	}
+	if o.Failed {
+		msg := o.ErrMsg
+		if msg == "" {
+			msg = "(error message lost across capture boundary)"
+		}
+		result.Err = errors.New(msg)
+	}
+	return result
 }
 
 // --- Assertion helpers ---
@@ -103,7 +151,7 @@ func logFactorStatus(t *testing.T, r *attestation.VerificationReport, names ...s
 	t.Helper()
 	for _, name := range names {
 		f := findFactor(t, r, name)
-		t.Logf("%s: %s (%s)", name, f.Status, f.Detail)
+		t.Logf("%s: %s (%s)%s", name, f.Status, f.Detail, factorPolicySuffix(f))
 	}
 }
 
@@ -162,6 +210,67 @@ func assertRekorExercised(t *testing.T, sigstore []attestation.SigstoreResult, r
 
 func total(r *attestation.VerificationReport) int {
 	return r.Passed + r.Failed + r.Skipped
+}
+
+func logReportScore(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	msg := "Score: %d/%d passed, %d skipped, %d failed"
+	args := []any{report.Passed, total(report), report.Skipped, report.Failed}
+	if report.Failed > 0 {
+		msg += " (%d enforced, %d allowed)"
+		args = append(args, report.EnforcedFailed, report.AllowedFailed)
+	}
+	if report.NotApplicableCount > 0 {
+		msg += ", %d n/a"
+		args = append(args, report.NotApplicableCount)
+	}
+	t.Logf(msg, args...)
+}
+
+func logReportResult(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	logReportScore(t, report)
+	t.Logf("RESULT: %d/%d factors passed", report.Passed, total(report))
+	assertNoEnforcedFailures(t, report)
+}
+
+func assertNoEnforcedFailures(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	blocked := report.BlockedFactors()
+	if len(blocked) == 0 {
+		return
+	}
+	for _, f := range blocked {
+		t.Errorf("enforced factor failed: %s: %s", f.Name, f.Detail)
+	}
+}
+
+func logReportFactors(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+	for _, f := range report.Factors {
+		t.Logf("  [%s] %s: %s%s", f.Status, f.Name, f.Detail, factorPolicySuffix(f))
+	}
+}
+
+func factorPolicySuffix(f attestation.FactorResult) string {
+	tag := factorPolicyTag(f)
+	if tag == "" {
+		return ""
+	}
+	return "  " + tag
+}
+
+func factorPolicyTag(f attestation.FactorResult) string {
+	if f.Status == attestation.NotApplicable {
+		return ""
+	}
+	if f.Enforced {
+		return "[ENFORCED]"
+	}
+	return "[ALLOWED]"
 }
 
 func findFactor(t *testing.T, report *attestation.VerificationReport, name string) attestation.FactorResult {

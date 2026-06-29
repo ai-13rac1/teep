@@ -3,11 +3,19 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -544,6 +552,7 @@ func TestPinnedPreDispatchE2EE_DomainResolutionFails(t *testing.T) {
 func TestPinnedPreDispatchE2EE_CacheMissEvictsSPKI(t *testing.T) {
 	s := newMinimalServer()
 	w := httptest.NewRecorder()
+	s.spkiCache.Add("api.near.ai", "abcd")
 	prov := &provider.Provider{
 		Name:          "neardirect",
 		E2EE:          true,
@@ -557,6 +566,31 @@ func TestPinnedPreDispatchE2EE_CacheMissEvictsSPKI(t *testing.T) {
 	t.Logf("proceed = %v, status = %d", proceed, w.Code)
 	if !proceed {
 		t.Error("expected proceed=true after SPKI eviction")
+	}
+	if s.spkiCache.Contains("api.near.ai", "abcd") {
+		t.Error("expected SPKI domain to be evicted on pinned report cache miss")
+	}
+}
+
+func TestPinnedPreDispatchPlaintext_CacheMissEvictsSPKI(t *testing.T) {
+	s := newMinimalServer()
+	w := httptest.NewRecorder()
+	s.spkiCache.Add("api.near.ai", "abcd")
+	prov := &provider.Provider{
+		Name:          "neardirect",
+		E2EE:          false,
+		PinnedHandler: &noopPinnedHandler{},
+		SPKIDomainForModel: func(_ context.Context, _ string) (string, bool) {
+			return "api.near.ai", true
+		},
+	}
+	proceed := s.pinnedPreDispatchE2EE(context.Background(), w, prov, "model")
+	t.Logf("proceed = %v, status = %d", proceed, w.Code)
+	if !proceed {
+		t.Error("expected proceed=true after SPKI eviction")
+	}
+	if s.spkiCache.Contains("api.near.ai", "abcd") {
+		t.Error("expected SPKI domain to be evicted for plaintext pinned report cache miss")
 	}
 }
 
@@ -654,6 +688,16 @@ func blockedReport() *attestation.VerificationReport {
 	}
 }
 
+func captureSlog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
 func TestEnforceReport_NilReport(t *testing.T) {
 	s := newMinimalServer()
 	s.cfg = &config.Config{}
@@ -699,6 +743,90 @@ func TestEnforceReport_BlockedWithoutForce(t *testing.T) {
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+func TestEnforceReport_BlockedLogsFailingFactor(t *testing.T) {
+	s := newMinimalServer()
+	s.cfg = &config.Config{Force: false}
+	w := httptest.NewRecorder()
+	prov := &provider.Provider{Name: "venice"}
+	logs := captureSlog(t, func() {
+		_ = s.enforceReport(t.Context(), w, blockedReport(), prov, "model")
+	})
+
+	for _, want := range []string{
+		"enforced verification factor failed",
+		"action=block_inference",
+		"provider=venice",
+		"model=model",
+		"factor=tee_quote_present",
+		"tier=model",
+		"detail=\"no quote\"",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("log output missing %q:\n%s", want, logs)
+		}
+	}
+}
+
+func TestHandleE2EEDecryptionFailure_LogsSingleError(t *testing.T) {
+	s := newMinimalServer()
+	prov := &provider.Provider{Name: "venice"}
+	ms := &modelStats{}
+	logs := captureSlog(t, func() {
+		_ = s.handleE2EEDecryptionFailure(t.Context(), prov, "model", ms, false, "", errors.New("decrypt error"))
+	})
+
+	for _, want := range []string{
+		"level=ERROR",
+		"msg=\"E2EE decryption failed; caches invalidated\"",
+		"provider=venice",
+		"model=model",
+		"factor=e2ee_usable",
+		"tier=\"Tier 2: Binding & Crypto\"",
+		"detail=\"E2EE decryption failed",
+		"err=\"decrypt error\"",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("log output missing %q:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "enforced verification factor failed") {
+		t.Fatalf("unexpected duplicate factor log:\n%s", logs)
+	}
+}
+
+func TestLogUpstreamStatusWarnsExceptRateLimit(t *testing.T) {
+	s := newMinimalServer()
+	warnLogs := captureSlog(t, func() {
+		s.logUpstreamStatus(t.Context(), "venice", "model", "/v1/chat/completions", http.StatusUnauthorized)
+	})
+	for _, want := range []string{
+		"level=WARN",
+		"msg=\"inference blocked\"",
+		"action=upstream_status",
+		"provider=venice",
+		"model=model",
+		"status=401",
+	} {
+		if !strings.Contains(warnLogs, want) {
+			t.Fatalf("401 log output missing %q:\n%s", want, warnLogs)
+		}
+	}
+
+	rateLimitLogs := captureSlog(t, func() {
+		s.logUpstreamStatus(t.Context(), "venice", "model", "/v1/chat/completions", http.StatusTooManyRequests)
+	})
+	for _, want := range []string{
+		"level=INFO",
+		"msg=\"inference blocked\"",
+		"action=upstream_status",
+		"status=429",
+	} {
+		if !strings.Contains(rateLimitLogs, want) {
+			t.Fatalf("429 log output missing %q:\n%s", want, rateLimitLogs)
+		}
 	}
 }
 
@@ -957,7 +1085,7 @@ func TestVerifyNVIDIAOnline_GPUEvidence(t *testing.T) {
 func TestVerifySupplyChain_EmptyAppCompose(t *testing.T) {
 	s := newMinimalServer()
 	raw := &attestation.RawAttestation{} // AppCompose == ""
-	sc, dur := s.verifySupplyChain(context.Background(), raw, nil)
+	sc, dur := s.verifySupplyChain(context.Background(), raw, nil, nil)
 	t.Logf("verifySupplyChain(empty AppCompose): compose=%v dur=%v", sc.Compose, dur)
 	if sc.Compose != nil {
 		t.Error("expected empty supplyChainResult for empty AppCompose")
@@ -971,7 +1099,7 @@ func TestVerifySupplyChain_TDXParseErr(t *testing.T) {
 	s := newMinimalServer()
 	raw := &attestation.RawAttestation{AppCompose: "version: '3'\nservices:\n  app:\n    image: ubuntu:latest\n"}
 	tdxResult := &attestation.TDXVerifyResult{ParseErr: errors.New("parse failed")}
-	sc, _ := s.verifySupplyChain(context.Background(), raw, tdxResult)
+	sc, _ := s.verifySupplyChain(context.Background(), raw, tdxResult, nil)
 	t.Logf("verifySupplyChain(TDX ParseErr): compose=%v", sc.Compose)
 	if sc.Compose != nil {
 		t.Error("expected empty result when TDX ParseErr is set")
@@ -983,7 +1111,7 @@ func TestVerifySupplyChain_WithAppCompose(t *testing.T) {
 	raw := &attestation.RawAttestation{AppCompose: `{"docker_compose_file":"version: '3'\n"}`}
 	// TDXVerifyResult with no ParseErr but empty MRConfigID — VerifyComposeBinding returns error.
 	tdxResult := &attestation.TDXVerifyResult{}
-	sc, dur := s.verifySupplyChain(context.Background(), raw, tdxResult)
+	sc, dur := s.verifySupplyChain(context.Background(), raw, tdxResult, nil)
 	t.Logf("verifySupplyChain(AppCompose): compose=%v dur=%v", sc.Compose, dur)
 	if sc.Compose == nil {
 		t.Error("expected non-nil Compose result when AppCompose is set")
@@ -1310,7 +1438,7 @@ func TestVerifySupplyChain_SuccessPath(t *testing.T) {
 	raw := &attestation.RawAttestation{AppCompose: appCompose}
 	tdxResult := &attestation.TDXVerifyResult{MRConfigID: mrConfigID}
 
-	sc, dur := s.verifySupplyChain(context.Background(), raw, tdxResult)
+	sc, dur := s.verifySupplyChain(context.Background(), raw, tdxResult, nil)
 	t.Logf("verifySupplyChain(success): compose=%+v dur=%v", sc.Compose, dur)
 	if sc.Compose == nil {
 		t.Fatal("expected non-nil Compose result")
@@ -1324,6 +1452,149 @@ func TestVerifySupplyChain_SuccessPath(t *testing.T) {
 	if dur == 0 {
 		t.Error("expected non-zero duration for supply chain verification")
 	}
+}
+
+func TestVerifySupplyChain_UsesPolicyAwareRekorSelection(t *testing.T) {
+	const (
+		digest          = "1111111111111111111111111111111111111111111111111111111111111111"
+		nonMatchingUUID = "uuid-nonmatching"
+		matchingUUID    = "uuid-matching"
+		repo            = "example/secure-app"
+	)
+
+	nonMatchingKey := testPublicKeyMaterial(t)
+	matchingKey := testPublicKeyMaterial(t)
+
+	entries := map[string][]byte{
+		nonMatchingUUID: proxyRekorEntryResponse(nonMatchingUUID, proxyDSSEBody(nonMatchingKey.pem)),
+		matchingUUID:    proxyRekorEntryResponse(matchingUUID, proxyDSSEBody(matchingKey.pem)),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/index/retrieve":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode index payload: %v", err)
+			}
+			if payload["hash"] != "sha256:"+digest {
+				t.Fatalf("unexpected digest lookup: %q", payload["hash"])
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]string{nonMatchingUUID, matchingUUID})
+		case "/api/v1/log/entries/retrieve":
+			var payload struct {
+				EntryUUIDs []string `json:"entryUUIDs"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode entries payload: %v", err)
+			}
+			if len(payload.EntryUUIDs) != 1 {
+				t.Fatalf("entryUUIDs = %v, want one", payload.EntryUUIDs)
+			}
+			entry, ok := entries[payload.EntryUUIDs[0]]
+			if !ok {
+				t.Fatalf("unexpected uuid lookup: %q", payload.EntryUUIDs[0])
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(entry)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dockerCompose := fmt.Sprintf("services:\n  app:\n    image: %s@sha256:%s\n", repo, digest)
+	appCompose := mustAppComposeJSON(t, dockerCompose)
+	s := newMinimalServer()
+	s.rekorClient = attestation.NewRekorClientWithBase(ts.URL, ts.Client())
+	policy := &attestation.SupplyChainPolicy{Images: []attestation.ImageProvenance{{
+		Repo:           repo,
+		ModelTier:      true,
+		Provenance:     attestation.SigstorePresent,
+		KeyFingerprint: matchingKey.fingerprint,
+	}}}
+
+	sc, _ := s.verifySupplyChain(
+		context.Background(),
+		&attestation.RawAttestation{AppCompose: appCompose},
+		&attestation.TDXVerifyResult{MRConfigID: mrConfigIDForAppCompose(appCompose)},
+		policy,
+	)
+	if len(sc.Rekor) != 1 {
+		t.Fatalf("len(Rekor) = %d, want 1", len(sc.Rekor))
+	}
+	if sc.Rekor[0].Err != nil {
+		t.Fatalf("Rekor error: %v", sc.Rekor[0].Err)
+	}
+	if sc.Rekor[0].KeyFingerprint != matchingKey.fingerprint {
+		t.Fatalf("KeyFingerprint = %q, want policy match %q", sc.Rekor[0].KeyFingerprint, matchingKey.fingerprint)
+	}
+	if sc.Rekor[0].KeyFingerprint == nonMatchingKey.fingerprint {
+		t.Fatal("selected first Rekor entry instead of policy-matching entry")
+	}
+}
+
+type testKeyMaterial struct {
+	pem         string
+	fingerprint string
+}
+
+func testPublicKeyMaterial(t *testing.T) testKeyMaterial {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECDSA key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	sum := sha256.Sum256(der)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	if pemBytes == nil {
+		t.Fatal("encode public key PEM")
+	}
+	return testKeyMaterial{
+		pem:         string(pemBytes),
+		fingerprint: hex.EncodeToString(sum[:]),
+	}
+}
+
+func proxyDSSEBody(verifierPEM string) string {
+	verifierB64 := base64.StdEncoding.EncodeToString([]byte(verifierPEM))
+	dsse := map[string]any{
+		"apiVersion": "0.0.1",
+		"kind":       "dsse",
+		"spec": map[string]any{
+			"signatures": []map[string]any{{"verifier": verifierB64}},
+		},
+	}
+	raw, _ := json.Marshal(dsse)
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func proxyRekorEntryResponse(uuid, dsseBodyB64 string) []byte {
+	raw, _ := json.Marshal([]map[string]any{{uuid: map[string]any{"body": dsseBodyB64}}})
+	return raw
+}
+
+func mustAppComposeJSON(t *testing.T, dockerCompose string) string {
+	t.Helper()
+	raw, err := json.Marshal(struct {
+		DockerComposeFile string `json:"docker_compose_file"`
+	}{DockerComposeFile: dockerCompose})
+	if err != nil {
+		t.Fatalf("marshal app compose: %v", err)
+	}
+	return string(raw)
+}
+
+func mrConfigIDForAppCompose(appCompose string) []byte {
+	hash := sha256.Sum256([]byte(appCompose))
+	mrConfigID := make([]byte, 48)
+	mrConfigID[0] = 0x01
+	copy(mrConfigID[1:], hash[:])
+	return mrConfigID
 }
 
 // ---------------------------------------------------------------------------

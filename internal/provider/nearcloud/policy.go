@@ -65,10 +65,19 @@ func SupplyChainPolicy() *attestation.SupplyChainPolicy {
 			OIDCIssuer:   neardirect.GithubOIDC,
 			OIDCIdentity: "https://github.com/nearai/dstack-vpc/.github/workflows/build.yml@refs/heads/main",
 			SourceRepos:  []string{"nearai/dstack-vpc", "https://github.com/nearai/dstack-vpc"}},
-		// alpine: third-party image built by Docker across varying CI
-		// systems (GitHub Actions, Google Cloud Build) with unstable
-		// branch refs. Only transparency-log presence is verifiable.
-		attestation.ImageProvenance{Repo: "alpine", GatewayTier: true, Provenance: attestation.SigstorePresent},
+		attestation.ImageProvenance{Repo: "alpine", GatewayTier: true, Provenance: attestation.FulcioSigned,
+			NoDSSE:     true,
+			OIDCIssuer: neardirect.GithubOIDC,
+			OIDCIdentities: []string{
+				"https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
+				"https://github.com/crazy-max/docker-github-builder/.github/workflows/bake.yml@refs/heads/main",
+			},
+			SourceRepos: []string{
+				"docker/github-builder-experimental",
+				"https://github.com/docker/github-builder-experimental",
+				"crazy-max/docker-github-builder",
+				"https://github.com/crazy-max/docker-github-builder",
+			}},
 		attestation.ImageProvenance{Repo: "nearaidev/cloud-api", GatewayTier: true, Provenance: attestation.FulcioSigned,
 			NoDSSE:       true,
 			OIDCIssuer:   neardirect.GithubOIDC,

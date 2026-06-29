@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/tlsct"
 )
@@ -121,6 +123,103 @@ func findFactor(factors []attestation.FactorResult, name string) (attestation.Fa
 		}
 	}
 	return attestation.FactorResult{}, false
+}
+
+func logReportScore(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	total := report.Passed + report.Failed + report.Skipped
+	msg := "score: %d/%d passed, %d skipped, %d failed"
+	args := []any{report.Passed, total, report.Skipped, report.Failed}
+	if report.Failed > 0 {
+		msg += " (%d enforced, %d allowed)"
+		args = append(args, report.EnforcedFailed, report.AllowedFailed)
+	}
+	if report.NotApplicableCount > 0 {
+		msg += ", %d n/a"
+		args = append(args, report.NotApplicableCount)
+	}
+	t.Logf(msg, args...)
+	assertNoEnforcedFailures(t, report)
+}
+
+func assertNoEnforcedFailures(t *testing.T, report *attestation.VerificationReport) {
+	t.Helper()
+
+	blocked := report.BlockedFactors()
+	if len(blocked) == 0 {
+		return
+	}
+	for _, f := range blocked {
+		t.Errorf("enforced factor failed: %s: %s", f.Name, f.Detail)
+	}
+}
+
+func logReportFactor(t *testing.T, f attestation.FactorResult) {
+	t.Helper()
+	t.Logf("  %s %s: %s%s", f.Status, f.Name, f.Detail, factorPolicySuffix(f))
+}
+
+func factorPolicySuffix(f attestation.FactorResult) string {
+	tag := factorPolicyTag(f)
+	if tag == "" {
+		return ""
+	}
+	return "  " + tag
+}
+
+func factorPolicyTag(f attestation.FactorResult) string {
+	if f.Status == attestation.NotApplicable {
+		return ""
+	}
+	if f.Enforced {
+		return "[ENFORCED]"
+	}
+	return "[ALLOWED]"
+}
+
+func TestIntegrationConfigsUseServeAllowFailPolicy(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerName string
+		build        func(*testing.T) *config.Config
+	}{
+		{"venice_plaintext", "venice", integrationPlaintextConfig},
+		{"venice_e2ee", "venice", integrationE2EEConfig},
+		{"neardirect_plaintext", "neardirect", integrationNearDirectConfig},
+		{"neardirect_e2ee", "neardirect", integrationNearDirectE2EEConfig},
+		{"nearcloud_plaintext", "nearcloud", integrationNearCloudConfig},
+		{"nearcloud_e2ee", "nearcloud", integrationNearCloudE2EEConfig},
+		{"nanogpt", "nanogpt", nanogptIntegrationConfig},
+		{"phalacloud", "phalacloud", integrationPhalaCloudConfig},
+		{"chutes_plaintext", "chutes", integrationChutesPlaintextConfig},
+		{"chutes_e2ee", "chutes", integrationChutesE2EEConfig},
+		{"tinfoil_cloud_plaintext", "tinfoil_v3_cloud", integrationTinfoilPlaintextConfig},
+		{"tinfoil_cloud_e2ee", "tinfoil_v3_cloud", integrationTinfoilE2EEConfig},
+		{"tinfoil_direct_plaintext", "tinfoil_v3_direct", integrationTinfoilDirectPlaintextConfig},
+		{"tinfoil_direct_e2ee", "tinfoil_v3_direct", integrationTinfoilDirectE2EEConfig},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.build(t)
+			if cfg.AllowFail != nil || cfg.GlobalAllowFailDefined {
+				t.Fatalf("integration config must not set global allow_fail")
+			}
+			if len(cfg.ProviderAllowFail) != 0 {
+				t.Fatalf("integration config must not set provider allow_fail: %+v", cfg.ProviderAllowFail)
+			}
+			if providerCfg := cfg.Providers[tt.providerName]; providerCfg == nil {
+				t.Fatalf("missing provider %q", tt.providerName)
+			}
+
+			got := config.MergedAllowFail(tt.providerName, cfg, cfg.Offline)
+			want := config.MergedAllowFail(tt.providerName, &config.Config{Offline: cfg.Offline}, cfg.Offline)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("effective allow_fail mismatch:\ngot  %v\nwant %v", got, want)
+			}
+		})
+	}
 }
 
 // isPrintableUTF8 returns true if s is valid UTF-8 and contains at least one

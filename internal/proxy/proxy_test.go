@@ -706,6 +706,9 @@ func newNeardirectProxyServer(t *testing.T, handler provider.PinnedHandler) *htt
 	}
 	prov := srv.ProviderByName("neardirect")
 	prov.PinnedHandler = handler
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+		return "test.near.example", true
+	}
 	return httptest.NewServer(srv)
 }
 
@@ -2175,6 +2178,9 @@ func TestSinglePinnedProvider_AllowsDynamicModelName(t *testing.T) {
 
 	// Avoid network dependency: stub pinned chat handler.
 	prov.PinnedHandler = stubPinnedHandler{}
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+		return "test.near.example", true
+	}
 
 	proxySrv := httptest.NewServer(srv)
 	defer proxySrv.Close()
@@ -2215,6 +2221,9 @@ func TestPinnedProvider_BlockedReportReturns502(t *testing.T) {
 		t.Fatal("neardirect provider missing")
 	}
 	prov.PinnedHandler = blockedPinnedHandler{}
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+		return "test.near.example", true
+	}
 
 	proxySrv := httptest.NewServer(srv)
 	defer proxySrv.Close()
@@ -3737,6 +3746,9 @@ func TestBlockedReport_NegCacheAndAttestCacheInteraction(t *testing.T) {
 		t.Fatal("neardirect provider missing")
 	}
 	prov.PinnedHandler = handler
+	prov.SPKIDomainForModel = func(_ context.Context, _ string) (string, bool) {
+		return "test.near.example", true
+	}
 
 	proxySrv := httptest.NewServer(srv)
 	defer proxySrv.Close()

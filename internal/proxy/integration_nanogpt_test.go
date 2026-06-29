@@ -70,7 +70,6 @@ func nanogptIntegrationConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -156,10 +155,9 @@ func assertNanogptReportFactors(t *testing.T, report *attestation.VerificationRe
 
 	for _, f := range report.Factors {
 		if f.Status != attestation.Pass {
-			t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+			logReportFactor(t, f)
 		}
 	}
 
-	t.Logf("score: %d/%d passed, %d skipped, %d failed",
-		report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+	logReportScore(t, report)
 }

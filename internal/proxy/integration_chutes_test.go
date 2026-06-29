@@ -72,7 +72,6 @@ func integrationChutesPlaintextConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -93,7 +92,6 @@ func integrationChutesE2EEConfig(t *testing.T) *config.Config {
 				E2EE:    true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -234,10 +232,9 @@ func TestIntegration_Chutes(t *testing.T) {
 			if f.Status == attestation.Pass {
 				continue
 			}
-			t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+			logReportFactor(t, f)
 		}
 
-		t.Logf("score: %d/%d passed, %d skipped, %d failed",
-			report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+		logReportScore(t, &report)
 	})
 }

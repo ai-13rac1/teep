@@ -72,7 +72,6 @@ func integrationPlaintextConfig(t *testing.T) *config.Config {
 				E2EE:    false,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -93,7 +92,6 @@ func integrationE2EEConfig(t *testing.T) *config.Config {
 				E2EE:    true,
 			},
 		},
-		AllowFail: attestation.KnownFactors,
 	}
 }
 
@@ -127,12 +125,11 @@ func assertReportFactors(t *testing.T, report *attestation.VerificationReport) {
 
 	for _, f := range report.Factors {
 		if f.Status != attestation.Pass {
-			t.Logf("  %s %s: %s", f.Status, f.Name, f.Detail)
+			logReportFactor(t, f)
 		}
 	}
 
-	t.Logf("score: %d/%d passed, %d skipped, %d failed",
-		report.Passed, report.Passed+report.Failed+report.Skipped, report.Skipped, report.Failed)
+	logReportScore(t, report)
 }
 
 func TestIntegration_Venice(t *testing.T) {

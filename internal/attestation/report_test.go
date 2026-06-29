@@ -121,14 +121,14 @@ func allExcept(exclude ...string) []string {
 // BuildReport-level tests (cross-cutting concerns)
 // ---------------------------------------------------------------------------
 
-// TestBuildReportFactorCount ensures exactly 30 factors are produced.
+// TestBuildReportFactorCount ensures exactly 35 factors are produced.
 func TestBuildReportFactorCount(t *testing.T) {
 	nonce := NewNonce()
 	raw := buildMinimalRaw(nonce, validSigningKey(t))
 	report := BuildReport(&ReportInput{Provider: "venice", Model: "test-model", Raw: raw, Nonce: nonce, AllowFail: DefaultAllowFail})
 
-	if len(report.Factors) != 32 {
-		t.Errorf("factor count: got %d, want 32", len(report.Factors))
+	if len(report.Factors) != 35 {
+		t.Errorf("factor count: got %d, want 35", len(report.Factors))
 	}
 }
 
@@ -202,8 +202,8 @@ func TestBuildReportInapplicableOverride(t *testing.T) {
 
 	// NotApplicable factors must not appear in the score denominator.
 	scoreDenom := report.Passed + report.Failed + report.Skipped
-	if report.NotApplicableCount != 5 {
-		t.Errorf("NotApplicableCount: got %d, want 5", report.NotApplicableCount)
+	if report.NotApplicableCount != 8 {
+		t.Errorf("NotApplicableCount: got %d, want 8", report.NotApplicableCount)
 	}
 	if scoreDenom+report.NotApplicableCount != len(report.Factors) {
 		t.Errorf("score denominator (%d) + N/A (%d) != total factors (%d)",
@@ -548,20 +548,20 @@ func TestEvalResponseSchema(t *testing.T) {
 	}
 }
 
-func TestEvalResponseSchema_TinfoilEnforced(t *testing.T) {
-	// FactorResponseSchema must NOT be in tinfoil allow_fail lists so it is
-	// enforced (unknown/missing fields block the attestation).
-	if slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema must not be in TinfoilCloudDefaultAllowFail")
+func TestEvalResponseSchema_TinfoilAllowFail(t *testing.T) {
+	// FactorResponseSchema is in tinfoil allow_fail lists while V3 attestation
+	// schema compatibility settles.
+	if !slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema missing from TinfoilCloudDefaultAllowFail")
 	}
-	if slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema must not be in TinfoilDirectDefaultAllowFail")
+	if !slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema missing from TinfoilDirectDefaultAllowFail")
 	}
 }
 
 func TestEvalResponseSchema_OtherProvidersAllowFail(t *testing.T) {
-	// FactorResponseSchema should be in non-tinfoil allow_fail lists
-	// (warn-and-continue behavior).
+	// FactorResponseSchema should be in allow_fail lists (warn-and-continue
+	// behavior).
 	if !slices.Contains(DefaultAllowFail, FactorResponseSchema) {
 		t.Error("FactorResponseSchema missing from DefaultAllowFail")
 	}
@@ -2593,14 +2593,14 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 		GatewayNonce:    gatewayNonce,
 	})
 
-	// Base 32 + 13 gateway factors = 45
+	// Base 35 + 13 gateway factors = 48
 	// Gateway factors: gateway_nonce_match, gateway_tee_quote_present,
 	// gateway_tee_quote_structure, gateway_tee_cert_chain, gateway_tee_quote_signature,
 	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
 	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 45 {
-		t.Errorf("factor count with gateway: got %d, want 45", len(report.Factors))
+	if len(report.Factors) != 48 {
+		t.Errorf("factor count with gateway: got %d, want 48", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}
@@ -3219,14 +3219,14 @@ func TestClassifyRekorEntry_ErrWithFulcioSigned(t *testing.T) {
 }
 
 func TestClassifyRekorEntry_ErrWithoutFulcio(t *testing.T) {
-	// r.Err != nil but img is nil → rekorSigstore
+	// r.Err != nil without a compose-only exemption → rekorFailed
 	r := &RekorProvenance{Err: errors.New("fetch failed")}
 	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", nil)
-	if kind != rekorSigstore {
-		t.Errorf("kind = %v, want rekorSigstore", kind)
+	if kind != rekorFailed {
+		t.Errorf("kind = %v, want rekorFailed", kind)
 	}
-	if detail != "" {
-		t.Errorf("failDetail = %q, want empty", detail)
+	if detail == "" {
+		t.Error("expected non-empty failDetail for Rekor fetch error")
 	}
 }
 
@@ -3264,17 +3264,18 @@ func TestClassifyRekorEntry_NoPolicyWithCertGoodIssuer(t *testing.T) {
 }
 
 func TestClassifyRekorEntry_DefaultNotInPolicy(t *testing.T) {
-	// img==nil && scPolicy!=nil (not nil) → default → rekorFailed
+	// img==nil && scPolicy!=nil no longer fails build transparency solely
+	// because the component name is unknown; component_recognition owns that.
 	r := &RekorProvenance{}
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{{Repo: "other/repo", ModelTier: true}},
 	}
 	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", scPolicy)
-	if kind != rekorFailed {
-		t.Errorf("kind = %v, want rekorFailed", kind)
+	if kind != rekorSigstore {
+		t.Errorf("kind = %v, want rekorSigstore", kind)
 	}
-	if detail == "" {
-		t.Error("expected non-empty failDetail for image not in policy")
+	if detail != "" {
+		t.Errorf("failDetail = %q, want empty", detail)
 	}
 }
 
@@ -3293,7 +3294,7 @@ func TestClassifyRekorEntry_SigstorePresentNoKeyCheck(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildTransparencyNoRekor_WithScPolicy(t *testing.T) {
-	scPolicy := &SupplyChainPolicy{} // non-nil → Fail
+	scPolicy := &SupplyChainPolicy{Images: []ImageProvenance{{Repo: "example/app", ModelTier: true, Provenance: FulcioSigned}}}
 	in := &ReportInput{Raw: &RawAttestation{}}
 	result := buildTransparencyNoRekor(in, scPolicy)
 	if result.Status != Fail {
@@ -3337,26 +3338,26 @@ func TestBuildTransparencyNoRekor_NoRekorFail(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// checkImageRepoPolicy — missing branches
+// checkComponentRepoPolicy — missing branches
 // ---------------------------------------------------------------------------
 
-func TestCheckImageRepoPolicy_NoImageRepos(t *testing.T) {
-	// len(in.ImageRepos) == 0 → fail immediately.
+func TestCheckComponentRepoPolicy_NoComponentRepos(t *testing.T) {
+	// len(in.ImageRepos) == 0 means no compose component repos were extracted.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{{Repo: "myrepo/img", ModelTier: true}},
 	}
 	in := &ReportInput{Raw: &RawAttestation{}, ImageRepos: nil}
-	result, done := checkImageRepoPolicy(in, scPolicy)
+	result, done := checkComponentRepoPolicy(in, scPolicy)
 	if !done {
-		t.Error("expected done=true when no image repos")
+		t.Error("expected done=true when no component repos")
 	}
 	if result.Status != Fail {
 		t.Errorf("status = %v, want Fail", result.Status)
 	}
 }
 
-func TestCheckImageRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
-	// Policy has gateway images but GatewayImageRepos is empty → fail.
+func TestCheckComponentRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
+	// Policy has gateway components but GatewayImageRepos is empty → fail.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{
 			{Repo: "myrepo/model", ModelTier: true},
@@ -3366,19 +3367,19 @@ func TestCheckImageRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
 	in := &ReportInput{
 		Raw:               &RawAttestation{},
 		ImageRepos:        []string{"myrepo/model"},
-		GatewayImageRepos: nil, // no gateway repos
+		GatewayImageRepos: nil, // no gateway component repos
 	}
-	result, done := checkImageRepoPolicy(in, scPolicy)
+	result, done := checkComponentRepoPolicy(in, scPolicy)
 	if !done {
-		t.Error("expected done=true when gateway policy exists but no gateway repos")
+		t.Error("expected done=true when gateway policy exists but no gateway component repos")
 	}
 	if result.Status != Fail {
 		t.Errorf("status = %v, want Fail", result.Status)
 	}
 }
 
-func TestCheckImageRepoPolicy_GatewayRepoNotInPolicy(t *testing.T) {
-	// Policy has gateway images, but the provided gateway repo is not allowed.
+func TestCheckComponentRepoPolicy_GatewayRepoNotInPolicy(t *testing.T) {
+	// Policy has gateway components, but the provided gateway repo is not allowed.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{
 			{Repo: "myrepo/model", ModelTier: true},
@@ -3390,7 +3391,7 @@ func TestCheckImageRepoPolicy_GatewayRepoNotInPolicy(t *testing.T) {
 		ImageRepos:        []string{"myrepo/model"},
 		GatewayImageRepos: []string{"attacker/evil-gateway"},
 	}
-	result, done := checkImageRepoPolicy(in, scPolicy)
+	result, done := checkComponentRepoPolicy(in, scPolicy)
 	if !done {
 		t.Error("expected done=true when gateway repo not in policy")
 	}
@@ -3399,8 +3400,8 @@ func TestCheckImageRepoPolicy_GatewayRepoNotInPolicy(t *testing.T) {
 	}
 }
 
-func TestCheckImageRepoPolicy_UnexpectedGatewayRepos(t *testing.T) {
-	// Policy has no gateway images but gateway repos are present → fail.
+func TestCheckComponentRepoPolicy_UnexpectedGatewayRepos(t *testing.T) {
+	// Policy has no gateway components but gateway repos are present → fail.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{
 			{Repo: "myrepo/model", ModelTier: true},
@@ -3412,7 +3413,7 @@ func TestCheckImageRepoPolicy_UnexpectedGatewayRepos(t *testing.T) {
 		ImageRepos:        []string{"myrepo/model"},
 		GatewayImageRepos: []string{"unexpected/gateway"},
 	}
-	result, done := checkImageRepoPolicy(in, scPolicy)
+	result, done := checkComponentRepoPolicy(in, scPolicy)
 	if !done {
 		t.Error("expected done=true for unexpected gateway repos")
 	}
@@ -3421,7 +3422,7 @@ func TestCheckImageRepoPolicy_UnexpectedGatewayRepos(t *testing.T) {
 	}
 }
 
-func TestCheckImageRepoPolicy_AllPass(t *testing.T) {
+func TestCheckComponentRepoPolicy_AllPass(t *testing.T) {
 	// Model repo in policy, no gateway policy → pass.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{
@@ -3432,7 +3433,7 @@ func TestCheckImageRepoPolicy_AllPass(t *testing.T) {
 		Raw:        &RawAttestation{},
 		ImageRepos: []string{"myrepo/model"},
 	}
-	_, done := checkImageRepoPolicy(in, scPolicy)
+	_, done := checkComponentRepoPolicy(in, scPolicy)
 	if done {
 		t.Error("expected done=false when all repos pass")
 	}
@@ -4341,6 +4342,19 @@ func buildTinfoilInput(sc *TinfoilSupplyChainResult) *ReportInput {
 		},
 		Nonce:     nonce,
 		TinfoilSC: sc,
+	}
+}
+
+func TestEvalBuildTransparencyLog_TinfoilSetupError(t *testing.T) {
+	in := buildTinfoilInput(&TinfoilSupplyChainResult{
+		SigstoreErr: errors.New("no Tinfoil Sigstore repo for model \"unknown\""),
+	})
+	f := assertSingleFactor(t, evalBuildTransparencyLog(in), Fail)
+	if !strings.Contains(f.Detail, "Tinfoil Sigstore supply chain verification failed") {
+		t.Fatalf("detail = %q, want generic supply chain verification failure", f.Detail)
+	}
+	if strings.Contains(f.Detail, "DSSE verification failed") {
+		t.Fatalf("detail = %q, should not imply DSSE verification was attempted", f.Detail)
 	}
 }
 
