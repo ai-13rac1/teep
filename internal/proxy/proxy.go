@@ -921,7 +921,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 	nvidiaResult, nvidiaDur := verifyNVIDIA(ctx, raw, nonce, prov.Name)
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
-	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult)
+	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult, prov.SupplyChainPolicy)
 	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov, upstreamModel)
 
 	totalDur := time.Since(totalStart)
@@ -1131,6 +1131,7 @@ func (s *Server) verifySupplyChain(
 	ctx context.Context,
 	raw *attestation.RawAttestation,
 	tdxResult *attestation.TDXVerifyResult,
+	scPolicy *attestation.SupplyChainPolicy,
 ) (supplyChainResult, time.Duration) {
 	if raw.AppCompose == "" || tdxResult == nil || tdxResult.ParseErr != nil {
 		if tdxResult != nil && tdxResult.ParseErr != nil {
@@ -1165,7 +1166,7 @@ func (s *Server) verifySupplyChain(
 				okDigests = append(okDigests, sr.Digest)
 			}
 		}
-		sc.Rekor = s.rekorClient.FetchRekorProvenances(ctx, okDigests)
+		sc.Rekor = s.rekorClient.FetchRekorProvenancesForPolicy(ctx, okDigests, sc.DigestToRepo, scPolicy)
 	}
 
 	return sc, time.Since(start)
