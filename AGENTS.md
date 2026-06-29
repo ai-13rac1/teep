@@ -61,15 +61,16 @@ To ensure data confidentiality and integrity, adhere to the following rules:
 Failing closed is a FEATURE, not a BUG. It is more important to protect confidential traffic than it is to provide service. Provider verification failures are not bugs.
 
 - Validation issues of any kind must FAIL LOUDLY AND FAIL CLOSED.
-- Failed validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
-- Error paths MUST only return or propagate errors. Any other behavior is a defect.
 - Reject malformed input entirely; never silently drop malformed elements.
 - Unknown, misspelled, ambiguous, or semantically invalid config values MUST be rejected at startup.
 - JSON unmarshalling MUST use the internal/jsonstrict parser.
 - All low-level parsers MUST return unknown field names to callers instead of logging or deduplicating them internally. Callers own the policy decision to fail, warn once per logical operation, or use lower-severity logging in hot paths.
-- If you can't make development progress due to a failing validation, STOP and ask for advice.
-- Fail loudly, not silently: when an expected verification step is skipped because prerequisites are missing, malformed, or unexpectedly unavailable, emit a clear non-secret diagnostic at warn level or stronger.
-- In all cases, prefer errors and panics to fallbacks or workarounds.
+- Error paths MUST only return or propagate errors. Any other behavior is a defect.
+- In all cases, prefer errors and panics over fallbacks or workarounds.
+- Fail loudly, not silently: when an expected factor or verification step is skipped or fails because prerequisites are missing, malformed, or unexpectedly unavailable, emit a clear non-secret diagnostic at warn level or stronger.
+- Failed factor validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
+- ALL tests MUST use the same factor enforcement as `teep verify` and `teep serve`, and MUST fail closed in the same way as the live codepaths do, even if this means failing tests.
+- If you can't make development progress due to a failing factor or other validation, STOP and ask for advice.
 
 ### Always Ensure Attestation Integrity
 
@@ -139,10 +140,10 @@ Reference implementations to mirror when adding providers or verification logic:
 
 ### No Fallbacks or Backwards Compatibility
 
-- NEVER weaken or bypass validation behavior unless it has been explicitly disabled.
+- NEVER weaken or bypass validation behavior unless it has been explicitly disabled. This includes tests.
 - NEVER add exemptions to teeplint for new code.
 - NO HTTP, empty-key, or cryptographic fallbacks.
-- NO SPECIAL CASES for test harness behavior.
+- NO SPECIAL CASES for test harness behavior. This includes factor validation.
 - NO WORKAROUNDS.
 - NO ERROR FALLBACKS.
 - NO BACKWARDS COMPATIBILITY.
