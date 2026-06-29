@@ -11,10 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/jsonstrict"
 	"github.com/13rac1/teep/internal/reqid"
 )
 
@@ -85,7 +85,7 @@ func (s *Server) handleExploreAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req exploreRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if _, _, err := jsonstrict.UnmarshalWarn(body, &req, "explore attest request"); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -127,7 +127,7 @@ func (s *Server) handleExploreInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req exploreRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if _, _, err := jsonstrict.UnmarshalWarn(body, &req, "explore infer request"); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -214,11 +214,12 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) e
 	}
 
 	// Check cached report for E2EE status.
-	provName, upstreamModel, _ := strings.Cut(model, ":")
 	var e2ee bool
-	if report, ok := s.cache.Get(provName, upstreamModel); ok {
-		prov, provOK := s.providers[provName]
-		e2ee = provOK && prov.E2EE && report.ReportDataBindingPassed()
+	if prov, upModel, ok := s.resolveModel(model); ok {
+		cacheKey := cacheModelFor(ctx, upModel)
+		if report, cacheOK := s.cache.Get(prov.Name, cacheKey); cacheOK {
+			e2ee = prov.E2EE && report.ReportDataBindingPassed()
+		}
 	}
 
 	return exploreInferResponse{

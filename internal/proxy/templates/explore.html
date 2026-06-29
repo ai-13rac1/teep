@@ -31,8 +31,6 @@
   .prov-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
 
   /* ---- model card overrides ---- */
-  .card-body { display: none; }
-  .card-head[aria-expanded="true"] + .card-body { display: block; }
   .card-meta {
     display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
     font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
@@ -135,7 +133,6 @@ for (var pi = 0; pi < PROVIDERS.length; pi++) {
 
 var allModels = [];
 var filterText = "";
-var expanded = {};
 var provExpanded = {};
 
 function fmtCtx(n) {
@@ -195,16 +192,14 @@ function modelCard(m) {
   var parts = id.split(":");
   var prov = parts[0] || "";
   var name = parts.slice(1).join(":") || id;
-  var open = !!expanded[id];
 
   return '<div class="card" data-model="' + esc(id) + '">' +
-    '<button class="card-head" aria-expanded="' + open + '" data-toggle="' + esc(id) + '">' +
+    '<div class="card-head">' +
       '<div style="flex:1; min-width:0">' +
         '<div class="card-name"><span class="prov">' + esc(prov) + ':</span>' + esc(name) + '</div>' +
         modelMeta(m) + modelDesc(m) +
       '</div>' +
-      '<span class="chev">\u25b8</span>' +
-    '</button>' +
+    '</div>' +
     '<div class="card-body">' +
       modelPills(m) +
       '<div class="card-actions" style="margin-top:10px">' +
@@ -279,14 +274,6 @@ function wireEvents() {
       this.setAttribute("aria-expanded", provExpanded[k]);
     });
   }
-  var toggles = document.querySelectorAll(".card-head[data-toggle]");
-  for (var i = 0; i < toggles.length; i++) {
-    toggles[i].addEventListener("click", function() {
-      var k = this.getAttribute("data-toggle");
-      expanded[k] = !expanded[k];
-      this.setAttribute("aria-expanded", expanded[k]);
-    });
-  }
   var attBtns = document.querySelectorAll(".btn-attest[data-attest]");
   for (var j = 0; j < attBtns.length; j++) {
     attBtns[j].addEventListener("click", function(e) {
@@ -319,7 +306,7 @@ function doAttest(model) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: model })
-  }).then(function(r) { return r.json(); }).then(function(report) {
+  }).then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(report) {
     var res = el("attest-" + model);
     if (!res) return;
     res.hidden = false;
@@ -341,7 +328,7 @@ function doInfer(model) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: model })
-  }).then(function(r) { return r.json(); }).then(function(data) {
+  }).then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(data) {
     var res = el("infer-" + model);
     if (!res) return;
     res.hidden = false;
@@ -376,7 +363,7 @@ function doInfer(model) {
 }
 
 // Load models on page load.
-fetch("/v1/models").then(function(r) { return r.json(); }).then(function(data) {
+fetch("/v1/models").then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(data) {
   var models = (data.data || []);
   allModels = [];
   for (var i = 0; i < models.length; i++) {

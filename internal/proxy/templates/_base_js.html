@@ -39,7 +39,7 @@ function tierBars(tiers) {
     var badPct = (t.failed / t.total) * 100;
     var warnPct = ((t.warned || 0) / t.total) * 100;
     var label = TIER_SHORT[t.name] || esc(t.name);
-    h += '<div class="tier"><div class="tier-top"><span>' + esc(label) +
+    h += '<div class="tier"><div class="tier-top"><span>' + label +
       '</span><span><b>' + t.passed + '</b>/' + t.total + '</span></div>' +
       '<div class="bar"><i class="ok" style="width:' + okPct + '%"></i>' +
       '<i class="bad" style="width:' + badPct + '%"></i>' +

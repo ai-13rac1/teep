@@ -1475,7 +1475,7 @@ func TestFetchRekorProvenances_PreservesOrderAndErrors(t *testing.T) {
 	defer ts.Close()
 
 	rc := NewRekorClientWithBase(ts.URL, ts.Client())
-	results := rc.FetchRekorProvenances(context.Background(), []string{digestSlow, digestError, digestRaw})
+	results := rc.FetchRekorProvenancesForPolicy(context.Background(), []string{digestSlow, digestError, digestRaw}, nil, nil)
 
 	if len(results) != 3 {
 		t.Fatalf("len(results) = %d, want 3", len(results))

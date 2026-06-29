@@ -178,22 +178,6 @@ func (rc *RekorClient) FetchRekorProvenanceForPolicy(
 	return rc.fetchRekorProvenance(ctx, digest, rekorPolicyMatcherForRepo(policy, repo))
 }
 
-// FetchRekorProvenances fetches provenance for each digest concurrently.
-// It is the batch analog of FetchRekorProvenance.
-func (rc *RekorClient) FetchRekorProvenances(ctx context.Context, digests []string) []RekorProvenance {
-	results := make([]RekorProvenance, len(digests))
-	var wg sync.WaitGroup
-	for i, d := range digests {
-		wg.Add(1)
-		go func(i int, d string) {
-			defer wg.Done()
-			results[i] = rc.FetchRekorProvenance(ctx, d)
-		}(i, d)
-	}
-	wg.Wait()
-	return results
-}
-
 // FetchRekorProvenancesForPolicy fetches provenance for each digest
 // concurrently, preferring entries that match the component-specific policy for
 // that digest when one is available.
