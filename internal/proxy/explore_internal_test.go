@@ -337,6 +337,91 @@ func TestHandleExploreAttest_NoAttester(t *testing.T) {
 	}
 }
 
+func TestHandleExploreAttest_CacheKeySuffix(t *testing.T) {
+	s := newExploreTestServer(t, nil)
+	s.providers["testprov"].Attester = &mockAttester{}
+	s.providers["testprov"].CacheKeySuffix = func(_ context.Context, _ string) string {
+		return "backend.example.com"
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/explore/attest", strings.NewReader(`{"model":"testprov:test-model"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleExploreAttest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Report must be cached under "test-model@backend.example.com", not "test-model".
+	if _, ok := s.cache.Get("testprov", "test-model@backend.example.com"); !ok {
+		t.Error("report not cached under suffixed key")
+	}
+	if _, ok := s.cache.Get("testprov", "test-model"); ok {
+		t.Error("report cached under bare model name; CacheKeySuffix not applied")
+	}
+}
+
+func TestLoopbackInfer_E2EEWithCacheKeySuffix(t *testing.T) {
+	s := newExploreTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"content": "Hi"}},
+			},
+		})
+	})
+	s.providers["testprov"].CacheKeySuffix = func(_ context.Context, _ string) string {
+		return "backend.example.com"
+	}
+
+	// Cache under the suffixed key, as the main proxy path would.
+	s.cache.Put("testprov", "test-model@backend.example.com", &attestation.VerificationReport{
+		Provider: "testprov",
+		Model:    "test-model",
+		Factors: []attestation.FactorResult{
+			{Name: attestation.FactorTEEReportData, Status: attestation.Pass},
+		},
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"model":      "testprov:test-model",
+		"max_tokens": 16,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	resp := s.loopbackInfer(context.Background(), "testprov:test-model", body)
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	if !resp.E2EE {
+		t.Error("e2ee = false, want true (cached report under suffixed key)")
+	}
+}
+
+func TestLoopbackInfer_LargeErrorBodyTruncated(t *testing.T) {
+	largeBody := strings.Repeat("x", 2000)
+	s := newExploreTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, largeBody, http.StatusInternalServerError)
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"model":    "testprov:test-model",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+
+	resp := s.loopbackInfer(context.Background(), "testprov:test-model", body)
+	if resp.Error == "" {
+		t.Fatal("expected error")
+	}
+	if len(resp.Error) > 600 {
+		t.Errorf("error body not truncated: len=%d", len(resp.Error))
+	}
+	if !strings.Contains(resp.Error, "truncated") {
+		t.Error("truncated error should contain 'truncated' indicator")
+	}
+}
+
 func TestHandleExplorePage_WithProviders(t *testing.T) {
 	s := newExploreTestServer(t, nil)
 	req := httptest.NewRequest(http.MethodGet, "/explore", http.NoBody)

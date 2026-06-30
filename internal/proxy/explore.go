@@ -96,13 +96,20 @@ func (s *Server) handleExploreAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply CacheKeySuffix so the cache key matches the main proxy path.
+	if prov.CacheKeySuffix != nil {
+		if suffix := prov.CacheKeySuffix(ctx, upstreamModel); suffix != "" {
+			ctx = withCacheModel(ctx, upstreamModel+"@"+suffix)
+		}
+	}
+
 	report, _ := s.fetchAndVerify(ctx, prov, upstreamModel)
 	if report == nil {
 		http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
 		return
 	}
 
-	s.cache.Put(prov.Name, upstreamModel, report)
+	s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(report); err != nil {
@@ -174,7 +181,7 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) e
 
 	result := rec.Result()
 	defer result.Body.Close()
-	respBody, _ := io.ReadAll(result.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(result.Body, 1<<20)) // 1 MB cap
 
 	if result.StatusCode != http.StatusOK {
 		// Try to parse as a verification report (502 blocked response).
@@ -187,9 +194,13 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) e
 				Error:   fmt.Sprintf("attestation blocked (HTTP %d)", result.StatusCode),
 			}
 		}
+		errBody := bytes.TrimSpace(respBody)
+		if len(errBody) > 512 {
+			errBody = append(errBody[:512], []byte("... (truncated)")...)
+		}
 		return exploreInferResponse{
 			Model: model,
-			Error: fmt.Sprintf("HTTP %d: %s", result.StatusCode, bytes.TrimSpace(respBody)),
+			Error: fmt.Sprintf("HTTP %d: %s", result.StatusCode, errBody),
 		}
 	}
 
@@ -213,10 +224,17 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) e
 		responseText = chatResp.Choices[0].Message.Content
 	}
 
-	// Check cached report for E2EE status.
+	// Check cached report for E2EE status. Apply CacheKeySuffix so the
+	// cache key matches the main proxy path (e.g. "model@domain").
 	var e2ee bool
 	if prov, upModel, ok := s.resolveModel(model); ok {
-		cacheKey := cacheModelFor(ctx, upModel)
+		lookupCtx := ctx
+		if prov.CacheKeySuffix != nil {
+			if suffix := prov.CacheKeySuffix(lookupCtx, upModel); suffix != "" {
+				lookupCtx = withCacheModel(lookupCtx, upModel+"@"+suffix)
+			}
+		}
+		cacheKey := cacheModelFor(lookupCtx, upModel)
 		if report, cacheOK := s.cache.Get(prov.Name, cacheKey); cacheOK {
 			e2ee = prov.E2EE && report.ReportDataBindingPassed()
 		}
