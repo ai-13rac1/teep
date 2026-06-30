@@ -66,6 +66,22 @@ type usageInfo struct {
 	} `json:"usage"`
 }
 
+type chunkCallbackKey struct{}
+
+// WithChunkCallback returns a context that carries a chunk notification
+// callback. RelayStream and RelayStreamChutes call fn() for each SSE data
+// chunk relayed, enabling callers to track live throughput.
+func WithChunkCallback(ctx context.Context, fn func()) context.Context {
+	return context.WithValue(ctx, chunkCallbackKey{}, fn)
+}
+
+// notifyChunk invokes the chunk callback stored in ctx, if any.
+func notifyChunk(ctx context.Context) {
+	if fn, ok := ctx.Value(chunkCallbackKey{}).(func()); ok {
+		fn()
+	}
+}
+
 // IsNonEncryptedField reports whether key is known plaintext metadata in
 // OpenAI chat delta/message objects.
 //
@@ -1271,6 +1287,7 @@ func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, ses
 		if !done {
 			if data, ok := strings.CutPrefix(line, "data: "); ok && data != "[DONE]" {
 				stats.recordChunk(data, &firstChunk)
+				notifyChunk(ctx)
 			}
 		}
 		return done

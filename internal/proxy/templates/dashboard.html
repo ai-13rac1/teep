@@ -77,9 +77,10 @@
 
   /* ---- traffic ---- */
   .traffic { display: grid; grid-template-columns: 1fr 1.2fr; gap: 26px; align-items: center; }
-  .metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px 18px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 18px; }
   .metric .n { font-family: var(--mono); font-size: 1.3rem; font-weight: 600; color: var(--ink); }
   .metric .n.warnz { color: var(--alert); }
+  .metric .n.activez { color: var(--seal); }
   .metric .l { font-family: var(--mono); font-size: 0.6rem; text-transform: uppercase;
     letter-spacing: 0.12em; color: var(--faint); margin-top: 1px; }
   .spark { display: flex; flex-direction: column; }
@@ -434,19 +435,31 @@ function renderEnclaves(d) {
   }
 }
 
+var lastChunks = null;
+
 function renderTraffic(d) {
   var r = d.requests || {};
+  var curChunks = r.total_chunks || 0;
+  var havePrior = lastChunks !== null;
+  var tokSec = 0;
+  if (havePrior) { tokSec = curChunks - lastChunks; if (tokSec < 0) tokSec = 0; }
+  lastChunks = curChunks;
+  var as = r.active_streaming || 0;
+  var an = r.active_non_stream || 0;
   var m = [
     { n: r.total || 0, l: "Requests" },
     { n: r.streaming || 0, l: "Streaming" },
     { n: r.non_stream || 0, l: "Non-stream" },
+    { n: (as > 0 && havePrior) ? tokSec : "—", l: "Tok/s", active: as > 0 && havePrior && tokSec > 0 },
     { n: r.e2ee || 0, l: "E2EE" },
     { n: r.plaintext || 0, l: "Plaintext" },
-    { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 }
+    { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 },
+    { n: as + an, l: "Active", active: (as + an) > 0 }
   ];
   var h = "";
   for (var i = 0; i < m.length; i++) {
-    h += '<div class="metric"><div class="n' + (m[i].warn ? ' warnz' : '') + '">' +
+    var cls = m[i].warn ? ' warnz' : (m[i].active ? ' activez' : '');
+    h += '<div class="metric"><div class="n' + cls + '">' +
       esc(m[i].n) + '</div><div class="l">' + esc(m[i].l) + '</div></div>';
   }
   el("metrics").innerHTML = h;

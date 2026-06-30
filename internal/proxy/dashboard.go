@@ -84,12 +84,17 @@ type dashboardProvider struct {
 }
 
 type dashboardRequests struct {
-	Total         int64  `json:"total"`
-	Streaming     int64  `json:"streaming"`
-	NonStream     int64  `json:"non_stream"`
-	E2EE          int64  `json:"e2ee"`
-	Plaintext     int64  `json:"plaintext"`
-	Errors        int64  `json:"errors"`
+	Total     int64 `json:"total"`
+	Streaming int64 `json:"streaming"`
+	NonStream int64 `json:"non_stream"`
+	E2EE      int64 `json:"e2ee"`
+	Plaintext int64 `json:"plaintext"`
+	Errors    int64 `json:"errors"`
+
+	ActiveStreaming int64 `json:"active_streaming"`
+	ActiveNonStream int64 `json:"active_non_stream"`
+	TotalChunks     int64 `json:"total_chunks"`
+
 	LastRequestAt string `json:"last_request_at"`
 	LastSuccessAt string `json:"last_success_at"`
 }
@@ -282,14 +287,17 @@ func (s *Server) buildDashboardData() dashboardData {
 		Providers:    providers,
 		Attestations: attestations,
 		Requests: dashboardRequests{
-			Total:         s.stats.requests.Load(),
-			Streaming:     s.stats.streaming.Load(),
-			NonStream:     s.stats.nonStream.Load(),
-			E2EE:          s.stats.e2ee.Load(),
-			Plaintext:     s.stats.plaintext.Load(),
-			Errors:        s.stats.errors.Load(),
-			LastRequestAt: nanoAgo(s.stats.lastRequestAt.Load()),
-			LastSuccessAt: nanoAgo(s.stats.lastSuccessAt.Load()),
+			Total:           s.stats.requests.Load(),
+			Streaming:       s.stats.streaming.Load(),
+			NonStream:       s.stats.nonStream.Load(),
+			E2EE:            s.stats.e2ee.Load(),
+			Plaintext:       s.stats.plaintext.Load(),
+			Errors:          s.stats.errors.Load(),
+			ActiveStreaming: s.stats.activeStreaming.Load(),
+			ActiveNonStream: s.stats.activeNonStream.Load(),
+			TotalChunks:     s.stats.totalChunks.Load(),
+			LastRequestAt:   nanoAgo(s.stats.lastRequestAt.Load()),
+			LastSuccessAt:   nanoAgo(s.stats.lastSuccessAt.Load()),
 		},
 		Cache: dashboardCache{
 			Entries:  s.cache.Len(),
@@ -412,6 +420,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# HELP teep_upstream_errors_total Total HTTP errors from upstream providers\n")
 	fmt.Fprintf(w, "# TYPE teep_upstream_errors_total counter\n")
 	fmt.Fprintf(w, "teep_upstream_errors_total %d\n", s.stats.httpErrors.Load())
+	fmt.Fprintf(w, "# HELP teep_active_streaming_requests In-flight streaming requests\n")
+	fmt.Fprintf(w, "# TYPE teep_active_streaming_requests gauge\n")
+	fmt.Fprintf(w, "teep_active_streaming_requests %d\n", s.stats.activeStreaming.Load())
+	fmt.Fprintf(w, "# HELP teep_active_non_stream_requests In-flight non-streaming requests\n")
+	fmt.Fprintf(w, "# TYPE teep_active_non_stream_requests gauge\n")
+	fmt.Fprintf(w, "teep_active_non_stream_requests %d\n", s.stats.activeNonStream.Load())
+	fmt.Fprintf(w, "# HELP teep_stream_chunks_total Total SSE data chunks relayed across all streams\n")
+	fmt.Fprintf(w, "# TYPE teep_stream_chunks_total counter\n")
+	fmt.Fprintf(w, "teep_stream_chunks_total %d\n", s.stats.totalChunks.Load())
 	fmt.Fprintf(w, "# HELP teep_uptime_seconds Seconds since the proxy started\n")
 	fmt.Fprintf(w, "# TYPE teep_uptime_seconds gauge\n")
 	fmt.Fprintf(w, "teep_uptime_seconds %g\n", time.Since(s.stats.startTime).Seconds())

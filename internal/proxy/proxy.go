@@ -102,6 +102,13 @@ type stats struct {
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
 
+	// In-flight request gauges (incremented on entry, decremented on exit).
+	activeStreaming atomic.Int64
+	activeNonStream atomic.Int64
+	// totalChunks is a monotone counter of SSE data chunks relayed across all
+	// streams; dashboard clients compute per-second rates from the delta.
+	totalChunks atomic.Int64
+
 	lastRequestAt atomic.Int64 // unix nanos of the most recent request; 0 = never
 	lastSuccessAt atomic.Int64 // unix nanos of the most recent successful response; 0 = never
 
@@ -1571,8 +1578,13 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 		ms.lastRequestAt.Store(requestStart.Unix())
 		if stream {
 			s.stats.streaming.Add(1)
+			s.stats.activeStreaming.Add(1)
+			defer s.stats.activeStreaming.Add(-1)
+			ctx = e2ee.WithChunkCallback(ctx, func() { s.stats.totalChunks.Add(1) })
 		} else {
 			s.stats.nonStream.Add(1)
+			s.stats.activeNonStream.Add(1)
+			defer s.stats.activeNonStream.Add(-1)
 		}
 
 		if s.negCache.IsBlocked(prov.Name, cacheModelFor(ctx, upstreamModel)) {
