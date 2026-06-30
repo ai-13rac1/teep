@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -26,15 +27,55 @@ type dashboardData struct {
 }
 
 type dashAttestation struct {
-	Provider       string   `json:"provider"`
-	Model          string   `json:"model"`
-	Passed         int      `json:"passed"`
-	EnforcedFailed int      `json:"enforced_failed"`
-	AllowedFailed  int      `json:"allowed_failed"`
-	Blocked        bool     `json:"blocked"`
-	BlockedFactors []string `json:"blocked_factors"` // non-empty when Blocked
-	E2EE           string   `json:"e2ee"`
-	Verified       string   `json:"verified"`
+	Provider       string       `json:"provider"`
+	Model          string       `json:"model"`
+	Passed         int          `json:"passed"`
+	EnforcedFailed int          `json:"enforced_failed"`
+	AllowedFailed  int          `json:"allowed_failed"`
+	Blocked        bool         `json:"blocked"`
+	BlockedFactors []string     `json:"blocked_factors"` // non-empty when Blocked
+	E2EE           string       `json:"e2ee"`
+	Verified       string       `json:"verified"`
+	Factors        []dashFactor `json:"factors"` // full per-factor breakdown for drill-down
+	Tiers          []dashTier   `json:"tiers"`   // per-tier pass/total rollup, in report order
+}
+
+// dashFactor is one verification factor flattened for the dashboard. Status is
+// a lowercase string ("pass"/"fail"/"skip"/"na") so the client can style it
+// without re-deriving the Status enum.
+type dashFactor struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Tier     string `json:"tier"`
+	Enforced bool   `json:"enforced"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+// dashTier rolls up the factors in one tier so the client can draw coverage
+// bars without grouping the flat factor list itself.
+type dashTier struct {
+	Name   string `json:"name"`
+	Passed int    `json:"passed"`
+	Failed int    `json:"failed"` // enforced failures (red)
+	Warned int    `json:"warned"` // allowed failures (yellow)
+	Total  int    `json:"total"`  // excludes N/A factors (not part of the score)
+}
+
+// dashFactorStatus maps an attestation.Status to the short lowercase token the
+// dashboard uses for styling.
+func dashFactorStatus(s attestation.Status) string {
+	switch s {
+	case attestation.Pass:
+		return "pass"
+	case attestation.Fail:
+		return "fail"
+	case attestation.Skip:
+		return "skip"
+	case attestation.NotApplicable:
+		return "na"
+	default:
+		return "skip"
+	}
 }
 
 type dashboardProvider struct {
@@ -185,6 +226,41 @@ func (s *Server) buildDashboardData() dashboardData {
 				blockedFactors[i] = f.Name
 			}
 		}
+
+		// Flatten factors for the drill-down and roll them up per tier. Tier
+		// order follows first appearance in the report, which is already the
+		// canonical Tier 1..4 ordering produced by BuildReport.
+		factors := make([]dashFactor, len(report.Factors))
+		var tiers []dashTier
+		tierIdx := make(map[string]int)
+		for i, f := range report.Factors {
+			factors[i] = dashFactor{
+				Name:     f.Name,
+				Status:   dashFactorStatus(f.Status),
+				Tier:     f.Tier,
+				Enforced: f.Enforced,
+				Detail:   f.Detail,
+			}
+			idx, exists := tierIdx[f.Tier]
+			if !exists {
+				idx = len(tiers)
+				tierIdx[f.Tier] = idx
+				tiers = append(tiers, dashTier{Name: f.Tier})
+			}
+			if f.Status == attestation.NotApplicable {
+				continue // N/A factors are not part of the score denominator
+			}
+			tiers[idx].Total++
+			switch {
+			case f.Status == attestation.Pass:
+				tiers[idx].Passed++
+			case f.Status == attestation.Fail && f.Enforced:
+				tiers[idx].Failed++
+			case f.Status == attestation.Fail:
+				tiers[idx].Warned++
+			}
+		}
+
 		attestations = append(attestations, dashAttestation{
 			Provider:       info.Provider,
 			Model:          info.Model,
@@ -195,6 +271,8 @@ func (s *Server) buildDashboardData() dashboardData {
 			BlockedFactors: blockedFactors,
 			E2EE:           e2ee,
 			Verified:       time.Since(info.FetchedAt).Truncate(time.Second).String() + " ago",
+			Factors:        factors,
+			Tiers:          tiers,
 		})
 	}
 
@@ -339,353 +417,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "teep_uptime_seconds %g\n", time.Since(s.stats.startTime).Seconds())
 }
 
-// handleIndex serves a live stats dashboard at /.
-// Initial data is embedded as JSON so the page renders immediately.
-// An EventSource connection to /events takes over for live updates.
-func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+// dashboardTemplateData is the context passed to the "dashboard" template.
+type dashboardTemplateData struct {
+	InitialJSON template.JS
+}
+
+// handleIndex serves the live attestation dashboard at /.
+// The page is fully self-contained — no external fonts, scripts, or network
+// requests — so it works on an air-gapped loopback proxy. Initial data is
+// inlined as JSON for an instant first paint; an EventSource to /events then
+// streams updates once per second.
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	initial, err := json.Marshal(s.buildDashboardData())
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>teep</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
-    max-width: 760px; margin: 0 auto; padding: 40px 24px;
-    background: #0d1117; color: #c9d1d9; line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  h1 {
-    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
-    font-size: 1.5em; font-weight: 600; color: #e6edf3; letter-spacing: -0.02em;
-  }
-  .subtitle { color: #8b949e; font-size: 0.9em; margin-top: 0.25em; }
-  h2 {
-    font-size: 0.75em; font-weight: 600; color: #8b949e;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    margin-top: 2em; margin-bottom: 0.5em;
-  }
-  section {
-    background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; padding: 16px 20px;
-  }
-  code {
-    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
-    background: #21262d; padding: 2px 6px; border-radius: 4px;
-    font-size: 0.85em; color: #58a6ff;
-  }
-  table { border-collapse: collapse; width: 100%%; }
-  td, th {
-    text-align: left; padding: 6px 16px 6px 0;
-    font-variant-numeric: tabular-nums;
-  }
-  th { color: #8b949e; font-weight: 400; font-size: 0.9em; }
-  td { color: #e6edf3; }
-  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-  .model-table th {
-    border-bottom: 1px solid #30363d; padding-bottom: 8px;
-    font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em;
-  }
-  .model-table td {
-    border-bottom: 1px solid #21262d; padding: 8px 16px 8px 0;
-    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
-    font-size: 0.85em;
-  }
-  .model-table td:first-child {
-    font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; font-size: 0.9em;
-  }
-  .model-table tr:last-child td { border-bottom: none; }
-  .footer {
-    color: #484f58; font-size: 0.8em;
-    margin-top: 2em; padding-top: 1em; border-top: 1px solid #21262d;
-  }
-  .footer code { background: transparent; padding: 0; }
-  .text-green { color: #3fb950; }
-  .text-red { color: #f85149; }
-  .status-banner {
-    border-radius: 8px; padding: 14px 20px; margin-top: 1.5em;
-    font-size: 1em; font-weight: 500; color: #e6edf3;
-    border-left: 3px solid transparent;
-  }
-  .status-banner.green { background: #0d2b0d; border-left-color: #3fb950; }
-  .status-banner.yellow { background: #2b2200; border-left-color: #d29922; }
-  .status-banner.red { background: #2b0d0d; border-left-color: #f85149; }
-  .status-banner.grey { background: #161b22; border-left-color: #484f58; color: #8b949e; }
-  .status-row {
-    padding: 10px 20px; background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; margin-top: 8px;
-  }
-  .status-row-head { display: flex; justify-content: space-between; align-items: baseline; }
-  .status-row-name { font-weight: 500; color: #e6edf3; }
-  .status-row-time { font-size: 0.8em; color: #8b949e; flex-shrink: 0; margin-left: 12px; }
-  .status-row-detail { font-size: 0.85em; color: #8b949e; margin-top: 3px; }
-</style>
-</head>
-<body>
-<h1>teep</h1>
-<p class="subtitle">TEE attestation proxy on <code id="listen-addr"></code> &mdash; up <span id="uptime"></span></p>
-
-<div id="status-banner"></div>
-<div id="status-models"></div>
-
-<h2>Attestation</h2>
-<section>
-<table class="model-table">
-  <tr><th>Provider</th><th>Model</th><th>Score</th><th>E2EE</th><th>Verified</th></tr>
-  <tbody id="attest-rows"></tbody>
-</table>
-</section>
-
-<h2>Models</h2>
-<section>
-<table class="model-table">
-  <tr><th>Model</th><th>Requests</th><th>Errors</th><th>Verify</th><th>Tok/s</th><th>Last request</th></tr>
-  <tbody id="model-rows"></tbody>
-</table>
-</section>
-
-<h2>Requests</h2>
-<section>
-<div class="stat-grid">
-<table>
-  <tr><th>Total</th><td id="req-total"></td></tr>
-  <tr><th>Streaming</th><td id="req-streaming"></td></tr>
-  <tr><th>Non-stream</th><td id="req-nonstream"></td></tr>
-</table>
-<table>
-  <tr><th>E2EE</th><td id="req-e2ee"></td></tr>
-  <tr><th>Plaintext</th><td id="req-plaintext"></td></tr>
-  <tr><th>Errors</th><td id="req-errors"></td></tr>
-</table>
-</div>
-<table style="margin-top:8px">
-  <tr><th>Last request</th><td id="req-last-request"></td></tr>
-  <tr><th>Last success</th><td id="req-last-success"></td></tr>
-</table>
-</section>
-
-<h2>Attestation Cache</h2>
-<section>
-<table>
-  <tr><th>Entries</th><td id="cache-entries"></td></tr>
-  <tr><th>Negative</th><td id="cache-negative"></td></tr>
-  <tr><th>Hit rate</th><td id="cache-hitrate"></td></tr>
-</table>
-</section>
-
-<h2>HTTP Transport</h2>
-<section>
-<table>
-  <tr><th>Requests</th><td id="http-requests"></td></tr>
-  <tr><th>Errors</th><td id="http-errors"></td></tr>
-</table>
-</section>
-
-<h2>Endpoints</h2>
-<section>
-<table>
-  <tr><td><code>POST /v1/chat/completions</code></td><td>Proxy with TEE attestation</td></tr>
-  <tr><td><code>GET /v1/models</code></td><td>List models</td></tr>
-  <tr><td><code>GET /v1/tee/report</code></td><td>Cached attestation report</td></tr>
-</table>
-</section>
-
-<h2>Providers</h2>
-<section>
-<table class="model-table">
-  <tr><th>Name</th><th>Upstream</th><th>E2EE</th></tr>
-  <tbody id="prov-rows"></tbody>
-</table>
-</section>
-
-<p class="footer" id="footer"></p>
-
-<script>
-function esc(s) {
-  var d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
-
-function render(d) {
-  document.getElementById("listen-addr").textContent = d.listen_addr;
-  document.getElementById("uptime").textContent = d.uptime;
-
-  // --- Status overview ---
-  var atts = d.attestations || [];
-  var nBlocked = 0, nE2EE = 0, nVerified = 0;
-  for (var i = 0; i < atts.length; i++) {
-    if (atts[i].blocked) { nBlocked++; }
-    else { nVerified++; if (atts[i].e2ee === "usable") nE2EE++; }
-  }
-  var bannerText, bannerClass;
-  if (atts.length === 0) {
-    bannerText = "No models verified yet \u2014 send a request to begin";
-    bannerClass = "grey";
-  } else if (nBlocked > 0 && nVerified === 0) {
-    bannerText = "Security verification failed for " + nBlocked + " model" + (nBlocked > 1 ? "s" : "");
-    bannerClass = "red";
-  } else if (nBlocked > 0) {
-    bannerText = nVerified + " model" + (nVerified > 1 ? "s" : "") + " verified" +
-      (nE2EE > 0 ? " \u00b7 end-to-end encrypted" : "") + " \u00b7 " +
-      nBlocked + " blocked";
-    bannerClass = "yellow";
-  } else if (nE2EE === nVerified) {
-    bannerText = nVerified + " model" + (nVerified > 1 ? "s" : "") +
-      " running in secure enclave" + (nVerified > 1 ? "s" : "") +
-      " \u00b7 End-to-end encrypted";
-    bannerClass = "green";
-  } else {
-    bannerText = nVerified + " model" + (nVerified > 1 ? "s" : "") +
-      " running in secure enclave" + (nVerified > 1 ? "s" : "") +
-      (nE2EE > 0 ? " \u00b7 " + nE2EE + " encrypted" : "");
-    bannerClass = "yellow";
-  }
-  var banner = document.getElementById("status-banner");
-  banner.textContent = bannerText;
-  banner.className = "status-banner " + bannerClass;
-
-  var statusModels = document.getElementById("status-models");
-  statusModels.innerHTML = "";
-  for (var i = 0; i < atts.length; i++) {
-    var a = atts[i];
-    var ms = d.models[a.provider + "/" + a.model] || {};
-    var reqCount = ms.requests || 0;
-    var dot, dotColor, detail;
-    if (a.blocked) {
-      dot = "\u2717"; dotColor = "#f85149";
-      detail = "Security blocked \u2014 " + esc((a.blocked_factors || []).join(", ") || "unknown");
-    } else if (a.e2ee === "usable") {
-      dot = "\u25cf"; dotColor = "#3fb950";
-      detail = "Secure enclave \u00b7 End-to-end encrypted";
-    } else if (a.e2ee === "capable") {
-      dot = "\u26a0"; dotColor = "#d29922";
-      detail = "Secure enclave \u00b7 Encryption available";
-    } else if (a.allowed_failed > 0) {
-      dot = "\u26a0"; dotColor = "#d29922";
-      detail = "Secure enclave \u00b7 Some checks pending";
-    } else {
-      dot = "\u25cf"; dotColor = "#3fb950";
-      detail = "Secure enclave \u00b7 Standard connection";
-    }
-    if (reqCount > 0) detail += " \u00b7 " + reqCount + " req";
-    var div = document.createElement("div");
-    div.className = "status-row";
-    div.innerHTML = '<div class="status-row-head">' +
-      '<span class="status-row-name"><span style="color:' + dotColor + '">' + dot + '</span> ' +
-      esc(a.provider) + " / " + esc(a.model) + '</span>' +
-      '<span class="status-row-time">verified ' + esc(a.verified) + '</span>' +
-      '</div><div class="status-row-detail">' + detail + '</div>';
-    statusModels.appendChild(div);
-  }
-  // Models with requests but no attestation yet
-  for (var k in d.models) {
-    var seen = false;
-    for (var i = 0; i < atts.length; i++) {
-      if (atts[i].provider + "/" + atts[i].model === k) { seen = true; break; }
-    }
-    if (!seen && d.models[k].requests > 0) {
-      var div = document.createElement("div");
-      div.className = "status-row";
-      div.innerHTML = '<div class="status-row-head">' +
-        '<span class="status-row-name"><span style="color:#484f58">\u25cc</span> ' + esc(k) + '</span>' +
-        '</div><div class="status-row-detail">Awaiting verification \u00b7 ' + d.models[k].requests + ' req</div>';
-      statusModels.appendChild(div);
-    }
-  }
-
-  var provRows = document.getElementById("prov-rows");
-  provRows.innerHTML = "";
-  var provNames = Object.keys(d.providers).sort();
-  for (var i = 0; i < provNames.length; i++) {
-    var pname = provNames[i];
-    var p = d.providers[pname];
-    var e2eeClass = p.e2ee === "enabled" ? "text-green" : "text-red";
-    var tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(pname) + "</td><td>" + esc(p.upstream) + "</td><td class=\"" + e2eeClass + "\">" + esc(p.e2ee) + "</td>";
-    provRows.appendChild(tr);
-  }
-  var attestRows = document.getElementById("attest-rows");
-  attestRows.innerHTML = "";
-  if (atts.length === 0) {
-    var tr = document.createElement("tr");
-    tr.innerHTML = "<td colspan=\"5\" style=\"color:#8b949e\">No attestations cached yet.</td>";
-    attestRows.appendChild(tr);
-  } else {
-    for (var j = 0; j < atts.length; j++) {
-      var a = atts[j];
-      var scoreCell;
-      if (a.blocked) {
-        var detail = (a.blocked_factors && a.blocked_factors.length) ? " \u2014 " + esc(a.blocked_factors.join(", ")) : "";
-        scoreCell = "<td class=\"text-red\">BLOCKED" + detail + "</td>";
-      } else if (a.allowed_failed > 0) {
-        scoreCell = "<td>" + a.passed + " passed <span style=\"color:#8b949e\">(" + a.allowed_failed + " allowed)</span></td>";
-      } else {
-        scoreCell = "<td class=\"text-green\">" + a.passed + " passed</td>";
-      }
-      var e2eeCell;
-      if (a.e2ee === "usable") {
-        e2eeCell = "<td class=\"text-green\">usable</td>";
-      } else if (a.e2ee === "capable") {
-        e2eeCell = "<td style=\"color:#d29922\">capable</td>";
-      } else {
-        e2eeCell = "<td style=\"color:#484f58\">\u2014</td>";
-      }
-      var tr = document.createElement("tr");
-      tr.innerHTML = "<td>" + esc(a.provider) + "</td><td>" + esc(a.model) +
-        "</td>" + scoreCell + e2eeCell + "<td>" + esc(a.verified) + "</td>";
-      attestRows.appendChild(tr);
-    }
-  }
-  document.getElementById("req-total").textContent = d.requests.total;
-  document.getElementById("req-streaming").textContent = d.requests.streaming;
-  document.getElementById("req-nonstream").textContent = d.requests.non_stream;
-  document.getElementById("req-e2ee").textContent = d.requests.e2ee;
-  document.getElementById("req-plaintext").textContent = d.requests.plaintext;
-  var errors = document.getElementById("req-errors");
-  errors.textContent = d.requests.errors;
-  errors.className = d.requests.errors > 0 ? "text-red" : "";
-  document.getElementById("req-last-request").textContent = d.requests.last_request_at;
-  document.getElementById("req-last-success").textContent = d.requests.last_success_at;
-  document.getElementById("cache-entries").textContent = d.cache.entries;
-  document.getElementById("cache-negative").textContent = d.cache.negative;
-  document.getElementById("cache-hitrate").textContent =
-    d.cache.hit_rate + " (" + d.cache.hits + " hit, " + d.cache.misses + " miss)";
-  document.getElementById("http-requests").textContent = d.http.requests;
-  var httpErrors = document.getElementById("http-errors");
-  httpErrors.textContent = d.http.errors;
-  httpErrors.className = d.http.errors > 0 ? "text-red" : "";
-  var tbody = document.getElementById("model-rows");
-  tbody.innerHTML = "";
-  for (var k in d.models) {
-    var m = d.models[k];
-    var tr = document.createElement("tr");
-    var errClass = m.errors > 0 ? " class=\"text-red\"" : "";
-    tr.innerHTML = "<td>" + esc(k) + "</td><td>" + m.requests + "</td><td" +
-      errClass + ">" + m.errors + "</td><td>" + esc(m.verify_ms) + "</td><td>" +
-      esc(m.tok_per_sec) + "</td><td>" + esc(m.last_request) + "</td>";
-    tbody.appendChild(tr);
-  }
-  document.getElementById("footer").innerHTML =
-    "Live via SSE &mdash; Point any OpenAI-compatible client at <code>http://" + esc(d.listen_addr) + "/v1</code> using <code>provider:model</code> format (e.g. <code>venice:qwen3-5b</code>).";
-}
-
-render(%s);
-
-var es = new EventSource("/events");
-es.onmessage = function(e) { render(JSON.parse(e.data)); };
-es.onerror = function() { setTimeout(function() { location.reload(); }, 5000); };
-</script>
-</body>
-</html>
-`, initial)
+	data := dashboardTemplateData{InitialJSON: template.JS(initial)} //nolint:gosec // G203: initial is server-generated JSON from json.Marshal, not user input
+	if err := templates.ExecuteTemplate(w, "dashboard", data); err != nil {
+		slog.ErrorContext(r.Context(), "write dashboard", "err", err)
+	}
 }

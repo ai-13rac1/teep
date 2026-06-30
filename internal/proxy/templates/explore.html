@@ -1,0 +1,387 @@
+{{define "explore"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>teep — explore</title>
+{{template "base-css"}}
+<style>
+  a { text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .brand { text-decoration: none; }
+
+  /* ---- provider groups ---- */
+  .models { display: flex; flex-direction: column; gap: 10px; }
+  .prov-group { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .prov-head {
+    width: 100%; display: flex; align-items: center; gap: 11px; text-align: left;
+    background: var(--surface); border: 0; color: inherit; font: inherit; cursor: pointer;
+    padding: 14px 16px;
+  }
+  .prov-head:hover { background: var(--surface-2); }
+  .prov-name {
+    font-family: var(--mono); font-size: 1rem; font-weight: 600; color: var(--ink); flex: 1;
+  }
+  .prov-count {
+    font-family: var(--mono); font-size: 0.72rem; color: var(--faint);
+  }
+  .prov-body { display: none; padding: 0 10px 10px; background: var(--bg); }
+  .prov-head[aria-expanded="true"] + .prov-body { display: flex; flex-direction: column; gap: 8px; }
+  .prov-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+
+  /* ---- model card overrides ---- */
+  .card-meta {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    font-family: var(--mono); font-size: 0.68rem; color: var(--faint);
+    margin-top: 4px;
+  }
+  .card-meta .sep { color: var(--line); }
+  .card-desc {
+    font-size: 0.76rem; color: var(--dim); margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden; max-width: 100%;
+  }
+  .meta-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+  .meta-pill {
+    font-family: var(--mono); font-size: 0.58rem; font-weight: 500; letter-spacing: 0.04em;
+    padding: 2px 6px; border-radius: 999px; background: var(--surface-2);
+    color: var(--dim); border: 1px solid var(--line);
+  }
+
+  .card-actions { display: flex; gap: 10px; margin-bottom: 14px; }
+  .btn {
+    font-family: var(--mono); font-size: 0.78rem; font-weight: 600;
+    padding: 7px 16px; border-radius: 8px; border: 1px solid; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-attest { background: transparent; color: var(--seal); border-color: var(--seal); }
+  .btn-attest:hover:not(:disabled) { background: rgba(79,227,193,0.12); }
+  .btn-infer { background: transparent; color: var(--crypt); border-color: var(--crypt); }
+  .btn-infer:hover:not(:disabled) { background: rgba(91,184,255,0.12); }
+
+  .result { margin-top: 12px; }
+  .result[hidden] { display: none; }
+  .result-status {
+    font-family: var(--mono); font-size: 0.82rem; font-weight: 600;
+    padding: 5px 0; display: flex; align-items: center; gap: 8px;
+  }
+  .result-status .dot { font-size: 0.9rem; }
+  .result-body { font-size: 0.84rem; color: var(--dim); margin-top: 6px; }
+
+  .pill.pass { color: var(--seal); }
+  .pill.fail { color: var(--alert); }
+
+  /* infer result */
+  .infer-result { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; margin-top: 10px; }
+  .infer-meta { font-family: var(--mono); font-size: 0.72rem; color: var(--faint);
+    display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+  .infer-text { font-size: 0.9rem; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+
+  /* loading spinner */
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--faint);
+    border-top-color: var(--seal); border-radius: 50%; animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <g stroke="#4FE3C1" stroke-width="3">
+          <path d="M27 13 L18 13 Q14 13 14 17 L14 47 Q14 51 18 51 L27 51"/>
+          <path d="M37 13 L46 13 Q50 13 50 17 L50 47 Q50 51 46 51 L37 51"/>
+        </g>
+        <path d="M28 24 L37 32 L28 40" stroke="#E8EEF4" stroke-width="3.4"/>
+      </svg>
+      <span class="word">teep</span>
+    </a>
+    <div class="topmeta">
+      <a href="/">Dashboard</a>
+      <span style="color:var(--ink); font-weight:500;">Explore</span>
+    </div>
+  </header>
+
+  <section class="block">
+    <div class="block-head">
+      <h3 class="eyebrow">Models</h3>
+      <input class="filter" id="filter" type="text" placeholder="filter models..." aria-label="Filter models">
+    </div>
+    <div id="status" class="panel" style="color:var(--dim)">Loading models...</div>
+    <div class="models" id="models"></div>
+  </section>
+
+  <p class="footer">Explore providers, attestation, and inference.
+    <a href="/">Back to dashboard</a></p>
+</div>
+
+{{template "base-js"}}
+<script>
+var PROVIDERS = {{.ProvidersJSON}};
+var provInfo = {};
+for (var pi = 0; pi < PROVIDERS.length; pi++) {
+  provInfo[PROVIDERS[pi].name] = PROVIDERS[pi];
+}
+
+var allModels = [];
+var filterText = "";
+var provExpanded = {};
+
+function fmtCtx(n) {
+  if (!n || n <= 0) return "";
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M ctx";
+  if (n >= 1000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + "k ctx";
+  return n + " ctx";
+}
+
+function modelMeta(m) {
+  var parts = [];
+  var ctx = m.context_length || m.context_window ||
+    (m.model_spec && m.model_spec.availableContextTokens) || 0;
+  if (ctx > 0) parts.push(fmtCtx(ctx));
+  if (m.type) parts.push(esc(m.type));
+  if (m.quantization) parts.push(esc(m.quantization));
+  if (m.owned_by) parts.push(esc(m.owned_by));
+  if (!parts.length) return "";
+  return '<div class="card-meta">' + parts.join('<span class="sep">\u00b7</span>') + '</div>';
+}
+
+function modelPills(m) {
+  var pills = [];
+  if (m.multimodal) pills.push("multimodal");
+  if (m.tool_calling) pills.push("tools");
+  if (m.reasoning) pills.push("reasoning");
+  var feats = m.supported_features || [];
+  for (var i = 0; i < feats.length; i++) {
+    if (pills.indexOf(feats[i]) === -1) pills.push(feats[i]);
+  }
+  var inMod = m.input_modalities || [];
+  var outMod = m.output_modalities || [];
+  for (var j = 0; j < inMod.length; j++) {
+    var label = inMod[j] + " in";
+    if (pills.indexOf(label) === -1) pills.push(label);
+  }
+  for (var k = 0; k < outMod.length; k++) {
+    var olabel = outMod[k] + " out";
+    if (pills.indexOf(olabel) === -1) pills.push(olabel);
+  }
+  if (!pills.length) return "";
+  var h = '<div class="meta-pills">';
+  for (var p = 0; p < pills.length; p++) {
+    h += '<span class="meta-pill">' + esc(pills[p]) + '</span>';
+  }
+  return h + '</div>';
+}
+
+function modelDesc(m) {
+  var desc = m.description || (m.model_spec && m.model_spec.description) || "";
+  if (!desc) return "";
+  return '<div class="card-desc">' + esc(desc) + '</div>';
+}
+
+function modelCard(m) {
+  var id = m._id;
+  var parts = id.split(":");
+  var prov = parts[0] || "";
+  var name = parts.slice(1).join(":") || id;
+
+  return '<div class="card" data-model="' + esc(id) + '">' +
+    '<div class="card-head">' +
+      '<div style="flex:1; min-width:0">' +
+        '<div class="card-name"><span class="prov">' + esc(prov) + ':</span>' + esc(name) + '</div>' +
+        modelMeta(m) + modelDesc(m) +
+      '</div>' +
+    '</div>' +
+    '<div class="card-body">' +
+      modelPills(m) +
+      '<div class="card-actions" style="margin-top:10px">' +
+        '<button class="btn btn-attest" data-attest="' + esc(id) + '">Attest</button>' +
+        '<button class="btn btn-infer" data-infer="' + esc(id) + '">Infer</button>' +
+      '</div>' +
+      '<div class="result" id="attest-' + esc(id) + '" hidden></div>' +
+      '<div class="result" id="infer-' + esc(id) + '" hidden></div>' +
+    '</div>' +
+  '</div>';
+}
+
+function groupByProvider(models, ft) {
+  var order = [], groups = {};
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    if (ft && m._id.toLowerCase().indexOf(ft) === -1) continue;
+    var prov = m._id.split(":")[0] || "unknown";
+    if (!groups[prov]) { groups[prov] = []; order.push(prov); }
+    groups[prov].push(m);
+  }
+  return { order: order, groups: groups };
+}
+
+function renderModels() {
+  if (allModels.length === 0) {
+    el("status").textContent = "No models available.";
+    el("status").hidden = false;
+    el("models").innerHTML = "";
+    return;
+  }
+  var ft = filterText.toLowerCase();
+  var g = groupByProvider(allModels, ft);
+  if (g.order.length === 0) {
+    el("status").hidden = true;
+    el("models").innerHTML = '<div class="panel" style="color:var(--dim)">No models match "' + esc(filterText) + '".</div>';
+    return;
+  }
+  el("status").hidden = true;
+  var html = "";
+  for (var i = 0; i < g.order.length; i++) {
+    var prov = g.order[i];
+    var models = g.groups[prov];
+    var open = !!provExpanded[prov];
+    var info = provInfo[prov] || {};
+    var provPills = '';
+    if (info.pinned) provPills += '<span class="meta-pill" style="color:var(--seal);border-color:var(--seal)">pinned TLS</span>';
+    if (info.e2ee) provPills += '<span class="meta-pill" style="color:var(--crypt);border-color:var(--crypt)">E2EE</span>';
+    html += '<div class="prov-group">' +
+      '<button class="prov-head" aria-expanded="' + open + '" data-prov-toggle="' + esc(prov) + '">' +
+        '<span class="prov-name">' + esc(prov) + '</span>' +
+        provPills +
+        '<span class="prov-count">' + models.length + (models.length === 1 ? ' model' : ' models') + '</span>' +
+        '<span class="chev">\u25b8</span>' +
+      '</button>' +
+      '<div class="prov-body">';
+    for (var j = 0; j < models.length; j++) {
+      html += modelCard(models[j]);
+    }
+    html += '</div></div>';
+  }
+  el("models").innerHTML = html;
+  wireEvents();
+}
+
+function wireEvents() {
+  var provToggles = document.querySelectorAll(".prov-head[data-prov-toggle]");
+  for (var p = 0; p < provToggles.length; p++) {
+    provToggles[p].addEventListener("click", function() {
+      var k = this.getAttribute("data-prov-toggle");
+      provExpanded[k] = !provExpanded[k];
+      this.setAttribute("aria-expanded", provExpanded[k]);
+    });
+  }
+  var attBtns = document.querySelectorAll(".btn-attest[data-attest]");
+  for (var j = 0; j < attBtns.length; j++) {
+    attBtns[j].addEventListener("click", function(e) {
+      e.stopPropagation();
+      doAttest(this.getAttribute("data-attest"));
+    });
+  }
+  var infBtns = document.querySelectorAll(".btn-infer[data-infer]");
+  for (var k = 0; k < infBtns.length; k++) {
+    infBtns[k].addEventListener("click", function(e) {
+      e.stopPropagation();
+      doInfer(this.getAttribute("data-infer"));
+    });
+  }
+}
+
+function setLoading(prefix, model, loading) {
+  var btn = document.querySelector("[data-" + prefix + '="' + CSS.escape(model) + '"]');
+  if (btn) btn.disabled = loading;
+  var res = el(prefix + "-" + model);
+  if (res && loading) {
+    res.hidden = false;
+    res.innerHTML = '<span class="spinner"></span> <span style="color:var(--dim); font-size:0.82rem; margin-left:6px">Running...</span>';
+  }
+}
+
+function doAttest(model) {
+  setLoading("attest", model, true);
+  fetch("/explore/attest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: model })
+  }).then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(report) {
+    var res = el("attest-" + model);
+    if (!res) return;
+    res.hidden = false;
+    res.innerHTML = renderReport(report);
+  }).catch(function(err) {
+    var res = el("attest-" + model);
+    if (!res) return;
+    res.hidden = false;
+    res.innerHTML = '<div class="result-status"><span class="dot" style="color:var(--alert)">\u25cf</span>' +
+      '<span style="color:var(--alert)">Error: ' + esc(err.message) + '</span></div>';
+  }).finally(function() {
+    setLoading("attest", model, false);
+  });
+}
+
+function doInfer(model) {
+  setLoading("infer", model, true);
+  fetch("/explore/infer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: model })
+  }).then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(data) {
+    var res = el("infer-" + model);
+    if (!res) return;
+    res.hidden = false;
+    var h = "";
+    if (data.error) {
+      h += '<div class="result-status"><span class="dot" style="color:var(--alert)">\u25cf</span>' +
+        '<span style="color:var(--alert)">' + esc(data.error) + '</span></div>';
+      if (data.report) h += renderReport(data.report);
+    } else {
+      h += '<div class="infer-result">';
+      h += '<div class="infer-text">' + esc(data.response) + '</div>';
+      h += '<div class="infer-meta">';
+      var pInfo = provInfo[model.split(":")[0]] || {};
+      var e2eeLabel;
+      if (data.e2ee) e2eeLabel = '<span style="color:var(--seal)">\u2713 active</span>';
+      else if (pInfo.e2ee) e2eeLabel = '<span style="color:var(--crypt)">capable</span>';
+      else e2eeLabel = '<span style="color:var(--faint)">no</span>';
+      h += '<span>E2EE: ' + e2eeLabel + '</span>';
+      h += '<span>Latency: ' + data.latency_ms + 'ms</span>';
+      h += '</div></div>';
+    }
+    res.innerHTML = h;
+  }).catch(function(err) {
+    var res = el("infer-" + model);
+    if (!res) return;
+    res.hidden = false;
+    res.innerHTML = '<div class="result-status"><span class="dot" style="color:var(--alert)">\u25cf</span>' +
+      '<span style="color:var(--alert)">Error: ' + esc(err.message) + '</span></div>';
+  }).finally(function() {
+    setLoading("infer", model, false);
+  });
+}
+
+// Load models on page load.
+fetch("/v1/models").then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function(data) {
+  var models = (data.data || []);
+  allModels = [];
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    var id = m.id || m.name;
+    if (id) { m._id = id; allModels.push(m); }
+  }
+  allModels.sort(function(a, b) { return a._id < b._id ? -1 : a._id > b._id ? 1 : 0; });
+  renderModels();
+}).catch(function(err) {
+  el("status").textContent = "Failed to load models: " + err.message;
+});
+
+el("filter").addEventListener("input", function() {
+  filterText = this.value;
+  renderModels();
+});
+</script>
+</body>
+</html>
+{{end}}

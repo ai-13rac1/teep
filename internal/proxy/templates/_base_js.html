@@ -1,0 +1,136 @@
+{{define "base-js"}}
+<script>
+"use strict";
+var TIER_SHORT = { "Tier 1: Core Attestation":"T1 \u00b7 Hardware",
+  "Tier 2: Binding & Crypto":"T2 \u00b7 Crypto",
+  "Tier 3: Supply Chain & Channel Integrity":"T3 \u00b7 Supply chain",
+  "Tier 4: Gateway Attestation":"T4 \u00b7 Gateway" };
+var STATUS_GLYPH = { pass: "\u25cf", fail: "\u2715", skip: "\u25cc", na: "\u2013" };
+
+function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+function el(id) { return document.getElementById(id); }
+
+// factorStatus normalizes factor status from both raw reports (uint8: 0-3)
+// and pre-normalized dashboard data (lowercase strings).
+function factorStatus(s) {
+  if (s === 0 || s === "pass") return "pass";
+  if (s === 1 || s === "fail") return "fail";
+  if (s === 2 || s === "skip") return "skip";
+  return "na";
+}
+
+// timeAgo returns a human-readable relative time string.
+function timeAgo(ts) {
+  if (!ts) return "";
+  var diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (diff < 5) return "just now";
+  if (diff < 60) return diff + "s ago";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  return Math.floor(diff / 3600) + "h ago";
+}
+
+function tierBars(tiers) {
+  if (!tiers || !tiers.length) return "";
+  var h = '<div class="tiers">';
+  for (var i = 0; i < tiers.length; i++) {
+    var t = tiers[i];
+    if (!t.total) continue;
+    var okPct = (t.passed / t.total) * 100;
+    var badPct = (t.failed / t.total) * 100;
+    var warnPct = ((t.warned || 0) / t.total) * 100;
+    var label = TIER_SHORT[t.name] || esc(t.name);
+    h += '<div class="tier"><div class="tier-top"><span>' + label +
+      '</span><span><b>' + t.passed + '</b>/' + t.total + '</span></div>' +
+      '<div class="bar"><i class="ok" style="width:' + okPct + '%"></i>' +
+      '<i class="bad" style="width:' + badPct + '%"></i>' +
+      '<i class="warn" style="width:' + warnPct + '%"></i></div></div>';
+  }
+  return h + '</div>';
+}
+
+// factorList renders the per-tier factor drill-down. When open is false the
+// container starts hidden (toggled by card expand).
+function factorList(factors, open) {
+  if (!factors || !factors.length) return "";
+  var order = [], byTier = {};
+  for (var i = 0; i < factors.length; i++) {
+    var f = factors[i];
+    var tier = f.tier || "Unknown";
+    if (!byTier[tier]) { byTier[tier] = []; order.push(tier); }
+    byTier[tier].push(f);
+  }
+  var h = '<div class="detail"' + (open ? '' : ' hidden') + '>';
+  for (var t = 0; t < order.length; t++) {
+    var tn = order[t];
+    h += '<div class="tier-group"><div class="tier-label">' + esc(TIER_SHORT[tn] || tn) + '</div>';
+    var list = byTier[tn];
+    for (var j = 0; j < list.length; j++) {
+      var f = list[j];
+      var st = factorStatus(f.status);
+      var glyph = STATUS_GLYPH[st] || "\u25cc";
+      var fclass = "";
+      if (st === "fail" && f.enforced) fclass = " f-fail";
+      else if (st === "fail") fclass = " f-warn";
+      var fiClass = (st === "fail" && !f.enforced) ? "warn" : st;
+      var badge = "";
+      if (st === "fail" && f.enforced) badge = '<span class="req">enforced</span>';
+      else if (st === "fail") badge = '<span class="req" style="color:var(--warn);border-color:var(--warn)">allowed</span>';
+      h += '<div class="factor' + fclass + '">' +
+        '<span class="fi ' + fiClass + '">' + glyph + '</span>' +
+        '<span class="fn">' + esc(f.name) + '</span>' +
+        (badge || '<span></span>') +
+        (f.detail ? '<span class="fd">' + esc(f.detail) + '</span>' : '') +
+        '</div>';
+    }
+    h += '</div>';
+  }
+  return h + '</div>';
+}
+
+// renderReport renders a full attestation report (status line, tier bars,
+// factor drill-down). Works with both raw VerificationReport JSON and
+// pre-normalized dashboard data.
+function renderReport(report) {
+  if (!report) return "";
+  var blocked = (report.enforced_failed || 0) > 0;
+  var statusCls = blocked ? "fail" : "pass";
+  var statusText = blocked ? "Blocked" : "Passed";
+  var h = '<div class="result-status"><span class="dot" style="color:var(--' + (blocked ? 'alert' : 'seal') + ')">\u25cf</span>' +
+    '<span class="pill ' + statusCls + '">' + statusText + '</span>';
+  if (report.passed !== undefined) {
+    h += '<span style="font-size:0.78rem; color:var(--dim)">' +
+      report.passed + ' passed';
+    if (report.enforced_failed) h += ', ' + report.enforced_failed + ' enforced failed';
+    if (report.allowed_failed) h += ', ' + report.allowed_failed + ' allowed failed';
+    h += '</span>';
+  }
+  if (report.timestamp) {
+    h += '<span style="font-size:0.72rem; color:var(--faint); margin-left:8px">' +
+      timeAgo(report.timestamp) + '</span>';
+  }
+  h += '</div>';
+
+  // Build tiers from factors (for raw reports without pre-computed tiers).
+  var factors = report.factors || [];
+  var tiers = [];
+  var tierIdx = {};
+  for (var i = 0; i < factors.length; i++) {
+    var f = factors[i];
+    var tier = f.tier || "Unknown";
+    var st = factorStatus(f.status);
+    if (tierIdx[tier] === undefined) {
+      tierIdx[tier] = tiers.length;
+      tiers.push({ name: tier, passed: 0, failed: 0, warned: 0, total: 0 });
+    }
+    if (st === "na") continue;
+    tiers[tierIdx[tier]].total++;
+    if (st === "pass") tiers[tierIdx[tier]].passed++;
+    else if (st === "fail" && f.enforced) tiers[tierIdx[tier]].failed++;
+    else if (st === "fail") tiers[tierIdx[tier]].warned++;
+  }
+  h += tierBars(tiers);
+  h += factorList(factors, true);
+  return h;
+}
+</script>
+{{end}}
