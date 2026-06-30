@@ -958,7 +958,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		"tinfoil_sc", fmtDur(tinfoilSCDur),
 	)
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	ms.lastVerifyMs.Store(totalDur.Milliseconds())
 
 	report := attestation.BuildReport(&attestation.ReportInput{
@@ -1573,7 +1573,7 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		s.stats.requests.Add(1)
 		s.stats.lastRequestAt.Store(requestStart.UnixNano())
-		ms := s.stats.getModelStats(prov.Name, upstreamModel)
+		ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 		ms.requests.Add(1)
 		ms.lastRequestAt.Store(requestStart.Unix())
 		if stream {
@@ -2158,7 +2158,7 @@ func (s *Server) handlePinnedChat(
 		return
 	}
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	session := pinnedResp.Session
 	if session != nil {
 		s.stats.e2ee.Add(1)
@@ -3036,7 +3036,7 @@ func (s *Server) handlePinnedNonChat(
 		return
 	}
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	session := pinnedResp.Session
 	if session != nil {
 		s.stats.e2ee.Add(1)
