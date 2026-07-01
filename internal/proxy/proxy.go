@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"golang.org/x/net/netutil"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -70,6 +71,10 @@ const (
 	// reused for E2EE without re-fetching attestation. Uses the shared
 	// AttestationCacheTTL so all attestation caches expire together.
 	signingKeyCacheTTL = attestation.AttestationCacheTTL
+
+	// modelsCacheTTL is how long cached /v1/models responses are reused
+	// before re-fetching from upstream providers.
+	modelsCacheTTL = 10 * time.Minute
 
 	// upstreamNonStreamTimeout is the context deadline for non-streaming
 	// upstream requests. Must be generous — attestation + E2EE setup can
@@ -437,6 +442,10 @@ type Server struct {
 	sseConns        atomic.Int64            // active SSE /events connections
 	e2eeFailed      sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
 	stats           stats
+	modelsMu        sync.RWMutex      // protects modelsCache and modelsCachedAt
+	modelsCache     []json.RawMessage // cached /v1/models response
+	modelsCachedAt  time.Time         // when modelsCache was populated
+	modelsFlight    singleflight.Group
 }
 
 // New builds a Server from cfg. Providers are wired with their Attester and
@@ -3097,13 +3106,40 @@ type modelsListResponse struct {
 // modelsTimeout is the context deadline for upstream model listing calls.
 const modelsTimeout = 30 * time.Second
 
-// handleModels returns available models from all configured providers in
-// deterministic (sorted) provider order. Each model's "id" field is rewritten
-// to "provider:upstreamID" so clients can route requests back to the correct
-// provider. All other upstream model fields are preserved semantically.
-// Partial-success: a provider that fails listing is logged and skipped.
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(reqid.WithID(r.Context(), reqid.New()), modelsTimeout)
+// cachedModels returns the cached /v1/models response if still within TTL,
+// or nil if the cache is empty or expired. The returned slice is immutable;
+// callers must not modify it.
+func (s *Server) cachedModels() []json.RawMessage {
+	s.modelsMu.RLock()
+	defer s.modelsMu.RUnlock()
+	if s.modelsCache == nil || time.Since(s.modelsCachedAt) > modelsCacheTTL {
+		return nil
+	}
+	return s.modelsCache
+}
+
+// storeModelsCache stores the assembled model list under write lock. The
+// stored slice must not be modified after this call.
+func (s *Server) storeModelsCache(models []json.RawMessage) {
+	s.modelsMu.Lock()
+	defer s.modelsMu.Unlock()
+	s.modelsCache = models
+	s.modelsCachedAt = time.Now()
+}
+
+// writeModelsResponse encodes the model list as JSON to the response writer.
+func writeModelsResponse(w http.ResponseWriter, models []json.RawMessage) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: models}); err != nil {
+		slog.Error("encoding models response", "err", err)
+	}
+}
+
+// fetchModels fans out to all providers, collects models in deterministic
+// order, and caches the assembled result. Individual provider failures are
+// logged and skipped (partial success).
+func (s *Server) fetchModels() []json.RawMessage {
+	ctx, cancel := context.WithTimeout(context.Background(), modelsTimeout)
 	defer cancel()
 
 	provNames := make([]string, 0, len(s.providers))
@@ -3114,8 +3150,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// Fan out model listing to all providers concurrently.
 	// Results are collected in provNames order for deterministic output.
-	type provResult struct{ models []json.RawMessage }
-	results := make([]provResult, len(provNames))
+	results := make([][]json.RawMessage, len(provNames))
 	var wg sync.WaitGroup
 	for i, name := range provNames {
 		prov := s.providers[name]
@@ -3136,25 +3171,44 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					slog.WarnContext(ctx, "model ID prefix failed", "provider", name, "err", err)
 					continue
 				}
-				results[i].models = append(results[i].models, prefixed)
+				results[i] = append(results[i], prefixed)
 			}
 		}(i, name, prov)
 	}
 	wg.Wait()
 
-	totalCap := 0
+	var all []json.RawMessage
 	for _, r := range results {
-		totalCap += len(r.models)
-	}
-	all := make([]json.RawMessage, 0, totalCap)
-	for _, r := range results {
-		all = append(all, r.models...)
+		all = append(all, r...)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: all}); err != nil {
-		slog.ErrorContext(ctx, "encoding models response", "err", err)
+	s.storeModelsCache(all)
+	return all
+}
+
+// handleModels returns available models from all configured providers in
+// deterministic (sorted) provider order. Each model's "id" field is rewritten
+// to "provider:upstreamID" so clients can route requests back to the correct
+// provider. All other upstream model fields are preserved semantically.
+// Partial-success: a provider that fails listing is logged and skipped.
+// Results are cached for modelsCacheTTL to avoid redundant upstream fetches.
+// Concurrent requests coalesce via singleflight to prevent thundering herd.
+func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
+	if cached := s.cachedModels(); cached != nil {
+		writeModelsResponse(w, cached)
+		return
 	}
+
+	v, _, _ := s.modelsFlight.Do("models", func() (any, error) { //nolint:contextcheck // fetchModels uses context.Background intentionally
+		// Double-check: another goroutine may have populated the cache
+		// while we were waiting for the singleflight lock.
+		if cached := s.cachedModels(); cached != nil {
+			return cached, nil
+		}
+		return s.fetchModels(), nil
+	})
+	models, _ := v.([]json.RawMessage)
+	writeModelsResponse(w, models)
 }
 
 // prefixModelID rewrites the "id" field of a JSON model object to
