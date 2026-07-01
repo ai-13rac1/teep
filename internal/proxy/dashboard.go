@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
@@ -25,6 +27,19 @@ type dashboardData struct {
 	Cache        dashboardCache               `json:"cache"`
 	HTTP         dashboardHTTP                `json:"http"`
 	Models       map[string]dashModel         `json:"models"`
+	NegBlocked   []dashNegBlocked             `json:"neg_blocked,omitempty"`
+	E2EEFailures []dashE2EEFailure            `json:"e2ee_failures,omitempty"`
+}
+
+type dashNegBlocked struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Remaining string `json:"remaining"`
+}
+
+type dashE2EEFailure struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 type dashAttestation struct {
@@ -82,6 +97,8 @@ func dashFactorStatus(s attestation.Status) string {
 type dashboardProvider struct {
 	Upstream string `json:"upstream"`
 	E2EE     string `json:"e2ee"`
+	Requests int64  `json:"requests"`
+	Errors   int64  `json:"errors"`
 }
 
 type dashboardRequests struct {
@@ -170,9 +187,15 @@ func (s *Server) buildDashboardData() dashboardData {
 	hits := s.stats.cacheHits.Load()
 	misses := s.stats.cacheMisses.Load()
 
+	// Per-provider request/error rollup, computed alongside per-model stats.
+	type provRollup struct{ requests, errors int64 }
+	provStats := make(map[string]*provRollup)
+
 	models := make(map[string]dashModel)
 	s.stats.modelsMu.RLock()
 	for k, m := range s.stats.models {
+		reqs := m.requests.Load()
+		errs := m.errors.Load()
 		var verifyStr string
 		if ms := m.lastVerifyMs.Load(); ms > 0 {
 			verifyStr = fmt.Sprintf("%dms", ms)
@@ -193,14 +216,32 @@ func (s *Server) buildDashboardData() dashboardData {
 			agoStr = "—"
 		}
 		models[k] = dashModel{
-			Requests:    m.requests.Load(),
-			Errors:      m.errors.Load(),
+			Requests:    reqs,
+			Errors:      errs,
 			VerifyMs:    verifyStr,
 			TokPerSec:   tokStr,
 			LastRequest: agoStr,
 		}
+		if prov, _, ok := strings.Cut(k, "/"); ok {
+			r := provStats[prov]
+			if r == nil {
+				r = &provRollup{}
+				provStats[prov] = r
+			}
+			r.requests += reqs
+			r.errors += errs
+		}
 	}
 	s.stats.modelsMu.RUnlock()
+
+	// Merge per-provider request/error rollup into providers map.
+	for name, r := range provStats {
+		if p, ok := providers[name]; ok {
+			p.Requests = r.requests
+			p.Errors = r.errors
+			providers[name] = p
+		}
+	}
 
 	cacheInfos := s.cache.Models()
 	slices.SortFunc(cacheInfos, func(a, b attestation.CacheInfo) int {
@@ -282,6 +323,43 @@ func (s *Server) buildDashboardData() dashboardData {
 		})
 	}
 
+	// Negative cache: which provider+model pairs are currently blocked.
+	blockedEntries := s.negCache.Blocked()
+	var negBlocked []dashNegBlocked
+	if len(blockedEntries) > 0 {
+		negBlocked = make([]dashNegBlocked, 0, len(blockedEntries))
+		for _, b := range blockedEntries {
+			negBlocked = append(negBlocked, dashNegBlocked{
+				Provider:  b.Provider,
+				Model:     b.Model,
+				Remaining: time.Until(b.ExpiresAt).Truncate(time.Second).String(),
+			})
+		}
+	}
+	slices.SortFunc(negBlocked, func(a, b dashNegBlocked) int {
+		if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
+
+	// E2EE decryption failures: provider+model pairs with post-relay failures.
+	var e2eeFailures []dashE2EEFailure
+	s.e2eeFailed.Range(func(k, _ any) bool {
+		pk := k.(providerModelKey) //nolint:forcetypeassert // key type is always providerModelKey
+		e2eeFailures = append(e2eeFailures, dashE2EEFailure{
+			Provider: pk.provider,
+			Model:    pk.model,
+		})
+		return true
+	})
+	slices.SortFunc(e2eeFailures, func(a, b dashE2EEFailure) int {
+		if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
+
 	return dashboardData{
 		ListenAddr:   s.cfg.ListenAddr,
 		Uptime:       time.Since(s.stats.startTime).Truncate(time.Second).String(),
@@ -307,8 +385,10 @@ func (s *Server) buildDashboardData() dashboardData {
 			Hits:     hits,
 			Misses:   misses,
 		},
-		HTTP:   s.buildHTTPStats(),
-		Models: models,
+		HTTP:         s.buildHTTPStats(),
+		Models:       models,
+		NegBlocked:   negBlocked,
+		E2EEFailures: e2eeFailures,
 	}
 }
 

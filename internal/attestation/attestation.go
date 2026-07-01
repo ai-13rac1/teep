@@ -430,6 +430,33 @@ func (c *NegativeCache) Len() int {
 	return len(c.entries)
 }
 
+// BlockedEntry describes a provider+model pair currently blocked by the
+// negative cache.
+type BlockedEntry struct {
+	Provider  string
+	Model     string
+	ExpiresAt time.Time
+}
+
+// Blocked returns all non-expired entries in the negative cache. The read lock
+// is held for the full iteration; the returned slice is an independent snapshot.
+func (c *NegativeCache) Blocked() []BlockedEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	var out []BlockedEntry
+	for k, t := range c.entries {
+		if now.Sub(t) < c.ttl {
+			out = append(out, BlockedEntry{
+				Provider:  k.provider,
+				Model:     k.model,
+				ExpiresAt: t.Add(c.ttl),
+			})
+		}
+	}
+	return out
+}
+
 // signingKeyEntry stores a REPORTDATA-verified signing key and fetch time.
 type signingKeyEntry struct {
 	signingKey string

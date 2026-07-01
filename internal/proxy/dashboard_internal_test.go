@@ -620,3 +620,95 @@ func TestTimestampPtr(t *testing.T) {
 		t.Errorf("timestampPtr result %q is not valid RFC3339: %v", *got, err)
 	}
 }
+
+func TestBuildDashboardData_NegBlocked(t *testing.T) {
+	s := &Server{
+		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:    attestation.NewCache(0),
+		negCache: attestation.NewNegativeCache(time.Minute),
+		stats:    stats{models: make(map[string]*modelStats)},
+	}
+	// Record in reverse alphabetical order to verify sort.
+	s.negCache.Record("venice", "model-b")
+	s.negCache.Record("chutes", "model-a")
+
+	data := s.buildDashboardData()
+	t.Logf("NegBlocked = %+v", data.NegBlocked)
+
+	if len(data.NegBlocked) != 2 {
+		t.Fatalf("NegBlocked len = %d, want 2", len(data.NegBlocked))
+	}
+	// Verify sorted by provider, then model.
+	if data.NegBlocked[0].Provider != "chutes" || data.NegBlocked[0].Model != "model-a" {
+		t.Errorf("NegBlocked[0] = %s/%s, want chutes/model-a", data.NegBlocked[0].Provider, data.NegBlocked[0].Model)
+	}
+	if data.NegBlocked[1].Provider != "venice" || data.NegBlocked[1].Model != "model-b" {
+		t.Errorf("NegBlocked[1] = %s/%s, want venice/model-b", data.NegBlocked[1].Provider, data.NegBlocked[1].Model)
+	}
+	if data.NegBlocked[0].Remaining == "" {
+		t.Error("NegBlocked[0].Remaining is empty")
+	}
+}
+
+func TestBuildDashboardData_E2EEFailures(t *testing.T) {
+	s := &Server{
+		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:    attestation.NewCache(0),
+		negCache: attestation.NewNegativeCache(0),
+		stats:    stats{models: make(map[string]*modelStats)},
+	}
+	s.e2eeFailed.Store(providerModelKey{provider: "chutes", model: "llama-70b"}, true)
+
+	data := s.buildDashboardData()
+	t.Logf("E2EEFailures = %+v", data.E2EEFailures)
+
+	if len(data.E2EEFailures) != 1 {
+		t.Fatalf("E2EEFailures len = %d, want 1", len(data.E2EEFailures))
+	}
+	ef := data.E2EEFailures[0]
+	if ef.Provider != "chutes" || ef.Model != "llama-70b" {
+		t.Errorf("E2EEFailures[0] = %s/%s, want chutes/llama-70b", ef.Provider, ef.Model)
+	}
+}
+
+func TestBuildDashboardData_ProviderErrors(t *testing.T) {
+	s := &Server{
+		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:    attestation.NewCache(0),
+		negCache: attestation.NewNegativeCache(0),
+		stats:    stats{models: make(map[string]*modelStats)},
+		providers: map[string]*provider.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: "https://api.venice.ai",
+				E2EE:    true,
+			},
+		},
+	}
+
+	// Two models under the same provider.
+	ms1 := &modelStats{}
+	ms1.requests.Store(10)
+	ms1.errors.Store(2)
+	ms2 := &modelStats{}
+	ms2.requests.Store(5)
+	ms2.errors.Store(1)
+	s.stats.modelsMu.Lock()
+	s.stats.models["venice/model-a"] = ms1
+	s.stats.models["venice/model-b"] = ms2
+	s.stats.modelsMu.Unlock()
+
+	data := s.buildDashboardData()
+	vp, ok := data.Providers["venice"]
+	if !ok {
+		t.Fatal("venice provider missing")
+	}
+	t.Logf("venice provider: requests=%d errors=%d", vp.Requests, vp.Errors)
+
+	if vp.Requests != 15 {
+		t.Errorf("venice Requests = %d, want 15", vp.Requests)
+	}
+	if vp.Errors != 3 {
+		t.Errorf("venice Errors = %d, want 3", vp.Errors)
+	}
+}
