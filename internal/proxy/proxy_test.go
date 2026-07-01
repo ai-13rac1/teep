@@ -1792,6 +1792,36 @@ func TestHandleModels_Singleflight(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// /v1 help endpoint
+// --------------------------------------------------------------------------
+
+func TestHandleV1Help(t *testing.T) {
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/v1/")
+	if err != nil {
+		t.Fatalf("GET /v1/: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "/v1/chat/completions") {
+		t.Error("response does not mention /v1/chat/completions")
+	}
+}
+
+// --------------------------------------------------------------------------
 // /v1/tee/report endpoint
 // --------------------------------------------------------------------------
 

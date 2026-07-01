@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -309,6 +310,27 @@ func (s *Server) buildDashboardData() dashboardData {
 		HTTP:   s.buildHTTPStats(),
 		Models: models,
 	}
+}
+
+// v1HelpText is the plain text listing of available /v1 API endpoints.
+const v1HelpText = `Teep API — OpenAI-compatible endpoints:
+
+  GET  /v1/models                List available models
+  POST /v1/chat/completions      Chat completions
+  POST /v1/embeddings            Embeddings
+  POST /v1/audio/transcriptions  Audio transcription
+  POST /v1/images/generations    Image generation
+  POST /v1/rerank                Reranking
+  POST /v1/score                 Scoring
+  POST /v1/responses             Responses
+  POST /v1/audio/speech          Text-to-speech
+  GET  /v1/tee/report            Attestation report
+`
+
+// handleV1Help returns a plain text listing of available API endpoints.
+func handleV1Help(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, v1HelpText)
 }
 
 // handleHealth returns a JSON health snapshot for process managers and monitoring.
