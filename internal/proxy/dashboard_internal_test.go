@@ -785,8 +785,13 @@ func TestWriteModelsResponse_Nil(t *testing.T) {
 	if resp.Object != "list" {
 		t.Errorf("object = %q, want list", resp.Object)
 	}
-	// nil models should produce null data field, not an error.
-	t.Logf("data = %v", resp.Data)
+	// nil models must produce an empty array, not null (OpenAI API convention).
+	if resp.Data == nil {
+		t.Error("data is null, want empty array")
+	}
+	if len(resp.Data) != 0 {
+		t.Errorf("data len = %d, want 0", len(resp.Data))
+	}
 }
 
 func TestStoreModelsCache_SkipsEmpty(t *testing.T) {

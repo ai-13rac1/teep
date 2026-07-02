@@ -3134,7 +3134,12 @@ func (s *Server) storeModelsCache(models []json.RawMessage) {
 }
 
 // writeModelsResponse encodes the model list as JSON to the response writer.
+// A nil models slice is normalized to an empty array so the response always
+// contains "data": [] (never "data": null), matching OpenAI API conventions.
 func writeModelsResponse(ctx context.Context, w http.ResponseWriter, models []json.RawMessage) {
+	if models == nil {
+		models = []json.RawMessage{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: models}); err != nil {
 		slog.ErrorContext(ctx, "encoding models response", "err", err)
@@ -3145,7 +3150,7 @@ func writeModelsResponse(ctx context.Context, w http.ResponseWriter, models []js
 // order, and caches the assembled result. Individual provider failures are
 // logged and skipped (partial success).
 func (s *Server) fetchModels() []json.RawMessage {
-	ctx, cancel := context.WithTimeout(context.Background(), modelsTimeout)
+	ctx, cancel := context.WithTimeout(reqid.WithID(context.Background(), reqid.New()), modelsTimeout)
 	defer cancel()
 
 	provNames := make([]string, 0, len(s.providers))
