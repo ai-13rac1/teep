@@ -459,7 +459,7 @@ function renderTraffic(d) {
     { n: r.total || 0, l: "Requests" },
     { n: r.streaming || 0, l: "Streaming" },
     { n: r.non_stream || 0, l: "Non-stream" },
-    { n: (as > 0 && havePrior) ? tokSec : "—", l: "Tok/s", active: as > 0 && havePrior && tokSec > 0 },
+    { n: (as > 0 && havePrior) ? tokSec : "—", l: "Chunks/s", active: as > 0 && havePrior && tokSec > 0 },
     { n: r.e2ee || 0, l: "E2EE" },
     { n: r.plaintext || 0, l: "Plaintext" },
     { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 },
@@ -533,7 +533,7 @@ function renderProviders(d) {
     var errCls = (p.errors || 0) > 0 ? ' class="bad"' : '';
     h += '<tr><td class="mono">' + esc(names[i]) + '</td><td class="mono" style="color:var(--dim)">' +
       esc(p.upstream) + '</td><td class="' + cls + '">' + esc(p.e2ee) +
-      '</td><td>' + (p.requests || 0) + '</td><td' + errCls + '>' + (p.errors || 0) + '</td></tr>';
+      '</td><td>' + esc(p.requests || 0) + '</td><td' + errCls + '>' + esc(p.errors || 0) + '</td></tr>';
   }
   el("prov-rows").innerHTML = h;
 }
@@ -564,7 +564,7 @@ function render(d) {
   el("h-req").textContent = http.requests != null ? http.requests : "—";
   var he = el("h-err"); he.textContent = http.errors != null ? http.errors : "—";
   he.className = (http.errors > 0) ? "bad" : "";
-  el("h-sse").textContent = c.sse_clients != null ? c.sse_clients : "—";
+  el("h-sse").textContent = http.sse_clients != null ? http.sse_clients : "—";
 
   renderWarnings(d);
   renderProviders(d);

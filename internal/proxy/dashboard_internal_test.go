@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -724,5 +725,88 @@ func TestBuildDashboardData_ProviderErrors(t *testing.T) {
 	}
 	if vp.Errors != 3 {
 		t.Errorf("venice Errors = %d, want 3", vp.Errors)
+	}
+}
+
+func TestBuildCacheStats_SeededModels(t *testing.T) {
+	s := newTestServer(t)
+	// Seed the models cache.
+	s.modelsMu.Lock()
+	s.modelsCache = make([]json.RawMessage, 3)
+	s.modelsCachedAt = time.Now().Add(-5 * time.Second)
+	s.modelsMu.Unlock()
+
+	cs := s.buildCacheStats(10, 5)
+	t.Logf("buildCacheStats: models_count=%d models_cached_ago=%q signing_keys=%d spki_certs=%d",
+		cs.ModelsCount, cs.ModelsCachedAgo, cs.SigningKeys, cs.SPKICerts)
+
+	if cs.ModelsCount != 3 {
+		t.Errorf("ModelsCount = %d, want 3", cs.ModelsCount)
+	}
+	if cs.ModelsCachedAgo == "" {
+		t.Error("ModelsCachedAgo is empty, want non-empty when cache is seeded")
+	}
+	if !strings.HasSuffix(cs.ModelsCachedAgo, "ago") {
+		t.Errorf("ModelsCachedAgo = %q, want suffix 'ago'", cs.ModelsCachedAgo)
+	}
+}
+
+func TestBuildHTTPStats_SSEClients(t *testing.T) {
+	s := newTestServer(t)
+	s.sseConns.Store(3)
+	s.stats.httpRequests.Store(42)
+	s.stats.httpErrors.Store(2)
+
+	h := s.buildHTTPStats()
+	t.Logf("buildHTTPStats: requests=%d errors=%d sse_clients=%d", h.Requests, h.Errors, h.SSEClients)
+
+	if h.SSEClients != 3 {
+		t.Errorf("SSEClients = %d, want 3", h.SSEClients)
+	}
+	if h.Requests != 42 {
+		t.Errorf("Requests = %d, want 42", h.Requests)
+	}
+}
+
+func TestWriteModelsResponse_Nil(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeModelsResponse(context.Background(), rec, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Object string            `json:"object"`
+		Data   []json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Object != "list" {
+		t.Errorf("object = %q, want list", resp.Object)
+	}
+	// nil models should produce null data field, not an error.
+	t.Logf("data = %v", resp.Data)
+}
+
+func TestStoreModelsCache_SkipsEmpty(t *testing.T) {
+	s := newTestServer(t)
+
+	// Seed with real data first.
+	s.storeModelsCache([]json.RawMessage{json.RawMessage(`{"id":"test"}`)})
+	if cached := s.cachedModels(); cached == nil {
+		t.Fatal("expected cache to be populated after storing non-empty list")
+	}
+
+	// Storing nil should not overwrite.
+	s.storeModelsCache(nil)
+	if cached := s.cachedModels(); cached == nil {
+		t.Error("nil store overwrote existing cache")
+	}
+
+	// Storing empty slice should not overwrite.
+	s.storeModelsCache([]json.RawMessage{})
+	if cached := s.cachedModels(); cached == nil {
+		t.Error("empty store overwrote existing cache")
 	}
 }

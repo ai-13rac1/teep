@@ -3120,8 +3120,13 @@ func (s *Server) cachedModels() []json.RawMessage {
 }
 
 // storeModelsCache stores the assembled model list under write lock. The
-// stored slice must not be modified after this call.
+// stored slice must not be modified after this call. Empty or nil results
+// are not cached to avoid masking transient upstream failures for the full
+// cache TTL.
 func (s *Server) storeModelsCache(models []json.RawMessage) {
+	if len(models) == 0 {
+		return
+	}
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	s.modelsCache = models
@@ -3129,10 +3134,10 @@ func (s *Server) storeModelsCache(models []json.RawMessage) {
 }
 
 // writeModelsResponse encodes the model list as JSON to the response writer.
-func writeModelsResponse(w http.ResponseWriter, models []json.RawMessage) {
+func writeModelsResponse(ctx context.Context, w http.ResponseWriter, models []json.RawMessage) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: models}); err != nil {
-		slog.Error("encoding models response", "err", err)
+		slog.ErrorContext(ctx, "encoding models response", "err", err)
 	}
 }
 
@@ -3194,9 +3199,10 @@ func (s *Server) fetchModels() []json.RawMessage {
 // Partial-success: a provider that fails listing is logged and skipped.
 // Results are cached for modelsCacheTTL to avoid redundant upstream fetches.
 // Concurrent requests coalesce via singleflight to prevent thundering herd.
-func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	if cached := s.cachedModels(); cached != nil {
-		writeModelsResponse(w, cached)
+		writeModelsResponse(ctx, w, cached)
 		return
 	}
 
@@ -3209,7 +3215,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		return s.fetchModels(), nil
 	})
 	models, _ := v.([]json.RawMessage)
-	writeModelsResponse(w, models)
+	writeModelsResponse(ctx, w, models)
 }
 
 // prefixModelID rewrites the "id" field of a JSON model object to

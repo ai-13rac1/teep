@@ -126,14 +126,14 @@ type dashboardCache struct {
 	SigningKeys     int    `json:"signing_keys"`
 	SPKICerts       int    `json:"spki_certs"`
 	SPKIDomains     int    `json:"spki_domains"`
-	SSEClients      int64  `json:"sse_clients"`
 	ModelsCount     int    `json:"models_count"`
 	ModelsCachedAgo string `json:"models_cached_ago"`
 }
 
 type dashboardHTTP struct {
-	Requests int64 `json:"requests"`
-	Errors   int64 `json:"errors"`
+	Requests   int64 `json:"requests"`
+	Errors     int64 `json:"errors"`
+	SSEClients int64 `json:"sse_clients"`
 }
 
 type dashModel struct {
@@ -172,8 +172,9 @@ func timestampPtr(ns int64) *string {
 
 func (s *Server) buildHTTPStats() dashboardHTTP {
 	return dashboardHTTP{
-		Requests: s.stats.httpRequests.Load(),
-		Errors:   s.stats.httpErrors.Load(),
+		Requests:   s.stats.httpRequests.Load(),
+		Errors:     s.stats.httpErrors.Load(),
+		SSEClients: s.sseConns.Load(),
 	}
 }
 
@@ -196,7 +197,6 @@ func (s *Server) buildCacheStats(hits, misses int64) dashboardCache {
 		SigningKeys:     s.signingKeyCache.Len(),
 		SPKICerts:       s.spkiCache.Len(),
 		SPKIDomains:     s.spkiCache.DomainCount(),
-		SSEClients:      s.sseConns.Load(),
 		ModelsCount:     modelsCount,
 		ModelsCachedAgo: modelsCachedAgo,
 	}
