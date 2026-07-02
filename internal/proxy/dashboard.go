@@ -118,11 +118,17 @@ type dashboardRequests struct {
 }
 
 type dashboardCache struct {
-	Entries  int    `json:"entries"`
-	Negative int    `json:"negative"`
-	HitRate  string `json:"hit_rate"`
-	Hits     int64  `json:"hits"`
-	Misses   int64  `json:"misses"`
+	Entries         int    `json:"entries"`
+	Negative        int    `json:"negative"`
+	HitRate         string `json:"hit_rate"`
+	Hits            int64  `json:"hits"`
+	Misses          int64  `json:"misses"`
+	SigningKeys     int    `json:"signing_keys"`
+	SPKICerts       int    `json:"spki_certs"`
+	SPKIDomains     int    `json:"spki_domains"`
+	SSEClients      int64  `json:"sse_clients"`
+	ModelsCount     int    `json:"models_count"`
+	ModelsCachedAgo string `json:"models_cached_ago"`
 }
 
 type dashboardHTTP struct {
@@ -168,6 +174,31 @@ func (s *Server) buildHTTPStats() dashboardHTTP {
 	return dashboardHTTP{
 		Requests: s.stats.httpRequests.Load(),
 		Errors:   s.stats.httpErrors.Load(),
+	}
+}
+
+func (s *Server) buildCacheStats(hits, misses int64) dashboardCache {
+	var modelsCachedAgo string
+	var modelsCount int
+	s.modelsMu.RLock()
+	if !s.modelsCachedAt.IsZero() {
+		modelsCachedAgo = time.Since(s.modelsCachedAt).Truncate(time.Second).String() + " ago"
+		modelsCount = len(s.modelsCache)
+	}
+	s.modelsMu.RUnlock()
+
+	return dashboardCache{
+		Entries:         s.cache.Len(),
+		Negative:        s.negCache.Len(),
+		HitRate:         hitRateString(hits, misses),
+		Hits:            hits,
+		Misses:          misses,
+		SigningKeys:     s.signingKeyCache.Len(),
+		SPKICerts:       s.spkiCache.Len(),
+		SPKIDomains:     s.spkiCache.DomainCount(),
+		SSEClients:      s.sseConns.Load(),
+		ModelsCount:     modelsCount,
+		ModelsCachedAgo: modelsCachedAgo,
 	}
 }
 
@@ -378,13 +409,7 @@ func (s *Server) buildDashboardData() dashboardData {
 			LastRequestAt:   nanoAgo(s.stats.lastRequestAt.Load()),
 			LastSuccessAt:   nanoAgo(s.stats.lastSuccessAt.Load()),
 		},
-		Cache: dashboardCache{
-			Entries:  s.cache.Len(),
-			Negative: s.negCache.Len(),
-			HitRate:  hitRateString(hits, misses),
-			Hits:     hits,
-			Misses:   misses,
-		},
+		Cache:        s.buildCacheStats(hits, misses),
 		HTTP:         s.buildHTTPStats(),
 		Models:       models,
 		NegBlocked:   negBlocked,

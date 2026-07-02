@@ -18,10 +18,12 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{startTime: time.Now().Add(-time.Second), models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{startTime: time.Now().Add(-time.Second), models: make(map[string]*modelStats)},
 	}
 }
 
@@ -147,10 +149,12 @@ func TestHitRateString(t *testing.T) {
 
 func TestBuildDashboardData_NonZeroModelStats(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -242,10 +246,12 @@ func TestBuildHTTPStats(t *testing.T) {
 
 func TestBuildDashboardData_MultiProvider(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -294,10 +300,12 @@ func TestBuildDashboardData_MultiProvider(t *testing.T) {
 func newPopulatedServer(t *testing.T) *Server {
 	t.Helper()
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(10 * time.Minute),
-		negCache: attestation.NewNegativeCache(10 * time.Minute),
-		stats:    stats{startTime: time.Now().Add(-time.Hour), models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(10 * time.Minute),
+		negCache:        attestation.NewNegativeCache(10 * time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{startTime: time.Now().Add(-time.Hour), models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -623,10 +631,12 @@ func TestTimestampPtr(t *testing.T) {
 
 func TestBuildDashboardData_NegBlocked(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(time.Minute),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 	}
 	// Record in reverse alphabetical order to verify sort.
 	s.negCache.Record("venice", "model-b")
@@ -652,10 +662,12 @@ func TestBuildDashboardData_NegBlocked(t *testing.T) {
 
 func TestBuildDashboardData_E2EEFailures(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 	}
 	s.e2eeFailed.Store(providerModelKey{provider: "chutes", model: "llama-70b"}, true)
 
@@ -673,10 +685,12 @@ func TestBuildDashboardData_E2EEFailures(t *testing.T) {
 
 func TestBuildDashboardData_ProviderErrors(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",

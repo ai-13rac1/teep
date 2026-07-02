@@ -211,11 +211,15 @@
         <div class="row"><span>Entries</span><span id="c-entries">—</span></div>
         <div class="row"><span>Negative</span><span id="c-neg">—</span></div>
         <div class="row"><span>Hit rate</span><span id="c-hit">—</span></div>
+        <div class="row"><span>Signing keys</span><span id="c-skeys">—</span></div>
+        <div class="row"><span>SPKI pins</span><span id="c-spki">—</span></div>
+        <div class="row"><span>Models</span><span id="c-models">—</span></div>
       </div>
       <div class="panel">
         <h4>HTTP Transport</h4>
         <div class="row"><span>Requests</span><span id="h-req">—</span></div>
         <div class="row"><span>Errors</span><span id="h-err">—</span></div>
+        <div class="row"><span>SSE clients</span><span id="h-sse">—</span></div>
       </div>
     </div>
   </section>
@@ -551,10 +555,16 @@ function render(d) {
   el("c-entries").textContent = c.entries != null ? c.entries : "—";
   el("c-neg").textContent = c.negative != null ? c.negative : "—";
   el("c-hit").textContent = (c.hit_rate || "—") + " (" + (c.hits || 0) + " hit / " + (c.misses || 0) + " miss)";
+  el("c-skeys").textContent = c.signing_keys != null ? c.signing_keys : "—";
+  el("c-spki").textContent = (c.spki_certs || 0) + " certs / " + (c.spki_domains || 0) + " domains";
+  el("c-models").textContent = c.models_count
+    ? c.models_count + " cached" + (c.models_cached_ago ? " (" + c.models_cached_ago + ")" : "")
+    : "—";
   var http = d.http || {};
   el("h-req").textContent = http.requests != null ? http.requests : "—";
   var he = el("h-err"); he.textContent = http.errors != null ? http.errors : "—";
   he.className = (http.errors > 0) ? "bad" : "";
+  el("h-sse").textContent = c.sse_clients != null ? c.sse_clients : "—";
 
   renderWarnings(d);
   renderProviders(d);
