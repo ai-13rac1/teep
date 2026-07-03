@@ -43,6 +43,41 @@ Operational endpoints are intended for local monitoring and process supervision.
 
 Not all providers support all endpoints. If a provider has no path configured for an endpoint, the proxy returns HTTP 400 with an error indicating that the named provider does not support the requested endpoint (for example, `provider "venice" does not support embeddings`).
 
+### Chat Completions Reasoning Diagnostics and Repairs
+
+For `/v1/chat/completions`, teep inspects OpenAI-compatible `messages[]` metadata for reasoning-field preservation before forwarding the request upstream. This applies across providers. The inspection is limited to structured metadata: roles, message counts, reasoning field presence, reasoning string lengths, tool-call/tool-result shape, and known chat-template control flags. Teep does not log message text, tool arguments, or reasoning text.
+
+Teep recognizes both assistant reasoning field names commonly used by providers and agent frameworks:
+
+| Field | Location | Notes |
+|---|---|---|
+| `reasoning_content` | `messages[].reasoning_content` | Common OpenAI-compatible reasoning field |
+| `reasoning` | `messages[].reasoning` | Used by some providers and compatibility layers |
+
+When debug logging is enabled, teep emits `chat request metadata` with role sequence, reasoning-field indexes, reasoning lengths, tool counts, and relevant `chat_template_kwargs` booleans. Diagnostic INFO/WARN logs are rate-limited to once per hour per category and include `reasoning_diagnostics_issue` plus `reasoning_diagnostics_rate_limit`.
+
+Teep emits the following reasoning diagnostics:
+
+| Case | Level | Meaning |
+|---|---|---|
+| Prior assistant messages before the latest user message have no reasoning field | INFO | An agent framework may be stripping historical reasoning fields. This is especially risky for coding agents that depend on prior chain-of-thought summaries or hidden reasoning continuity |
+| Prior assistant messages preserve reasoning, but a known model family would ignore it without a model-specific chat-template flag | WARN | The API request kept the reasoning fields, but the model template may clear or drop them before inference |
+| At least two assistant tool-call messages or at least two visible assistant messages after the latest user message have no reasoning field | WARN | Reasoning may be getting stripped during a multi-step assistant loop. A single direct answer, refusal, or initial tool call without reasoning does not trigger this warning |
+| The final message is `user`, the immediately previous message is `tool`, and an assistant tool-call message with no visible answer appears since the previous user | WARN when reasoning is missing, or when preserved reasoning is still at risk | A framework may have appended a reminder/addendum user message after tool output. If the assistant tool-call message has no reasoning, teep warns because the request is malformed in both ways: current-turn reasoning has been stripped and the trailing user shape may cause the model to lose reasoning or tool-result context. If the assistant tool-call message has reasoning, teep warns only when the known model/template preservation flag is not effective, or when teep repaired the request by injecting that flag. When preservation is already effective, the WARN is suppressed; debug `chat request metadata` still shows the trailing-user shape |
+| Reasoning metadata cannot be parsed or fully classified | WARN | Teep could not determine the reasoning state reliably enough for one or more diagnostics |
+
+For known model families, teep can repair the two model-template preservation hazards before inference by injecting an explicit `chat_template_kwargs` flag. Detection is intentionally provider-agnostic: teep checks the routed model name and upstream model name for `glm`, `kimi`, or `deepseek`, case-insensitively.
+
+| Model family match | Repair flag injected when needed | Purpose |
+|---|---|---|
+| `glm` | `chat_template_kwargs.clear_thinking=false` | Preserve prior/current reasoning across turns instead of clearing thinking state |
+| `kimi` | `chat_template_kwargs.preserve_thinking=true` | Preserve thinking fields across turns |
+| `deepseek` | `chat_template_kwargs.drop_thinking=false` | Prevent DeepSeek templates from dropping prior thinking fields |
+
+Repairs are applied only when the request already contains reasoning fields and teep detects either preserved prior-turn reasoning or the trailing-user-after-tool hazard. Existing explicit boolean settings are honored. Null or incorrectly typed values are treated as ineffective and may be replaced by the repair value. If a repair is applied, the WARN message says that teep repaired the issue by providing the model-specific preserved-thinking flag, and includes `model_reasoning_preservation_family`, `model_reasoning_preservation_flag`, and `reasoning_preservation_repair_reasons`.
+
+These diagnostics and repairs are request-normalization behavior. They do not weaken attestation, routing, E2EE, or fail-closed provider validation. For E2EE providers, the repaired request body is encrypted after normalization, so the injected chat-template flag is protected by the provider's normal E2EE mode.
+
 ## Endpoint Support Matrix
 
 This matrix applies to OpenAI-compatible inference endpoints.

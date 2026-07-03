@@ -428,27 +428,28 @@ type providerModelKey struct {
 
 // Server is the teep proxy HTTP server.
 type Server struct {
-	cfg             *config.Config
-	providers       map[string]*provider.Provider // provider name → Provider
-	cache           *attestation.Cache
-	negCache        *attestation.NegativeCache
-	signingKeyCache *attestation.SigningKeyCache
-	spkiCache       *attestation.SPKICache
-	rekorClient     *attestation.RekorClient
-	nvidiaVerifier  *attestation.NVIDIAVerifier
-	mux             *http.ServeMux
-	attestClient    *http.Client            // for attestation fetches
-	collateral      trust.HTTPSGetter       // for Intel PCS collateral fetches
-	verifyQuote     attestation.TDXVerifier // constructed from cfg.Offline + collateral
-	sevVerifier     attestation.SEVVerifier // constructed from cfg.Offline + AMD KDS getter
-	upstreamClient  *http.Client            // for chat completions forwards
-	sseConns        atomic.Int64            // active SSE /events connections
-	e2eeFailed      sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
-	stats           stats
-	modelsMu        sync.RWMutex      // protects modelsCache and modelsCachedAt
-	modelsCache     []json.RawMessage // cached /v1/models response
-	modelsCachedAt  time.Time         // when modelsCache was populated
-	modelsFlight    singleflight.Group
+	cfg                *config.Config
+	providers          map[string]*provider.Provider // provider name → Provider
+	cache              *attestation.Cache
+	negCache           *attestation.NegativeCache
+	signingKeyCache    *attestation.SigningKeyCache
+	spkiCache          *attestation.SPKICache
+	rekorClient        *attestation.RekorClient
+	nvidiaVerifier     *attestation.NVIDIAVerifier
+	mux                *http.ServeMux
+	attestClient       *http.Client            // for attestation fetches
+	collateral         trust.HTTPSGetter       // for Intel PCS collateral fetches
+	verifyQuote        attestation.TDXVerifier // constructed from cfg.Offline + collateral
+	sevVerifier        attestation.SEVVerifier // constructed from cfg.Offline + AMD KDS getter
+	upstreamClient     *http.Client            // for chat completions forwards
+	sseConns           atomic.Int64            // active SSE /events connections
+	e2eeFailed         sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
+	reasoningStripLogs hourlyLogLimiter
+	stats              stats
+	modelsMu           sync.RWMutex      // protects modelsCache and modelsCachedAt
+	modelsCache        []json.RawMessage // cached /v1/models response
+	modelsCachedAt     time.Time         // when modelsCache was populated
+	modelsFlight       singleflight.Group
 }
 
 // New builds a Server from cfg. Providers are wired with their Attester and
@@ -1546,6 +1547,16 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 			http.Error(w, "failed to normalize request body", normalizationStatusCode(err))
 			return
 		}
+		var reasoningRepair *reasoningPreservationRepair
+		var reasoningStats *chatRequestLogStats
+		if ep.endpointType == e2ee.EndpointChat {
+			body, reasoningStats, reasoningRepair, err = repairChatReasoningPreservationWithStats(model, upstreamModel, body)
+			if err != nil {
+				slog.ErrorContext(ctx, "repair chat reasoning preservation", "provider", prov.Name, "model", upstreamModel, "err", err)
+				http.Error(w, "failed to normalize request body", normalizationStatusCode(err))
+				return
+			}
+		}
 
 		endpointPath := ep.endpointPath(prov)
 		if endpointPath == "" {
@@ -1559,6 +1570,9 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 				http.Error(w, fmt.Sprintf("provider %q has no path configured for %s", prov.Name, ep.name), http.StatusInternalServerError)
 			}
 			return
+		}
+		if ep.endpointType == e2ee.EndpointChat {
+			logChatRequestStats(ctx, &s.reasoningStripLogs, model, prov.Name, upstreamModel, r.URL.Path, body, reasoningStats, reasoningRepair)
 		}
 
 		if ep.preRouteGuard != nil {
