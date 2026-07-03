@@ -1670,7 +1670,7 @@ func (b *blockingModelLister) ListModels(ctx context.Context) ([]json.RawMessage
 	}
 }
 
-func TestHandleModels_CacheTTL(t *testing.T) {
+func TestHandleModels_CacheHit(t *testing.T) {
 	cfg := &config.Config{
 		ListenAddr: "127.0.0.1:0",
 		Providers: map[string]*config.Provider{
