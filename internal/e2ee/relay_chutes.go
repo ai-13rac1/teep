@@ -127,6 +127,7 @@ func RelayStreamChutes(ctx context.Context, w http.ResponseWriter, body io.Reade
 			}
 			stats.Chunks++
 			stats.Duration = now.Sub(firstChunk)
+			notifyChunk(ctx, len(plaintext))
 
 			w.Write(plaintext)
 			flusher.Flush()

@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"golang.org/x/net/netutil"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/config"
@@ -71,6 +72,10 @@ const (
 	// AttestationCacheTTL so all attestation caches expire together.
 	signingKeyCacheTTL = attestation.AttestationCacheTTL
 
+	// modelsCacheTTL is how long cached /v1/models responses are reused
+	// before re-fetching from upstream providers.
+	modelsCacheTTL = 10 * time.Minute
+
 	// upstreamNonStreamTimeout is the context deadline for non-streaming
 	// upstream requests. Must be generous — attestation + E2EE setup can
 	// consume 20+ seconds before the upstream request even starts, and
@@ -101,6 +106,16 @@ type stats struct {
 	plaintext   atomic.Int64
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
+
+	// In-flight request gauges (incremented on entry, decremented on exit).
+	activeStreaming atomic.Int64
+	activeNonStream atomic.Int64
+	// totalChunks is a monotone counter of SSE data chunks relayed across all
+	// streams; dashboard clients compute per-second rates from the delta.
+	totalChunks atomic.Int64
+	// totalBytes is a monotone counter of SSE payload bytes relayed across
+	// all streams; dashboard clients compute bytes/s from the delta.
+	totalBytes atomic.Int64
 
 	lastRequestAt atomic.Int64 // unix nanos of the most recent request; 0 = never
 	lastSuccessAt atomic.Int64 // unix nanos of the most recent successful response; 0 = never
@@ -430,6 +445,10 @@ type Server struct {
 	sseConns        atomic.Int64            // active SSE /events connections
 	e2eeFailed      sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
 	stats           stats
+	modelsMu        sync.RWMutex      // protects modelsCache and modelsCachedAt
+	modelsCache     []json.RawMessage // cached /v1/models response
+	modelsCachedAt  time.Time         // when modelsCache was populated
+	modelsFlight    singleflight.Group
 }
 
 // New builds a Server from cfg. Providers are wired with their Attester and
@@ -523,6 +542,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/score", s.handleEndpoint(&scoreEndpoint))
 	s.mux.HandleFunc("POST /v1/responses", s.handleEndpoint(&responsesEndpoint))
 	s.mux.HandleFunc("POST /v1/audio/speech", s.handleEndpoint(&speechEndpoint))
+	s.mux.HandleFunc("GET /v1/{$}", handleV1Help)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/tee/report", s.handleReport)
 	s.mux.HandleFunc("GET /explore", s.handleExplorePage)
@@ -952,7 +972,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		"tinfoil_sc", fmtDur(tinfoilSCDur),
 	)
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	ms.lastVerifyMs.Store(totalDur.Milliseconds())
 
 	report := attestation.BuildReport(&attestation.ReportInput{
@@ -1567,13 +1587,21 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 
 		s.stats.requests.Add(1)
 		s.stats.lastRequestAt.Store(requestStart.UnixNano())
-		ms := s.stats.getModelStats(prov.Name, upstreamModel)
+		ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 		ms.requests.Add(1)
 		ms.lastRequestAt.Store(requestStart.Unix())
 		if stream {
 			s.stats.streaming.Add(1)
+			s.stats.activeStreaming.Add(1)
+			defer s.stats.activeStreaming.Add(-1)
+			ctx = e2ee.WithChunkCallback(ctx, func(n int) {
+				s.stats.totalChunks.Add(1)
+				s.stats.totalBytes.Add(int64(n))
+			})
 		} else {
 			s.stats.nonStream.Add(1)
+			s.stats.activeNonStream.Add(1)
+			defer s.stats.activeNonStream.Add(-1)
 		}
 
 		cacheModel := cacheModelFor(ctx, upstreamModel)
@@ -2149,7 +2177,7 @@ func (s *Server) handlePinnedChat(
 		return
 	}
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	session := pinnedResp.Session
 	if session != nil {
 		s.stats.e2ee.Add(1)
@@ -3152,7 +3180,7 @@ func (s *Server) handlePinnedNonChat(
 		return
 	}
 
-	ms := s.stats.getModelStats(prov.Name, upstreamModel)
+	ms := s.stats.getModelStats(prov.Name, cacheModelFor(ctx, upstreamModel))
 	session := pinnedResp.Session
 	if session != nil {
 		s.stats.e2ee.Add(1)
@@ -3213,13 +3241,50 @@ type modelsListResponse struct {
 // modelsTimeout is the context deadline for upstream model listing calls.
 const modelsTimeout = 30 * time.Second
 
-// handleModels returns available models from all configured providers in
-// deterministic (sorted) provider order. Each model's "id" field is rewritten
-// to "provider:upstreamID" so clients can route requests back to the correct
-// provider. All other upstream model fields are preserved semantically.
-// Partial-success: a provider that fails listing is logged and skipped.
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(reqid.WithID(r.Context(), reqid.New()), modelsTimeout)
+// cachedModels returns the cached /v1/models response if still within TTL,
+// or nil if the cache is empty or expired. The returned slice is immutable;
+// callers must not modify it.
+func (s *Server) cachedModels() []json.RawMessage {
+	s.modelsMu.RLock()
+	defer s.modelsMu.RUnlock()
+	if s.modelsCache == nil || time.Since(s.modelsCachedAt) > modelsCacheTTL {
+		return nil
+	}
+	return s.modelsCache
+}
+
+// storeModelsCache stores the assembled model list under write lock. The
+// stored slice must not be modified after this call. Empty or nil results
+// are not cached to avoid masking transient upstream failures for the full
+// cache TTL.
+func (s *Server) storeModelsCache(models []json.RawMessage) {
+	if len(models) == 0 {
+		return
+	}
+	s.modelsMu.Lock()
+	defer s.modelsMu.Unlock()
+	s.modelsCache = models
+	s.modelsCachedAt = time.Now()
+}
+
+// writeModelsResponse encodes the model list as JSON to the response writer.
+// A nil models slice is normalized to an empty array so the response always
+// contains "data": [] (never "data": null), matching OpenAI API conventions.
+func writeModelsResponse(ctx context.Context, w http.ResponseWriter, models []json.RawMessage) {
+	if models == nil {
+		models = []json.RawMessage{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: models}); err != nil {
+		slog.ErrorContext(ctx, "encoding models response", "err", err)
+	}
+}
+
+// fetchModels fans out to all providers, collects models in deterministic
+// order, and caches the assembled result. Individual provider failures are
+// logged and skipped (partial success).
+func (s *Server) fetchModels() []json.RawMessage {
+	ctx, cancel := context.WithTimeout(reqid.WithID(context.Background(), reqid.New()), modelsTimeout)
 	defer cancel()
 
 	provNames := make([]string, 0, len(s.providers))
@@ -3230,8 +3295,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// Fan out model listing to all providers concurrently.
 	// Results are collected in provNames order for deterministic output.
-	type provResult struct{ models []json.RawMessage }
-	results := make([]provResult, len(provNames))
+	results := make([][]json.RawMessage, len(provNames))
 	var wg sync.WaitGroup
 	for i, name := range provNames {
 		prov := s.providers[name]
@@ -3252,25 +3316,45 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					slog.WarnContext(ctx, "model ID prefix failed", "provider", name, "err", err)
 					continue
 				}
-				results[i].models = append(results[i].models, prefixed)
+				results[i] = append(results[i], prefixed)
 			}
 		}(i, name, prov)
 	}
 	wg.Wait()
 
-	totalCap := 0
+	var all []json.RawMessage
 	for _, r := range results {
-		totalCap += len(r.models)
-	}
-	all := make([]json.RawMessage, 0, totalCap)
-	for _, r := range results {
-		all = append(all, r.models...)
+		all = append(all, r...)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(modelsListResponse{Object: "list", Data: all}); err != nil {
-		slog.ErrorContext(ctx, "encoding models response", "err", err)
+	s.storeModelsCache(all)
+	return all
+}
+
+// handleModels returns available models from all configured providers in
+// deterministic (sorted) provider order. Each model's "id" field is rewritten
+// to "provider:upstreamID" so clients can route requests back to the correct
+// provider. All other upstream model fields are preserved semantically.
+// Partial-success: a provider that fails listing is logged and skipped.
+// Results are cached for modelsCacheTTL to avoid redundant upstream fetches.
+// Concurrent requests coalesce via singleflight to prevent thundering herd.
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if cached := s.cachedModels(); cached != nil {
+		writeModelsResponse(ctx, w, cached)
+		return
 	}
+
+	v, _, _ := s.modelsFlight.Do("models", func() (any, error) { //nolint:contextcheck // fetchModels uses context.Background intentionally
+		// Double-check: another goroutine may have populated the cache
+		// while we were waiting for the singleflight lock.
+		if cached := s.cachedModels(); cached != nil {
+			return cached, nil
+		}
+		return s.fetchModels(), nil
+	})
+	models, _ := v.([]json.RawMessage)
+	writeModelsResponse(ctx, w, models)
 }
 
 // prefixModelID rewrites the "id" field of a JSON model object to

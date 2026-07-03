@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,10 +19,12 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{startTime: time.Now().Add(-time.Second), models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{startTime: time.Now().Add(-time.Second), models: make(map[string]*modelStats)},
 	}
 }
 
@@ -147,10 +150,12 @@ func TestHitRateString(t *testing.T) {
 
 func TestBuildDashboardData_NonZeroModelStats(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -242,10 +247,12 @@ func TestBuildHTTPStats(t *testing.T) {
 
 func TestBuildDashboardData_MultiProvider(t *testing.T) {
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(0),
-		negCache: attestation.NewNegativeCache(0),
-		stats:    stats{models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -294,10 +301,12 @@ func TestBuildDashboardData_MultiProvider(t *testing.T) {
 func newPopulatedServer(t *testing.T) *Server {
 	t.Helper()
 	s := &Server{
-		cfg:      &config.Config{ListenAddr: "127.0.0.1:8337"},
-		cache:    attestation.NewCache(10 * time.Minute),
-		negCache: attestation.NewNegativeCache(10 * time.Minute),
-		stats:    stats{startTime: time.Now().Add(-time.Hour), models: make(map[string]*modelStats)},
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(10 * time.Minute),
+		negCache:        attestation.NewNegativeCache(10 * time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{startTime: time.Now().Add(-time.Hour), models: make(map[string]*modelStats)},
 		providers: map[string]*provider.Provider{
 			"venice": {
 				Name:    "venice",
@@ -618,5 +627,191 @@ func TestTimestampPtr(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, *got); err != nil {
 		t.Errorf("timestampPtr result %q is not valid RFC3339: %v", *got, err)
+	}
+}
+
+func TestBuildDashboardData_NegBlocked(t *testing.T) {
+	s := &Server{
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
+	}
+	// Record in reverse alphabetical order to verify sort.
+	s.negCache.Record("venice", "model-b")
+	s.negCache.Record("chutes", "model-a")
+
+	data := s.buildDashboardData()
+	t.Logf("NegBlocked = %+v", data.NegBlocked)
+
+	if len(data.NegBlocked) != 2 {
+		t.Fatalf("NegBlocked len = %d, want 2", len(data.NegBlocked))
+	}
+	// Verify sorted by provider, then model.
+	if data.NegBlocked[0].Provider != "chutes" || data.NegBlocked[0].Model != "model-a" {
+		t.Errorf("NegBlocked[0] = %s/%s, want chutes/model-a", data.NegBlocked[0].Provider, data.NegBlocked[0].Model)
+	}
+	if data.NegBlocked[1].Provider != "venice" || data.NegBlocked[1].Model != "model-b" {
+		t.Errorf("NegBlocked[1] = %s/%s, want venice/model-b", data.NegBlocked[1].Provider, data.NegBlocked[1].Model)
+	}
+	if data.NegBlocked[0].Remaining == "" {
+		t.Error("NegBlocked[0].Remaining is empty")
+	}
+}
+
+func TestBuildDashboardData_E2EEFailures(t *testing.T) {
+	s := &Server{
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
+	}
+	s.e2eeFailed.Store(providerModelKey{provider: "chutes", model: "llama-70b"}, true)
+
+	data := s.buildDashboardData()
+	t.Logf("E2EEFailures = %+v", data.E2EEFailures)
+
+	if len(data.E2EEFailures) != 1 {
+		t.Fatalf("E2EEFailures len = %d, want 1", len(data.E2EEFailures))
+	}
+	ef := data.E2EEFailures[0]
+	if ef.Provider != "chutes" || ef.Model != "llama-70b" {
+		t.Errorf("E2EEFailures[0] = %s/%s, want chutes/llama-70b", ef.Provider, ef.Model)
+	}
+}
+
+func TestBuildDashboardData_ProviderErrors(t *testing.T) {
+	s := &Server{
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(0),
+		negCache:        attestation.NewNegativeCache(0),
+		signingKeyCache: attestation.NewSigningKeyCache(0),
+		spkiCache:       attestation.NewSPKICache(),
+		stats:           stats{models: make(map[string]*modelStats)},
+		providers: map[string]*provider.Provider{
+			"venice": {
+				Name:    "venice",
+				BaseURL: "https://api.venice.ai",
+				E2EE:    true,
+			},
+		},
+	}
+
+	// Two models under the same provider.
+	ms1 := &modelStats{}
+	ms1.requests.Store(10)
+	ms1.errors.Store(2)
+	ms2 := &modelStats{}
+	ms2.requests.Store(5)
+	ms2.errors.Store(1)
+	s.stats.modelsMu.Lock()
+	s.stats.models["venice/model-a"] = ms1
+	s.stats.models["venice/model-b"] = ms2
+	s.stats.modelsMu.Unlock()
+
+	data := s.buildDashboardData()
+	vp, ok := data.Providers["venice"]
+	if !ok {
+		t.Fatal("venice provider missing")
+	}
+	t.Logf("venice provider: requests=%d errors=%d", vp.Requests, vp.Errors)
+
+	if vp.Requests != 15 {
+		t.Errorf("venice Requests = %d, want 15", vp.Requests)
+	}
+	if vp.Errors != 3 {
+		t.Errorf("venice Errors = %d, want 3", vp.Errors)
+	}
+}
+
+func TestBuildCacheStats_SeededModels(t *testing.T) {
+	s := newTestServer(t)
+	// Seed the models cache.
+	s.modelsMu.Lock()
+	s.modelsCache = make([]json.RawMessage, 3)
+	s.modelsCachedAt = time.Now().Add(-5 * time.Second)
+	s.modelsMu.Unlock()
+
+	cs := s.buildCacheStats(10, 5)
+	t.Logf("buildCacheStats: models_count=%d models_cached_ago=%q signing_keys=%d spki_certs=%d",
+		cs.ModelsCount, cs.ModelsCachedAgo, cs.SigningKeys, cs.SPKICerts)
+
+	if cs.ModelsCount != 3 {
+		t.Errorf("ModelsCount = %d, want 3", cs.ModelsCount)
+	}
+	if cs.ModelsCachedAgo == "" {
+		t.Error("ModelsCachedAgo is empty, want non-empty when cache is seeded")
+	}
+	if !strings.HasSuffix(cs.ModelsCachedAgo, "ago") {
+		t.Errorf("ModelsCachedAgo = %q, want suffix 'ago'", cs.ModelsCachedAgo)
+	}
+}
+
+func TestBuildHTTPStats_SSEClients(t *testing.T) {
+	s := newTestServer(t)
+	s.sseConns.Store(3)
+	s.stats.httpRequests.Store(42)
+	s.stats.httpErrors.Store(2)
+
+	h := s.buildHTTPStats()
+	t.Logf("buildHTTPStats: requests=%d errors=%d sse_clients=%d", h.Requests, h.Errors, h.SSEClients)
+
+	if h.SSEClients != 3 {
+		t.Errorf("SSEClients = %d, want 3", h.SSEClients)
+	}
+	if h.Requests != 42 {
+		t.Errorf("Requests = %d, want 42", h.Requests)
+	}
+}
+
+func TestWriteModelsResponse_Nil(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeModelsResponse(context.Background(), rec, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Object string            `json:"object"`
+		Data   []json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Object != "list" {
+		t.Errorf("object = %q, want list", resp.Object)
+	}
+	// nil models must produce an empty array, not null (OpenAI API convention).
+	if resp.Data == nil {
+		t.Error("data is null, want empty array")
+	}
+	if len(resp.Data) != 0 {
+		t.Errorf("data len = %d, want 0", len(resp.Data))
+	}
+}
+
+func TestStoreModelsCache_SkipsEmpty(t *testing.T) {
+	s := newTestServer(t)
+
+	// Seed with real data first.
+	s.storeModelsCache([]json.RawMessage{json.RawMessage(`{"id":"test"}`)})
+	if cached := s.cachedModels(); cached == nil {
+		t.Fatal("expected cache to be populated after storing non-empty list")
+	}
+
+	// Storing nil should not overwrite.
+	s.storeModelsCache(nil)
+	if cached := s.cachedModels(); cached == nil {
+		t.Error("nil store overwrote existing cache")
+	}
+
+	// Storing empty slice should not overwrite.
+	s.storeModelsCache([]json.RawMessage{})
+	if cached := s.cachedModels(); cached == nil {
+		t.Error("empty store overwrote existing cache")
 	}
 }

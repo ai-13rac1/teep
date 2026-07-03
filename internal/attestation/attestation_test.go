@@ -356,6 +356,36 @@ func TestNegativeCacheLen(t *testing.T) {
 	}
 }
 
+func TestNegativeCacheBlocked(t *testing.T) {
+	c := NewNegativeCache(time.Minute)
+
+	c.Record("venice", "model-a")
+	c.Record("chutes", "model-b")
+
+	got := c.Blocked()
+	if len(got) != 2 {
+		t.Fatalf("Blocked() returned %d entries, want 2", len(got))
+	}
+	seen := make(map[string]bool)
+	for _, b := range got {
+		key := b.Provider + "/" + b.Model
+		seen[key] = true
+		if b.ExpiresAt.Before(time.Now()) {
+			t.Errorf("entry %s has ExpiresAt in the past", key)
+		}
+	}
+	if !seen["venice/model-a"] || !seen["chutes/model-b"] {
+		t.Errorf("missing expected entries: %v", seen)
+	}
+
+	// With nanosecond TTL, entries expire immediately — no sleep needed.
+	expired := NewNegativeCache(time.Nanosecond)
+	expired.Record("venice", "model-a")
+	if got := expired.Blocked(); len(got) != 0 {
+		t.Errorf("Blocked() after TTL returned %d entries, want 0", len(got))
+	}
+}
+
 // --------------------------------------------------------------------------
 // Cache eviction tests
 // --------------------------------------------------------------------------

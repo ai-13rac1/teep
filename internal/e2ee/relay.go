@@ -66,6 +66,23 @@ type usageInfo struct {
 	} `json:"usage"`
 }
 
+type chunkCallbackKey struct{}
+
+// WithChunkCallback returns a context that carries a chunk notification
+// callback. RelayStream and RelayStreamChutes call fn(n) for each SSE data
+// chunk relayed, where n is the byte length of the chunk payload. This
+// enables callers to track both chunk count and byte throughput.
+func WithChunkCallback(ctx context.Context, fn func(n int)) context.Context {
+	return context.WithValue(ctx, chunkCallbackKey{}, fn)
+}
+
+// notifyChunk invokes the chunk callback stored in ctx, if any.
+func notifyChunk(ctx context.Context, n int) {
+	if fn, ok := ctx.Value(chunkCallbackKey{}).(func(int)); ok {
+		fn(n)
+	}
+}
+
 // IsNonEncryptedField reports whether key is known plaintext metadata in
 // OpenAI chat delta/message objects.
 //
@@ -1264,13 +1281,14 @@ func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, ses
 	var decryptErr error
 
 	process := func(line string) bool {
-		done, derr := relaySSELine(ctx, w, flusher, line, session, endpoint)
+		done, written, derr := relaySSELine(ctx, w, flusher, line, session, endpoint)
 		if derr != nil {
 			decryptErr = derr
 		}
 		if !done {
 			if data, ok := strings.CutPrefix(line, "data: "); ok && data != "[DONE]" {
 				stats.recordChunk(data, &firstChunk)
+				notifyChunk(ctx, written)
 			}
 		}
 		return done
@@ -1296,24 +1314,27 @@ func RelayStream(ctx context.Context, w http.ResponseWriter, body io.Reader, ses
 // (done, error) where done=true means the stream should end. error is non-nil
 // only on decryption failure (wraps ErrDecryptionFailed).
 // The endpoint parameter identifies the proxy route kind (currently only EndpointChat is supported).
-func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, line string, session Decryptor, endpoint EndpointType) (bool, error) {
+// relaySSELine writes a single SSE line to the client, decrypting if needed.
+// Returns (done, written, err) where written is the number of payload bytes
+// delivered to the client (plaintext), enabling accurate throughput tracking.
+func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, line string, session Decryptor, endpoint EndpointType) (done bool, written int, err error) {
 	if !strings.HasPrefix(line, "data: ") {
 		fmt.Fprintf(w, "%s\n", line)
 		flusher.Flush()
-		return false, nil
+		return false, 0, nil
 	}
 
 	data := line[len("data: "):]
 	if data == "[DONE]" {
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
-		return true, nil
+		return true, 0, nil
 	}
 
 	if session == nil {
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
-		return false, nil
+		return false, len(data), nil
 	}
 
 	decrypted, err := DecryptSSEChunk(data, session, endpoint)
@@ -1321,12 +1342,12 @@ func relaySSELine(ctx context.Context, w http.ResponseWriter, flusher http.Flush
 		slog.ErrorContext(ctx, "stream decryption failed", "err", err)
 		fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"message\":\"stream decryption failed\",\"type\":\"decryption_error\"}}\n\n")
 		flusher.Flush()
-		return true, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
+		return true, 0, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 
 	fmt.Fprintf(w, "data: %s\n\n", decrypted)
 	flusher.Flush()
-	return false, nil
+	return false, len(decrypted), nil
 }
 
 // RelayReassembledNonStream reads an SSE stream from the E2EE upstream,

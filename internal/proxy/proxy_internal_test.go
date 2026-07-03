@@ -1163,6 +1163,7 @@ func TestBuildDashboardData_BlockedFactors(t *testing.T) {
 		cache:           attestation.NewCache(time.Minute),
 		negCache:        attestation.NewNegativeCache(time.Minute),
 		signingKeyCache: attestation.NewSigningKeyCache(time.Minute),
+		spkiCache:       attestation.NewSPKICache(),
 		providers: map[string]*provider.Provider{
 			"test": {Name: "test"},
 		},

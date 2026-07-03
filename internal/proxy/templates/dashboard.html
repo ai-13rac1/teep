@@ -77,9 +77,10 @@
 
   /* ---- traffic ---- */
   .traffic { display: grid; grid-template-columns: 1fr 1.2fr; gap: 26px; align-items: center; }
-  .metrics { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px 18px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 18px; }
   .metric .n { font-family: var(--mono); font-size: 1.3rem; font-weight: 600; color: var(--ink); }
   .metric .n.warnz { color: var(--alert); }
+  .metric .n.activez { color: var(--seal); }
   .metric .l { font-family: var(--mono); font-size: 0.6rem; text-transform: uppercase;
     letter-spacing: 0.12em; color: var(--faint); margin-top: 1px; }
   .spark { display: flex; flex-direction: column; }
@@ -210,20 +211,29 @@
         <div class="row"><span>Entries</span><span id="c-entries">—</span></div>
         <div class="row"><span>Negative</span><span id="c-neg">—</span></div>
         <div class="row"><span>Hit rate</span><span id="c-hit">—</span></div>
+        <div class="row"><span>Signing keys</span><span id="c-skeys">—</span></div>
+        <div class="row"><span>SPKI pins</span><span id="c-spki">—</span></div>
+        <div class="row"><span>Models</span><span id="c-models">—</span></div>
       </div>
       <div class="panel">
         <h4>HTTP Transport</h4>
         <div class="row"><span>Requests</span><span id="h-req">—</span></div>
         <div class="row"><span>Errors</span><span id="h-err">—</span></div>
+        <div class="row"><span>SSE clients</span><span id="h-sse">—</span></div>
       </div>
     </div>
+  </section>
+
+  <section class="block" id="warnings-section" hidden>
+    <h3 class="eyebrow" style="margin-bottom:14px">Warnings</h3>
+    <div class="panel" id="warnings-list" style="border-left:3px solid var(--alert);padding-left:12px"></div>
   </section>
 
   <section class="block">
     <h3 class="eyebrow" style="margin-bottom:14px">Providers</h3>
     <div class="panel">
       <table class="tbl">
-        <thead><tr><th>Provider</th><th>Upstream</th><th>E2EE</th></tr></thead>
+        <thead><tr><th>Provider</th><th>Upstream</th><th>E2EE</th><th>Requests</th><th>Errors</th></tr></thead>
         <tbody id="prov-rows"></tbody>
       </table>
     </div>
@@ -434,19 +444,37 @@ function renderEnclaves(d) {
   }
 }
 
+var lastBytes = null;
+
+function fmtBps(b) {
+  if (b < 1024) return b + " B/s";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB/s";
+  return (b / 1048576).toFixed(1) + " MB/s";
+}
+
 function renderTraffic(d) {
   var r = d.requests || {};
+  var curBytes = r.total_bytes || 0;
+  var havePrior = lastBytes !== null;
+  var bps = 0;
+  if (havePrior) { bps = curBytes - lastBytes; if (bps < 0) bps = 0; }
+  lastBytes = curBytes;
+  var as = r.active_streaming || 0;
+  var an = r.active_non_stream || 0;
   var m = [
     { n: r.total || 0, l: "Requests" },
     { n: r.streaming || 0, l: "Streaming" },
     { n: r.non_stream || 0, l: "Non-stream" },
+    { n: (as > 0 && havePrior) ? fmtBps(bps) : "—", l: "Throughput", active: as > 0 && havePrior && bps > 0 },
     { n: r.e2ee || 0, l: "E2EE" },
     { n: r.plaintext || 0, l: "Plaintext" },
-    { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 }
+    { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 },
+    { n: as + an, l: "Active", active: (as + an) > 0 }
   ];
   var h = "";
   for (var i = 0; i < m.length; i++) {
-    h += '<div class="metric"><div class="n' + (m[i].warn ? ' warnz' : '') + '">' +
+    var cls = m[i].warn ? ' warnz' : (m[i].active ? ' activez' : '');
+    h += '<div class="metric"><div class="n' + cls + '">' +
       esc(m[i].n) + '</div><div class="l">' + esc(m[i].l) + '</div></div>';
   }
   el("metrics").innerHTML = h;
@@ -481,6 +509,26 @@ function pushSpark(total) {
   el("spark-cap").textContent = "Requests / tick" + peak;
 }
 
+function renderWarnings(d) {
+  var neg = d.neg_blocked || [];
+  var e2ee = d.e2ee_failures || [];
+  var sec = el("warnings-section");
+  if (neg.length === 0 && e2ee.length === 0) { sec.hidden = true; return; }
+  sec.hidden = false;
+  var h = "";
+  for (var i = 0; i < neg.length; i++) {
+    h += '<div class="row" style="color:var(--alert)"><span>Blocked: ' +
+      esc(neg[i].provider) + '/' + esc(neg[i].model) +
+      '</span><span>' + esc(neg[i].remaining) + ' remaining</span></div>';
+  }
+  for (var j = 0; j < e2ee.length; j++) {
+    h += '<div class="row" style="color:var(--alert)"><span>E2EE failure: ' +
+      esc(e2ee[j].provider) + '/' + esc(e2ee[j].model) +
+      '</span><span>will retry on next attestation</span></div>';
+  }
+  el("warnings-list").innerHTML = h;
+}
+
 function renderProviders(d) {
   var provs = d.providers || {};
   var names = Object.keys(provs).sort();
@@ -488,8 +536,10 @@ function renderProviders(d) {
   for (var i = 0; i < names.length; i++) {
     var p = provs[names[i]];
     var cls = p.e2ee === "enabled" ? "ok" : "off";
+    var errCls = (p.errors || 0) > 0 ? ' class="bad"' : '';
     h += '<tr><td class="mono">' + esc(names[i]) + '</td><td class="mono" style="color:var(--dim)">' +
-      esc(p.upstream) + '</td><td class="' + cls + '">' + esc(p.e2ee) + '</td></tr>';
+      esc(p.upstream) + '</td><td class="' + cls + '">' + esc(p.e2ee) +
+      '</td><td>' + esc(p.requests || 0) + '</td><td' + errCls + '>' + esc(p.errors || 0) + '</td></tr>';
   }
   el("prov-rows").innerHTML = h;
 }
@@ -511,11 +561,18 @@ function render(d) {
   el("c-entries").textContent = c.entries != null ? c.entries : "—";
   el("c-neg").textContent = c.negative != null ? c.negative : "—";
   el("c-hit").textContent = (c.hit_rate || "—") + " (" + (c.hits || 0) + " hit / " + (c.misses || 0) + " miss)";
+  el("c-skeys").textContent = c.signing_keys != null ? c.signing_keys : "—";
+  el("c-spki").textContent = (c.spki_certs || 0) + " certs / " + (c.spki_domains || 0) + " domains";
+  el("c-models").textContent = c.models_count
+    ? c.models_count + " cached" + (c.models_cached_ago ? " (" + c.models_cached_ago + ")" : "")
+    : "—";
   var http = d.http || {};
   el("h-req").textContent = http.requests != null ? http.requests : "—";
   var he = el("h-err"); he.textContent = http.errors != null ? http.errors : "—";
   he.className = (http.errors > 0) ? "bad" : "";
+  el("h-sse").textContent = http.sse_clients != null ? http.sse_clients : "—";
 
+  renderWarnings(d);
   renderProviders(d);
   el("footer").innerHTML = "Self-contained · live via SSE. Point any OpenAI-compatible client at " +
     "<code>http://" + esc(d.listen_addr) + "/v1</code> and use <code>provider:model</code> ids.";

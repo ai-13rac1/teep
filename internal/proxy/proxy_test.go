@@ -1641,6 +1641,186 @@ func TestHandleModels_SlowProvider(t *testing.T) {
 	}
 }
 
+// countingModelLister returns canned models and counts ListModels calls.
+type countingModelLister struct {
+	models []json.RawMessage
+	calls  atomic.Int64
+}
+
+func (c *countingModelLister) ListModels(_ context.Context) ([]json.RawMessage, error) {
+	c.calls.Add(1)
+	return c.models, nil
+}
+
+// blockingModelLister blocks in ListModels until release is closed, then
+// returns canned models. Used to deterministically test singleflight coalescing.
+type blockingModelLister struct {
+	models  []json.RawMessage
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func (b *blockingModelLister) ListModels(ctx context.Context) ([]json.RawMessage, error) {
+	b.calls.Add(1)
+	select {
+	case <-b.release:
+		return b.models, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestHandleModels_CacheHit(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	lister := &countingModelLister{
+		models: []json.RawMessage{json.RawMessage(`{"id":"model-a","object":"model"}`)},
+	}
+	prov := srv.ProviderByName("neardirect")
+	prov.ModelLister = lister
+	prov.PinnedHandler = stubPinnedHandler{}
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// First request populates the cache.
+	resp, err := http.Get(proxySrv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("first GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", resp.StatusCode)
+	}
+
+	// Second request should be served from cache.
+	resp, err = http.Get(proxySrv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("second GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", resp.StatusCode)
+	}
+
+	if got := lister.calls.Load(); got != 1 {
+		t.Errorf("upstream called %d times, want 1 (second request should use cache)", got)
+	}
+}
+
+func TestHandleModels_Singleflight(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Providers: map[string]*config.Provider{
+			"neardirect": {
+				Name:    "neardirect",
+				BaseURL: "https://completions.near.ai",
+				APIKey:  "key",
+			},
+		},
+		AllowFail: attestation.KnownFactors,
+	}
+	srv, err := proxy.New(cfg)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	lister := &blockingModelLister{
+		models:  []json.RawMessage{json.RawMessage(`{"id":"model-a","object":"model"}`)},
+		release: make(chan struct{}),
+	}
+	prov := srv.ProviderByName("neardirect")
+	prov.ModelLister = lister
+	prov.PinnedHandler = stubPinnedHandler{}
+
+	proxySrv := httptest.NewServer(srv)
+	defer proxySrv.Close()
+
+	// Fire N concurrent requests against an empty cache. The lister blocks
+	// until we release it, ensuring all goroutines are in-flight and
+	// singleflight coalescing is deterministically exercised.
+	const N = 20
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	for i := range N {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := http.Get(proxySrv.URL + "/v1/models")
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errs[i] = fmt.Errorf("status = %d", resp.StatusCode)
+			}
+		}(i)
+	}
+
+	// Wait until the lister has been called (the winning goroutine entered
+	// ListModels), then release it so all coalesced callers complete.
+	for lister.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(lister.release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("request %d: %v", i, err)
+		}
+	}
+
+	// Singleflight coalesces concurrent requests: upstream should be called
+	// exactly once (all goroutines share the same in-flight result).
+	if got := lister.calls.Load(); got != 1 {
+		t.Errorf("upstream called %d times, want 1 (singleflight should coalesce)", got)
+	}
+}
+
+// --------------------------------------------------------------------------
+// /v1 help endpoint
+// --------------------------------------------------------------------------
+
+func TestHandleV1Help(t *testing.T) {
+	attestSrv := makeAttestationServer(t, false)
+	defer attestSrv.Close()
+
+	proxySrv := newProxyServer(t, buildConfig(attestSrv.URL, false))
+	defer proxySrv.Close()
+
+	resp, err := http.Get(proxySrv.URL + "/v1/")
+	if err != nil {
+		t.Fatalf("GET /v1/: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "/v1/chat/completions") {
+		t.Error("response does not mention /v1/chat/completions")
+	}
+}
+
 // --------------------------------------------------------------------------
 // /v1/tee/report endpoint
 // --------------------------------------------------------------------------
