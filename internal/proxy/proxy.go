@@ -113,6 +113,9 @@ type stats struct {
 	// totalChunks is a monotone counter of SSE data chunks relayed across all
 	// streams; dashboard clients compute per-second rates from the delta.
 	totalChunks atomic.Int64
+	// totalBytes is a monotone counter of SSE payload bytes relayed across
+	// all streams; dashboard clients compute bytes/s from the delta.
+	totalBytes atomic.Int64
 
 	lastRequestAt atomic.Int64 // unix nanos of the most recent request; 0 = never
 	lastSuccessAt atomic.Int64 // unix nanos of the most recent successful response; 0 = never
@@ -1590,7 +1593,10 @@ func (s *Server) handleEndpoint(ep *endpointConfig) http.HandlerFunc {
 			s.stats.streaming.Add(1)
 			s.stats.activeStreaming.Add(1)
 			defer s.stats.activeStreaming.Add(-1)
-			ctx = e2ee.WithChunkCallback(ctx, func() { s.stats.totalChunks.Add(1) })
+			ctx = e2ee.WithChunkCallback(ctx, func(n int) {
+				s.stats.totalChunks.Add(1)
+				s.stats.totalBytes.Add(int64(n))
+			})
 		} else {
 			s.stats.nonStream.Add(1)
 			s.stats.activeNonStream.Add(1)

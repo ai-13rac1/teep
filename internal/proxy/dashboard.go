@@ -112,6 +112,7 @@ type dashboardRequests struct {
 	ActiveStreaming int64 `json:"active_streaming"`
 	ActiveNonStream int64 `json:"active_non_stream"`
 	TotalChunks     int64 `json:"total_chunks"`
+	TotalBytes      int64 `json:"total_bytes"`
 
 	LastRequestAt string `json:"last_request_at"`
 	LastSuccessAt string `json:"last_success_at"`
@@ -406,6 +407,7 @@ func (s *Server) buildDashboardData() dashboardData {
 			ActiveStreaming: s.stats.activeStreaming.Load(),
 			ActiveNonStream: s.stats.activeNonStream.Load(),
 			TotalChunks:     s.stats.totalChunks.Load(),
+			TotalBytes:      s.stats.totalBytes.Load(),
 			LastRequestAt:   nanoAgo(s.stats.lastRequestAt.Load()),
 			LastSuccessAt:   nanoAgo(s.stats.lastSuccessAt.Load()),
 		},
@@ -556,6 +558,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# HELP teep_stream_chunks_total Total SSE data chunks relayed across all streams\n")
 	fmt.Fprintf(w, "# TYPE teep_stream_chunks_total counter\n")
 	fmt.Fprintf(w, "teep_stream_chunks_total %d\n", s.stats.totalChunks.Load())
+	fmt.Fprintf(w, "# HELP teep_stream_bytes_total Total SSE payload bytes relayed across all streams\n")
+	fmt.Fprintf(w, "# TYPE teep_stream_bytes_total counter\n")
+	fmt.Fprintf(w, "teep_stream_bytes_total %d\n", s.stats.totalBytes.Load())
 	fmt.Fprintf(w, "# HELP teep_uptime_seconds Seconds since the proxy started\n")
 	fmt.Fprintf(w, "# TYPE teep_uptime_seconds gauge\n")
 	fmt.Fprintf(w, "teep_uptime_seconds %g\n", time.Since(s.stats.startTime).Seconds())

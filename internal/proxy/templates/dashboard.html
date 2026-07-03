@@ -444,22 +444,28 @@ function renderEnclaves(d) {
   }
 }
 
-var lastChunks = null;
+var lastBytes = null;
+
+function fmtBps(b) {
+  if (b < 1024) return b + " B/s";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB/s";
+  return (b / 1048576).toFixed(1) + " MB/s";
+}
 
 function renderTraffic(d) {
   var r = d.requests || {};
-  var curChunks = r.total_chunks || 0;
-  var havePrior = lastChunks !== null;
-  var tokSec = 0;
-  if (havePrior) { tokSec = curChunks - lastChunks; if (tokSec < 0) tokSec = 0; }
-  lastChunks = curChunks;
+  var curBytes = r.total_bytes || 0;
+  var havePrior = lastBytes !== null;
+  var bps = 0;
+  if (havePrior) { bps = curBytes - lastBytes; if (bps < 0) bps = 0; }
+  lastBytes = curBytes;
   var as = r.active_streaming || 0;
   var an = r.active_non_stream || 0;
   var m = [
     { n: r.total || 0, l: "Requests" },
     { n: r.streaming || 0, l: "Streaming" },
     { n: r.non_stream || 0, l: "Non-stream" },
-    { n: (as > 0 && havePrior) ? tokSec : "—", l: "Chunks/s", active: as > 0 && havePrior && tokSec > 0 },
+    { n: (as > 0 && havePrior) ? fmtBps(bps) : "—", l: "Throughput", active: as > 0 && havePrior && bps > 0 },
     { n: r.e2ee || 0, l: "E2EE" },
     { n: r.plaintext || 0, l: "Plaintext" },
     { n: r.errors || 0, l: "Errors", warn: (r.errors || 0) > 0 },
