@@ -175,6 +175,9 @@ func (s *Server) loopbackInfer(ctx context.Context, model string, body []byte) e
 		return exploreInferResponse{Model: model, Error: fmt.Sprintf("build request: %v", err)}
 	}
 	inner.Header.Set("Content-Type", "application/json")
+	// hostGuardMiddleware validates every request's Host header, so this
+	// loopback self-request must carry the proxy's own configured authority.
+	inner.Host = s.cfg.ListenAddr
 
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, inner)
