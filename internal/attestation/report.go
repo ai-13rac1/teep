@@ -754,7 +754,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 				// KDS-availability failure (FetchErr) is NOT covered by this
 				// override, so it follows the allow_fail list and --offline
 				// can still waive it.
-				if in.TDX != nil || (in.SEV != nil && (in.SEV.SignatureErr != nil || in.SEV.CertChainErr != nil)) {
+				if in.TDX != nil || in.GatewayTDX != nil || (in.SEV != nil && (in.SEV.SignatureErr != nil || in.SEV.CertChainErr != nil)) {
 					f.Enforced = true
 				}
 			}

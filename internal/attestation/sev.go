@@ -325,8 +325,9 @@ func sevFetchChain(ctx context.Context, cache *SEVCertCache, key string, reportP
 		return chain, nil
 	}
 	att, err := sevverify.GetAttestationFromReportContext(ctx, reportProto, &sevverify.Options{
-		Getter: getter,
-		Now:    verifyNow,
+		Getter:           getter,
+		Now:              sevTimeNow(verifyNow),
+		CheckRevocations: true,
 	})
 	if err != nil {
 		return nil, err
@@ -348,7 +349,8 @@ func sevAttributeCryptoResult(ctx context.Context, result *SEVVerifyResult, repo
 	att := &pb.Attestation{Report: reportProto, CertificateChain: chain}
 	combErr := sevverify.SnpAttestationContext(ctx, att, &sevverify.Options{
 		DisableCertFetching: true,
-		Now:                 verifyNow,
+		Now:                 sevTimeNow(verifyNow),
+		CheckRevocations:    true,
 	})
 	if combErr == nil {
 		result.OnlineVerified = true
@@ -369,6 +371,17 @@ func sevAttributeCryptoResult(ctx context.Context, result *SEVVerifyResult, repo
 	slog.DebugContext(ctx, "SEV-SNP online verification failed", "err", combErr)
 }
 
+// sevTimeNow returns t if non-zero, or time.Now() otherwise. go-sev-guest's
+// Options.Now does NOT fall back to the wall clock for the zero value (despite
+// its godoc), so we must convert explicitly — matching how tdxTimeSet returns
+// nil for zero time, letting go-tdx-guest apply its own defaultTimeSet.
+func sevTimeNow(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Now()
+	}
+	return t
+}
+
 // SEVVerifier verifies a raw binary SEV-SNP attestation report.
 // Obtain via NewSEVVerifier.
 type SEVVerifier func(ctx context.Context, report []byte) *SEVVerifyResult
@@ -381,10 +394,9 @@ type SEVVerifier func(ctx context.Context, report []byte) *SEVVerifyResult
 // AMD KDS flakiness after the first successful fetch/verify.
 //
 // verifyNow is the time used for certificate validity checks; the zero
-// value means "use the real wall clock" (matches go-sev-guest's own
-// Options.Now default), which is what replay/fixture verification threads
-// through to keep aging fixtures verifying correctly regardless of when the
-// test runs.
+// value means "use the real wall clock", which is what the live proxy
+// passes. Only replay/fixture verification passes a non-zero capture
+// time, pinning cert validity to the moment the fixture was captured.
 func NewSEVVerifier(offline bool, getter trust.HTTPSGetter, verifyNow time.Time) SEVVerifier {
 	if offline {
 		return VerifySEVReportOffline
