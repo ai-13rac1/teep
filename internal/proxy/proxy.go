@@ -494,9 +494,9 @@ func New(cfg *config.Config) (*Server, error) {
 	s.rekorClient = attestation.NewRekorClient(attestClient)
 	s.nvidiaVerifier = attestation.DefaultNVIDIAVerifier()
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
-	// Zero time.Time means "use the real wall clock" (NewTDXVerifier falls
-	// back to time.Now() internally); the live proxy has no fixed
-	// verification time like replay fixtures do.
+	// Zero time.Time means "use the real wall clock": passing a zero verifyTime
+	// makes tdxTimeSet return nil, so go-tdx-guest uses its default TimeSet
+	// (effectively time.Now()) for collateral/cert currency checks.
 	s.verifyQuote = attestation.NewTDXVerifier(cfg.Offline, s.collateral, time.Time{})
 	s.sevVerifier = attestation.NewSEVVerifier(cfg.Offline, attestation.NewSEVCertGetter(s.attestClient))
 
