@@ -60,16 +60,18 @@ func TestSPKIPinnedClientRetainsCTWrapperAndReusesConnection(t *testing.T) {
 		t.Helper()
 		var mu sync.Mutex
 		connections := make(map[string]struct{})
+		protocols := make(map[int]struct{})
 		ts := authority.NewTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			connections[r.RemoteAddr] = struct{}{}
+			protocols[r.ProtoMajor] = struct{}{}
 			mu.Unlock()
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusNoContent)
 		}))
 
 		fingerprint := certificateSPKI(t, ts)
-		client, err := NewSPKIPinnedHTTPClientWithTransport(0, &http.Transport{Proxy: nil}, fingerprint, true)
+		client, err := NewSPKIPinnedHTTPClientWithTransport(0, &http.Transport{Proxy: nil, ForceAttemptHTTP2: true}, fingerprint, true)
 		if err != nil {
 			t.Fatalf("NewSPKIPinnedHTTPClientWithTransport: %v", err)
 		}
@@ -91,6 +93,9 @@ func TestSPKIPinnedClientRetainsCTWrapperAndReusesConnection(t *testing.T) {
 		mu.Unlock()
 		if got != 1 {
 			t.Fatalf("unique TLS connections = %d, want 1", got)
+		}
+		if _, ok := protocols[2]; !ok {
+			t.Fatalf("HTTP protocol majors = %v, want HTTP/2", protocols)
 		}
 	})
 }

@@ -87,6 +87,7 @@ func (a *Authority) NewTLSServer(t *testing.T, handler http.Handler) *httptest.S
 	}
 
 	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
 	server.TLS = &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS13,

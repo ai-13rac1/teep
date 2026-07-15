@@ -78,6 +78,12 @@ func TestSetUpstreamConnectionHeaders_DoesNotCloseTLSBindingConnections(t *testi
 	}
 }
 
+func TestNewUpstreamTransportAttemptsHTTP2(t *testing.T) {
+	if !newUpstreamTransport().ForceAttemptHTTP2 {
+		t.Fatal("upstream transport does not attempt HTTP/2")
+	}
+}
+
 // closeUpstream releases resources returned by a successful doUpstreamRoundtrip.
 func closeUpstream(ur *upstreamResult) {
 	if ur == nil {

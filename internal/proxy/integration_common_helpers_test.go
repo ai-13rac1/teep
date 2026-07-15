@@ -69,15 +69,20 @@ func integrationRequestTimeout(t *testing.T) time.Duration {
 
 func integrationPostJSON(t *testing.T, url, body string) (*http.Response, error) {
 	t.Helper()
+	return integrationPost(t, url, "application/json", strings.NewReader(body))
+}
+
+func integrationPost(t *testing.T, url, contentType string, body io.Reader) (*http.Response, error) {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), integrationRequestTimeout(t))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := integrationClient.Do(req)
 	if err != nil {
@@ -94,7 +99,7 @@ func integrationPostJSON(t *testing.T, url, body string) (*http.Response, error)
 // with integrationClient's 5-minute timeout as an additional upper bound.
 func postChatIntegration(t *testing.T, proxyURL, model string, stream bool) *http.Response {
 	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v}`, model, integrationPrompt, stream)
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":64}`, model, integrationPrompt, stream)
 	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
 	if err != nil {
 		t.Fatalf("POST chat: %v", err)
@@ -107,7 +112,7 @@ func postChatIntegration(t *testing.T, proxyURL, model string, stream bool) *htt
 // handling tool_calls, audio.data, and function_call fields in responses.
 func postChatWithTools(t *testing.T, proxyURL, model string, stream bool) *http.Response {
 	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}`, model, integrationToolPrompt, stream)
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":128,"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}`, model, integrationToolPrompt, stream)
 	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
 	if err != nil {
 		t.Fatalf("POST chat with tools: %v", err)
