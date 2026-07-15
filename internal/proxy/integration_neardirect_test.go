@@ -90,6 +90,17 @@ func integrationNearDirectE2EEConfig(t *testing.T) *config.Config {
 	}
 }
 
+func postNearDirectContentChat(t *testing.T, proxyURL, model string, stream bool) *http.Response {
+	t.Helper()
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":64,"reasoning_effort":"none"}`,
+		model, integrationPrompt, stream)
+	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST NEAR Direct content chat: %v", err)
+	}
+	return resp
+}
+
 func TestIntegration_NearDirect(t *testing.T) {
 	skipNearDirectIntegration(t)
 
@@ -109,7 +120,7 @@ func runNearDirectNonStream(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationNearDirectConfig(t))
 	defer proxySrv.Close()
 
-	resp := postChatIntegration(t, proxySrv.URL, nearDirectIntegrationModel(), false)
+	resp := postNearDirectContentChat(t, proxySrv.URL, nearDirectIntegrationModel(), false)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -132,7 +143,7 @@ func runNearDirectStreaming(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationNearDirectConfig(t))
 	defer proxySrv.Close()
 
-	resp := postChatIntegration(t, proxySrv.URL, nearDirectIntegrationModel(), true)
+	resp := postNearDirectContentChat(t, proxySrv.URL, nearDirectIntegrationModel(), true)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -203,7 +214,7 @@ func runNearDirectE2EEStreaming(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
 	defer proxySrv.Close()
 
-	resp := postChatIntegration(t, proxySrv.URL, nearDirectIntegrationModel(), true)
+	resp := postNearDirectContentChat(t, proxySrv.URL, nearDirectIntegrationModel(), true)
 	defer resp.Body.Close()
 	assertStreamResponse(t, resp)
 }
@@ -212,7 +223,7 @@ func runNearDirectE2EENonStream(t *testing.T) {
 	proxySrv := newProxyServer(t, integrationNearDirectE2EEConfig(t))
 	defer proxySrv.Close()
 
-	resp := postChatIntegration(t, proxySrv.URL, nearDirectIntegrationModel(), false)
+	resp := postNearDirectContentChat(t, proxySrv.URL, nearDirectIntegrationModel(), false)
 	defer resp.Body.Close()
 	assertNonStreamResponse(t, resp)
 }
