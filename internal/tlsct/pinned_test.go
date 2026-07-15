@@ -164,6 +164,9 @@ func TestSPKIPinnedClientRejectsModifiedTrust(t *testing.T) {
 		"custom TLS dialer": {DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("unused")
 		}},
+		"deprecated custom TLS dialer": {DialTLS: func(string, string) (net.Conn, error) {
+			return nil, errors.New("unused")
+		}},
 	}
 	fingerprint := hexFingerprint(sha256.Sum256([]byte("fingerprint")))
 	for name, transport := range tests {

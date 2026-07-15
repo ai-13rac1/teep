@@ -67,8 +67,8 @@ func NewSPKIPinnedHTTPClientWithTransport(
 }
 
 func validateSystemWebPKITransport(base *http.Transport) error {
-	if base.DialTLSContext != nil {
-		return errors.New("SPKI-pinned transport must not set DialTLSContext")
+	if base.DialTLSContext != nil || base.DialTLS != nil { //nolint:staticcheck // deprecated hook must also be rejected
+		return errors.New("SPKI-pinned transport must not set a custom TLS dialer")
 	}
 	cfg := base.TLSClientConfig
 	if cfg == nil {

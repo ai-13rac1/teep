@@ -155,7 +155,8 @@ func childEnvironment() []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if strings.HasPrefix(entry, childEnv+"=") || strings.HasPrefix(entry, "GODEBUG=") {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == childEnv || key == "GODEBUG" || isProxyEnvironmentKey(key) {
 			continue
 		}
 		out = append(out, entry)
@@ -164,6 +165,15 @@ func childEnvironment() []string {
 		childEnv+"=1",
 		"GODEBUG="+replaceGODEBUG(os.Getenv("GODEBUG"), "x509usefallbackroots", "1"),
 	)
+}
+
+func isProxyEnvironmentKey(key string) bool {
+	switch strings.ToUpper(key) {
+	case "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY":
+		return true
+	default:
+		return false
+	}
 }
 
 func replaceGODEBUG(value, key, replacement string) string {
