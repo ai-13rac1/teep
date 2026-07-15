@@ -158,11 +158,37 @@ func assertReasoningStreamResponse(t *testing.T, resp *http.Response) {
 
 func assertReasoningAndContent(t *testing.T, reasoning, content string) {
 	t.Helper()
-	if !isPrintableUTF8(reasoning) {
-		t.Fatalf("reasoning is not valid printable UTF-8: length=%d", len(reasoning))
+	if !isUsableReasoningText(reasoning) {
+		t.Fatalf("reasoning is empty or not valid printable UTF-8: length=%d", len(reasoning))
 	}
-	if !isPrintableUTF8(content) {
-		t.Fatalf("content is not valid printable UTF-8: length=%d", len(content))
+	if !isUsableReasoningText(content) {
+		t.Fatalf("content is empty or not valid printable UTF-8: length=%d", len(content))
 	}
 	t.Logf("reasoning chat response: reasoning_bytes=%d content_bytes=%d", len(reasoning), len(content))
+}
+
+func isUsableReasoningText(text string) bool {
+	return strings.TrimSpace(text) != "" && isPrintableUTF8(text)
+}
+
+func TestIsUsableReasoningText(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "empty", text: "", want: false},
+		{name: "spaces", text: " \t\n", want: false},
+		{name: "unicode whitespace", text: "\u2003", want: false},
+		{name: "printable", text: "reasoning", want: true},
+		{name: "invalid UTF-8", text: string([]byte{0xff}), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isUsableReasoningText(tc.text); got != tc.want {
+				t.Fatalf("isUsableReasoningText(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
 }

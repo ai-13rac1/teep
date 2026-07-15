@@ -249,6 +249,8 @@ func runTinfoilAPISurface(t *testing.T, providerName string, catalog tinfoilCata
 	t.Helper()
 
 	chatModel := requireTinfoilModelEndpoint(t, catalog, tinfoilChatModel(providerName), "/v1/chat/completions")
+	reasoningModel := requireTinfoilModelEndpoint(t, catalog,
+		tinfoilPrefixModel(providerName, "glm-5-2"), "/v1/chat/completions")
 	visionModel := requireTinfoilMultimodalModel(t, catalog, tinfoilVisionModel(providerName), "/v1/chat/completions")
 	responsesModel := requireTinfoilModelEndpoint(t, catalog, tinfoilChatModel(providerName), "/v1/responses")
 	embeddingsModel := requireTinfoilModelEndpoint(t, catalog, tinfoilEmbeddingsModel(providerName), "/v1/embeddings")
@@ -285,8 +287,8 @@ func runTinfoilAPISurface(t *testing.T, providerName string, catalog tinfoilCata
 		assertStreamResponse(t, resp)
 	})
 	t.Run("ChatReasoning", func(t *testing.T) {
-		requireTinfoilReasoningModel(t, catalog, chatModel)
-		runReasoningResponseTests(t, plainURL, e2eeURL, chatModel)
+		requireTinfoilReasoningModel(t, catalog, reasoningModel)
+		runReasoningResponseTests(t, plainURL, e2eeURL, reasoningModel)
 	})
 	t.Run("ChatE2EENonStreamWithTools", func(t *testing.T) {
 		resp := postTinfoilChatWithTools(t, e2eeURL, chatModel, false)
