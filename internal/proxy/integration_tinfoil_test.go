@@ -213,6 +213,11 @@ func TestIntegration_Tinfoil(t *testing.T) {
 	t.Run("AttestationReport", func(t *testing.T) {
 		assertTinfoilAttestationReport(t, integrationTinfoilE2EEConfig(t), tinfoilIntegrationModel(), "tinfoil_v3_cloud")
 	})
+	t.Run("GLMReasoningRepairs", func(t *testing.T) {
+		model := requireTinfoilModelEndpoint(t, catalog,
+			tinfoilPrefixModel("tinfoil_v3_cloud", "glm-5-2"), "/v1/chat/completions")
+		runGLMReasoningRepairTests(t, e2eeSrv.URL, model)
+	})
 }
 
 func TestIntegration_TinfoilDirect(t *testing.T) {
@@ -232,6 +237,11 @@ func TestIntegration_TinfoilDirect(t *testing.T) {
 	t.Run("PromptCacheKeyRouting", func(t *testing.T) {
 		model := requireTinfoilModelEndpoint(t, catalog, tinfoilDirectIntegrationModel(), "/v1/chat/completions")
 		assertTinfoilDirectPromptCacheKeyRouting(t, e2eeSrv.URL, model)
+	})
+	t.Run("GLMReasoningRepairs", func(t *testing.T) {
+		model := requireTinfoilModelEndpoint(t, catalog,
+			tinfoilPrefixModel("tinfoil_v3_direct", "glm-5-2"), "/v1/chat/completions")
+		runGLMReasoningRepairTests(t, e2eeSrv.URL, model)
 	})
 }
 
@@ -273,6 +283,10 @@ func runTinfoilAPISurface(t *testing.T, providerName string, catalog tinfoilCata
 		resp := postTinfoilContentChat(t, e2eeURL, chatModel, true)
 		defer resp.Body.Close()
 		assertStreamResponse(t, resp)
+	})
+	t.Run("ChatReasoning", func(t *testing.T) {
+		requireTinfoilReasoningModel(t, catalog, chatModel)
+		runReasoningResponseTests(t, plainURL, e2eeURL, chatModel)
 	})
 	t.Run("ChatE2EENonStreamWithTools", func(t *testing.T) {
 		resp := postTinfoilChatWithTools(t, e2eeURL, chatModel, false)
@@ -435,6 +449,14 @@ func requireTinfoilMultimodalModel(t *testing.T, catalog tinfoilCatalog, model, 
 
 func stringInSlice(needle string, haystack []string) bool {
 	return slices.Contains(haystack, needle)
+}
+
+func requireTinfoilReasoningModel(t *testing.T, catalog tinfoilCatalog, model string) {
+	t.Helper()
+	upstream := tinfoilUpstreamModel(t, catalog.provider, model)
+	if !catalog.models[upstream].Reasoning {
+		t.Skipf("Tinfoil model %q is not marked as a reasoning model", upstream)
+	}
 }
 
 func postTinfoilContentChat(t *testing.T, proxyURL, model string, stream bool) *http.Response {

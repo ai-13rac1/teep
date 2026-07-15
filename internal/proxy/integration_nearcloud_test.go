@@ -100,8 +100,22 @@ func TestIntegration_NearCloud(t *testing.T) {
 	t.Run("AttestationReport", runNearCloudAttestationReport)
 	t.Run("E2EEStreamingWithTools", runNearCloudE2EEStreamingWithTools)
 	t.Run("E2EENonStreamWithTools", runNearCloudE2EENonStreamWithTools)
+	t.Run("GLMReasoning", runNearCloudGLMReasoning)
 	t.Run("E2EEStreamingMultimodalContentArray", runNearCloudE2EEStreamingMultimodalContentArray)
 	t.Run("E2EENonStreamMultimodalContentArray", runNearCloudE2EENonStreamMultimodalContentArray)
+}
+
+func runNearCloudGLMReasoning(t *testing.T) {
+	plainSrv := newProxyServer(t, integrationNearCloudConfig(t))
+	defer plainSrv.Close()
+	e2eeSrv := newProxyServer(t, integrationNearCloudE2EEConfig(t))
+	defer e2eeSrv.Close()
+
+	const model = "nearcloud:z-ai/glm-5.2"
+	runReasoningResponseTests(t, plainSrv.URL, e2eeSrv.URL, model)
+	t.Run("Repairs", func(t *testing.T) {
+		runGLMReasoningRepairTests(t, e2eeSrv.URL, model)
+	})
 }
 
 func runNearCloudNonStream(t *testing.T) {
