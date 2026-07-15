@@ -55,7 +55,7 @@ func TestSPKIPinnedClientRejectsBeforeSendingRequest(t *testing.T) {
 	})
 }
 
-func TestSPKIPinnedClientRetainsCTWrapperAndReusesConnection(t *testing.T) {
+func TestSPKIPinnedClientInstallsHandshakeCTAndReusesConnection(t *testing.T) {
 	testtls.RunWithFallbackRoot(t, func(t *testing.T, authority *testtls.Authority) {
 		t.Helper()
 		var mu sync.Mutex
@@ -75,8 +75,15 @@ func TestSPKIPinnedClientRetainsCTWrapperAndReusesConnection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSPKIPinnedHTTPClientWithTransport: %v", err)
 		}
-		if _, ok := client.Transport.(*ctRoundTripper); !ok {
-			t.Fatalf("Transport = %T, want *ctRoundTripper", client.Transport)
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+		}
+		if transport.TLSClientConfig == nil || transport.TLSClientConfig.VerifyConnection == nil {
+			t.Fatal("pinned client did not install handshake verification")
+		}
+		if transport.TLSClientConfig.ClientSessionCache != nil {
+			t.Fatal("pinned client enabled TLS session resumption")
 		}
 
 		for range 2 {
@@ -96,6 +103,45 @@ func TestSPKIPinnedClientRetainsCTWrapperAndReusesConnection(t *testing.T) {
 		}
 		if _, ok := protocols[2]; !ok {
 			t.Fatalf("HTTP protocol majors = %v, want HTTP/2", protocols)
+		}
+	})
+}
+
+func TestCTRejectsBeforeSendingRequest(t *testing.T) {
+	testtls.RunWithFallbackRoot(t, func(t *testing.T, authority *testtls.Authority) {
+		t.Helper()
+		const hostname = "ct-required.example"
+		var requests atomic.Int64
+		ts := authority.NewTLSServerForHost(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}), hostname)
+
+		dialer := &net.Dialer{}
+		base := &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, ts.Listener.Addr().String())
+			},
+		}
+		client := NewHTTPClientWithTransport(0, base, true)
+		body := &countingReader{}
+		req, err := http.NewRequest(http.MethodPost, "https://"+hostname+"/inference", io.NopCloser(body))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, err := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "certificate transparency check failed") {
+			t.Fatalf("Do error = %v, want certificate transparency failure", err)
+		}
+		if got := requests.Load(); got != 0 {
+			t.Fatalf("server received %d requests, want 0", got)
+		}
+		if got := body.reads.Load(); got != 0 {
+			t.Fatalf("request body was read %d times before CT rejection, want 0", got)
 		}
 	})
 }

@@ -11,8 +11,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
-	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -277,7 +277,10 @@ func TestCheckTLSState_CacheExpired(t *testing.T) {
 	mock := &mockRoundTripper{handler: handlerResponse(http.StatusInternalServerError, "broken")} //nolint:bodyclose // closed by loadLogList
 	c.SetLogListHTTP(&http.Client{Transport: mock})
 
-	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	state := &tls.ConnectionState{
+		PeerCertificates:            []*x509.Certificate{cert},
+		SignedCertificateTimestamps: [][]byte{fabricateHandshakeSCT(t)},
+	}
 	err := c.CheckTLSState(context.Background(), "example.com", state)
 	if err == nil {
 		t.Fatal("expected error after cache miss")
@@ -299,7 +302,10 @@ func TestCheckTLSState_LoadLogListError(t *testing.T) {
 	c.SetLogListHTTP(&http.Client{Transport: mock})
 
 	cert := selfSignedCert(t)
-	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	state := &tls.ConnectionState{
+		PeerCertificates:            []*x509.Certificate{cert},
+		SignedCertificateTimestamps: [][]byte{fabricateHandshakeSCT(t)},
+	}
 	err := c.CheckTLSState(context.Background(), "example.com", state)
 	if err == nil {
 		t.Fatal("expected error")
@@ -441,94 +447,7 @@ func TestCacheEviction(t *testing.T) {
 	})
 }
 
-// ---------- Group 12: ctRoundTripper ----------
-
-func TestCTRoundTripper(t *testing.T) {
-	t.Run("base error propagated", func(t *testing.T) {
-		base := &mockRoundTripper{handler: func(_ *http.Request) (*http.Response, error) {
-			return nil, errors.New("connection refused")
-		}}
-		rt := tlsct.WrapTransport(base)
-		req := httptest.NewRequest(http.MethodGet, "https://example.com/", http.NoBody)
-		_, err := rt.RoundTrip(req) //nolint:bodyclose // error path, no body
-		if err == nil || !strings.Contains(err.Error(), "connection refused") {
-			t.Fatalf("expected 'connection refused', got: %v", err)
-		}
-	})
-
-	t.Run("HTTP skips CT check", func(t *testing.T) {
-		base := &mockRoundTripper{handler: func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("ok")),
-			}, nil
-		}}
-		rt := tlsct.WrapTransport(base)
-		req := httptest.NewRequest(http.MethodGet, "http://example.com/", http.NoBody)
-		resp, err := rt.RoundTrip(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200, got %d", resp.StatusCode)
-		}
-		t.Log("HTTP request passed through without CT check")
-	})
-
-	t.Run("HTTPS with nil TLS state", func(t *testing.T) {
-		base := &mockRoundTripper{handler: func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("ok")),
-				TLS:        nil, // no TLS state
-			}, nil
-		}}
-		rt := tlsct.WrapTransport(base)
-		req := httptest.NewRequest(http.MethodGet, "https://example.com/", http.NoBody)
-		_, err := rt.RoundTrip(req) //nolint:bodyclose // body closed by RoundTrip on error
-		if err == nil || !strings.Contains(err.Error(), "missing TLS connection state") {
-			t.Fatalf("expected 'missing TLS connection state', got: %v", err)
-		}
-	})
-
-	t.Run("HTTPS with disabled checker passes through", func(t *testing.T) {
-		// WrapTransport uses defaultChecker. Disable it for this test.
-		tlsct.DefaultChecker().SetEnabled(false)
-		defer tlsct.DefaultChecker().SetEnabled(true)
-
-		cert := selfSignedCert(t)
-		base := &mockRoundTripper{handler: func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("ok")),
-				TLS: &tls.ConnectionState{
-					PeerCertificates: []*x509.Certificate{cert},
-				},
-			}, nil
-		}}
-		rt := tlsct.WrapTransport(base)
-		req := httptest.NewRequest(http.MethodGet, "https://example.com/", http.NoBody)
-		resp, err := rt.RoundTrip(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200, got %d", resp.StatusCode)
-		}
-		t.Log("disabled checker → HTTPS passed through")
-	})
-
-	t.Run("nil base uses DefaultTransport", func(t *testing.T) {
-		rt := tlsct.WrapTransport(nil)
-		if rt == nil {
-			t.Fatal("expected non-nil RoundTripper")
-		}
-	})
-}
-
-// ---------- Group 13: NewHTTPClientWithTransport ----------
+// ---------- Group 12: NewHTTPClientWithTransport ----------
 
 func TestNewHTTPClientWithTransport(t *testing.T) {
 	t.Run("nil base does not panic", func(t *testing.T) {
@@ -572,12 +491,44 @@ func TestNewHTTPClientWithTransport(t *testing.T) {
 		}
 	})
 
-	t.Run("CT enabled wraps transport", func(t *testing.T) {
+	t.Run("CT enabled installs handshake verifier", func(t *testing.T) {
 		c := tlsct.NewHTTPClientWithTransport(5*time.Second, nil, true)
-		if _, ok := c.Transport.(*http.Transport); ok {
-			t.Fatal("expected wrapped transport when CT enabled")
+		transport, ok := c.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+		}
+		if transport.TLSClientConfig == nil || transport.TLSClientConfig.VerifyConnection == nil {
+			t.Fatal("CT handshake verifier was not installed")
 		}
 	})
+
+	t.Run("CT enabled rejects custom TLS dialer", func(t *testing.T) {
+		base := &http.Transport{
+			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("unused")
+			},
+		}
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected custom TLS dialer to panic")
+			}
+		}()
+		_ = tlsct.NewHTTPClientWithTransport(5*time.Second, base, true)
+	})
+
+	for name, config := range map[string]*tls.Config{
+		"InsecureSkipVerify": {InsecureSkipVerify: true},
+		"custom roots":       {RootCAs: x509.NewCertPool()},
+	} {
+		t.Run("CT enabled rejects "+name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("expected %s to panic", name)
+				}
+			}()
+			_ = tlsct.NewHTTPClientWithTransport(5*time.Second, &http.Transport{TLSClientConfig: config}, true)
+		})
+	}
 
 	t.Run("timeout propagated", func(t *testing.T) {
 		c := tlsct.NewHTTPClient(42*time.Second, false)
@@ -586,17 +537,14 @@ func TestNewHTTPClientWithTransport(t *testing.T) {
 		}
 	})
 
-	t.Run("default CT enabled without explicit arg", func(t *testing.T) {
-		c := tlsct.NewHTTPClient(5 * time.Second)
-		if _, ok := c.Transport.(*http.Transport); ok {
-			t.Fatal("expected CT-wrapped transport by default (no explicit bool)")
-		}
-	})
-
 	t.Run("NewHTTPClientWithTransport default CT enabled", func(t *testing.T) {
 		c := tlsct.NewHTTPClientWithTransport(5*time.Second, nil)
-		if _, ok := c.Transport.(*http.Transport); ok {
-			t.Fatal("expected CT-wrapped transport by default")
+		transport, ok := c.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("Transport = %T, want *http.Transport", c.Transport)
+		}
+		if transport.TLSClientConfig == nil || transport.TLSClientConfig.VerifyConnection == nil {
+			t.Fatal("default CT handshake verifier was not installed")
 		}
 	})
 
@@ -609,7 +557,7 @@ func TestNewHTTPClientWithTransport(t *testing.T) {
 	})
 }
 
-// ---------- Group 14: loadLogList ----------
+// ---------- Group 13: loadLogList ----------
 
 func TestLoadLogList(t *testing.T) {
 	// Minimal valid log list JSON.

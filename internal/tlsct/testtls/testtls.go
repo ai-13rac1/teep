@@ -58,6 +58,22 @@ func RunWithFallbackRoot(t *testing.T, fn func(t *testing.T, authority *Authorit
 // authority. The caller must invoke it inside RunWithFallbackRoot.
 func (a *Authority) NewTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
+	return a.newTLSServer(t, handler, "localhost", []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback})
+}
+
+// NewTLSServerForHost starts a TLS server whose certificate is valid for
+// host. Tests can map that public-looking hostname to the local listener with
+// a DialContext while retaining production WebPKI verification.
+func (a *Authority) NewTLSServerForHost(t *testing.T, handler http.Handler, host string) *httptest.Server {
+	t.Helper()
+	if host == "" {
+		t.Fatal("test TLS hostname is empty")
+	}
+	return a.newTLSServer(t, handler, host, nil)
+}
+
+func (a *Authority) newTLSServer(t *testing.T, handler http.Handler, host string, addresses []net.IP) *httptest.Server {
+	t.Helper()
 	if a == nil || a.cert == nil || a.key == nil {
 		t.Fatal("test TLS authority is not initialized")
 	}
@@ -69,13 +85,13 @@ func (a *Authority) NewTLSServer(t *testing.T, handler http.Handler) *httptest.S
 	serial := randomSerial(t)
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "localhost"},
+		Subject:      pkix.Name{CommonName: host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:     []string{host},
+		IPAddresses:  addresses,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, a.cert, &leafKey.PublicKey, a.key)
 	if err != nil {

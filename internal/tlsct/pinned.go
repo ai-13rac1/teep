@@ -23,10 +23,10 @@ var ErrSPKIMismatch = errors.New("TLS peer SPKI does not match attested fingerpr
 // TLS configuration itself. Connections that pass may be safely reused
 // because a TLS peer identity cannot change during an established connection.
 //
-// Certificate-transparency enforcement is retained through
-// NewHTTPClientWithTransport. The caller must dedicate base to this pin; a
-// transport pool must never contain connections authenticated under different
-// expected fingerprints.
+// Certificate-transparency enforcement is composed into the same handshake
+// through NewHTTPClientWithTransport. The caller must dedicate base to this
+// pin; a transport pool must never contain connections authenticated under
+// different expected fingerprints. TLS session resumption remains disabled.
 func NewSPKIPinnedHTTPClientWithTransport(
 	timeout time.Duration,
 	base *http.Transport,
@@ -48,7 +48,9 @@ func NewSPKIPinnedHTTPClientWithTransport(
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{}
+	tlsConfig := &tls.Config{
+		ClientSessionCache: nil, // SPKI-scoped pools must perform full handshakes.
+	}
 	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 {
 			return errors.New("TLS peer did not provide a certificate")

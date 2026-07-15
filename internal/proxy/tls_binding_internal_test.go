@@ -70,7 +70,7 @@ func tlsBindingTestProvider(baseURL string) *provider.Provider {
 	return &provider.Provider{Name: "tinfoil_test", UsesTLSBinding: true, BaseURL: baseURL}
 }
 
-func TestSetUpstreamConnectionHeaders_DoesNotCloseTLSBindingConnections(t *testing.T) {
+func TestSetUpstreamConnectionHeaders_DoesNotSetConnectionHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "https://example.com", http.NoBody)
 	setUpstreamConnectionHeaders(req, nil)
 	if got := req.Header.Get("Connection"); got != "" {
@@ -275,11 +275,11 @@ func TestPinnedUpstreamClientRotatesPoolWhenAttestedFingerprintChanges(t *testin
 	if firstClient == secondClient {
 		t.Fatal("fingerprint change reused the old pinned client")
 	}
-	uppercaseFirstClient, err := s.pinnedUpstreamClient(prov, prov.BaseURL, strings.ToUpper(secondFP))
+	uppercaseSecondClient, err := s.pinnedUpstreamClient(prov, prov.BaseURL, strings.ToUpper(secondFP))
 	if err != nil {
 		t.Fatalf("uppercase pinnedUpstreamClient: %v", err)
 	}
-	if uppercaseFirstClient != secondClient {
+	if uppercaseSecondClient != secondClient {
 		t.Fatal("equivalent uppercase fingerprint rotated the pinned client")
 	}
 	again, err := s.pinnedUpstreamClient(prov, prov.BaseURL, secondFP)
