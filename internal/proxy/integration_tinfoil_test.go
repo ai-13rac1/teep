@@ -454,7 +454,11 @@ func stringInSlice(needle string, haystack []string) bool {
 func requireTinfoilReasoningModel(t *testing.T, catalog tinfoilCatalog, model string) {
 	t.Helper()
 	upstream := tinfoilUpstreamModel(t, catalog.provider, model)
-	if !catalog.models[upstream].Reasoning {
+	entry, ok := catalog.models[upstream]
+	if !ok {
+		t.Fatalf("model %q not found in Tinfoil /v1/models catalog", upstream)
+	}
+	if !entry.Reasoning {
 		t.Skipf("Tinfoil model %q is not marked as a reasoning model", upstream)
 	}
 }
@@ -472,6 +476,8 @@ func postTinfoilContentChat(t *testing.T, proxyURL, model string, stream bool) *
 
 func postTinfoilChatWithTools(t *testing.T, proxyURL, model string, stream bool) *http.Response {
 	t.Helper()
+	// Tinfoil's vLLM GLM-5.2 backend returns HTTP 500 when reasoning is
+	// enabled with a named or required tool choice, so auto is intentional.
 	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":128,"tool_choice":"auto","tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}`,
 		model, integrationToolPrompt, stream)
 	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)

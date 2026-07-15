@@ -84,7 +84,7 @@ func assertReasoningResponse(t *testing.T, resp *http.Response, stream bool) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, diagnosticBodySnippet(body))
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -100,10 +100,10 @@ func assertReasoningResponse(t *testing.T, resp *http.Response, stream bool) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		t.Fatalf("decode reasoning chat body: %v; body=%s", err, body)
+		t.Fatalf("decode reasoning chat body: %v; body=%s", err, diagnosticBodySnippet(body))
 	}
 	if len(parsed.Choices) == 0 {
-		t.Fatalf("reasoning chat response has no choices: %s", body)
+		t.Fatalf("reasoning chat response has no choices: %s", diagnosticBodySnippet(body))
 	}
 	message := parsed.Choices[0].Message
 	reasoning := message.Reasoning
@@ -121,7 +121,7 @@ func assertReasoningStreamResponse(t *testing.T, resp *http.Response) {
 	t.Helper()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, diagnosticBodySnippet(body))
 	}
 	chunks := readSSEChunks(t, resp.Body)
 	if len(chunks) == 0 {
@@ -139,7 +139,7 @@ func assertReasoningStreamResponse(t *testing.T, resp *http.Response) {
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(chunk), &parsed); err != nil {
-			t.Fatalf("decode reasoning chat SSE chunk: %v; chunk=%s", err, chunk)
+			t.Fatalf("decode reasoning chat SSE chunk: %v; chunk=%s", err, diagnosticBodySnippet([]byte(chunk)))
 		}
 		if len(parsed.Choices) == 0 {
 			continue
