@@ -213,6 +213,11 @@ func TestIntegration_Tinfoil(t *testing.T) {
 	t.Run("AttestationReport", func(t *testing.T) {
 		assertTinfoilAttestationReport(t, integrationTinfoilE2EEConfig(t), tinfoilIntegrationModel(), "tinfoil_v3_cloud")
 	})
+	t.Run("GLMReasoningRepairs", func(t *testing.T) {
+		model := requireTinfoilModelEndpoint(t, catalog,
+			tinfoilPrefixModel("tinfoil_v3_cloud", "glm-5-2"), "/v1/chat/completions")
+		runGLMReasoningRepairTests(t, e2eeSrv.URL, model)
+	})
 }
 
 func TestIntegration_TinfoilDirect(t *testing.T) {
@@ -233,12 +238,19 @@ func TestIntegration_TinfoilDirect(t *testing.T) {
 		model := requireTinfoilModelEndpoint(t, catalog, tinfoilDirectIntegrationModel(), "/v1/chat/completions")
 		assertTinfoilDirectPromptCacheKeyRouting(t, e2eeSrv.URL, model)
 	})
+	t.Run("GLMReasoningRepairs", func(t *testing.T) {
+		model := requireTinfoilModelEndpoint(t, catalog,
+			tinfoilPrefixModel("tinfoil_v3_direct", "glm-5-2"), "/v1/chat/completions")
+		runGLMReasoningRepairTests(t, e2eeSrv.URL, model)
+	})
 }
 
 func runTinfoilAPISurface(t *testing.T, providerName string, catalog tinfoilCatalog, plainURL, e2eeURL string) {
 	t.Helper()
 
 	chatModel := requireTinfoilModelEndpoint(t, catalog, tinfoilChatModel(providerName), "/v1/chat/completions")
+	reasoningModel := requireTinfoilModelEndpoint(t, catalog,
+		tinfoilPrefixModel(providerName, "glm-5-2"), "/v1/chat/completions")
 	visionModel := requireTinfoilMultimodalModel(t, catalog, tinfoilVisionModel(providerName), "/v1/chat/completions")
 	responsesModel := requireTinfoilModelEndpoint(t, catalog, tinfoilChatModel(providerName), "/v1/responses")
 	embeddingsModel := requireTinfoilModelEndpoint(t, catalog, tinfoilEmbeddingsModel(providerName), "/v1/embeddings")
@@ -255,27 +267,31 @@ func runTinfoilAPISurface(t *testing.T, providerName string, catalog tinfoilCata
 		})
 	})
 	t.Run("ChatNonStream", func(t *testing.T) {
-		resp := postChatIntegration(t, plainURL, chatModel, false)
+		resp := postTinfoilContentChat(t, plainURL, chatModel, false)
 		defer resp.Body.Close()
 		assertNonStreamResponse(t, resp)
 	})
 	t.Run("ChatStreaming", func(t *testing.T) {
-		resp := postChatIntegration(t, plainURL, chatModel, true)
+		resp := postTinfoilContentChat(t, plainURL, chatModel, true)
 		defer resp.Body.Close()
 		assertStreamResponse(t, resp)
 	})
 	t.Run("ChatE2EENonStream", func(t *testing.T) {
-		resp := postChatIntegration(t, e2eeURL, chatModel, false)
+		resp := postTinfoilContentChat(t, e2eeURL, chatModel, false)
 		defer resp.Body.Close()
 		assertNonStreamResponse(t, resp)
 	})
 	t.Run("ChatE2EEStreaming", func(t *testing.T) {
-		resp := postChatIntegration(t, e2eeURL, chatModel, true)
+		resp := postTinfoilContentChat(t, e2eeURL, chatModel, true)
 		defer resp.Body.Close()
 		assertStreamResponse(t, resp)
 	})
+	t.Run("ChatReasoning", func(t *testing.T) {
+		requireTinfoilReasoningModel(t, catalog, reasoningModel)
+		runReasoningResponseTests(t, plainURL, e2eeURL, reasoningModel)
+	})
 	t.Run("ChatE2EENonStreamWithTools", func(t *testing.T) {
-		resp := postChatWithTools(t, e2eeURL, chatModel, false)
+		resp := postTinfoilChatWithTools(t, e2eeURL, chatModel, false)
 		defer resp.Body.Close()
 		if !assertNonStreamToolCallLeaves(t, resp, providerName) {
 			t.Fatal("expected at least one tool call in Tinfoil tools integration test")
@@ -435,6 +451,42 @@ func requireTinfoilMultimodalModel(t *testing.T, catalog tinfoilCatalog, model, 
 
 func stringInSlice(needle string, haystack []string) bool {
 	return slices.Contains(haystack, needle)
+}
+
+func requireTinfoilReasoningModel(t *testing.T, catalog tinfoilCatalog, model string) {
+	t.Helper()
+	upstream := tinfoilUpstreamModel(t, catalog.provider, model)
+	entry, ok := catalog.models[upstream]
+	if !ok {
+		t.Fatalf("model %q not found in Tinfoil /v1/models catalog", upstream)
+	}
+	if !entry.Reasoning {
+		t.Skipf("Tinfoil model %q is not marked as a reasoning model", upstream)
+	}
+}
+
+func postTinfoilContentChat(t *testing.T, proxyURL, model string, stream bool) *http.Response {
+	t.Helper()
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":64,"reasoning_effort":"none"}`,
+		model, integrationPrompt, stream)
+	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST Tinfoil content chat: %v", err)
+	}
+	return resp
+}
+
+func postTinfoilChatWithTools(t *testing.T, proxyURL, model string, stream bool) *http.Response {
+	t.Helper()
+	// Tinfoil's vLLM GLM-5.2 backend returns HTTP 500 when reasoning is
+	// enabled with a named or required tool choice, so auto is intentional.
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%v,"max_tokens":128,"tool_choice":"auto","tools":[{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}]}`,
+		model, integrationToolPrompt, stream)
+	resp, err := integrationPostJSON(t, proxyURL+"/v1/chat/completions", body)
+	if err != nil {
+		t.Fatalf("POST Tinfoil chat with tools: %v", err)
+	}
+	return resp
 }
 
 func postTinfoilVisionChat(t *testing.T, proxyURL, model string, stream bool) *http.Response {
