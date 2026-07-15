@@ -87,7 +87,11 @@ Failing closed is a FEATURE, not a BUG. It is more important to protect confiden
 - All cryptographic comparisons MUST be constant-time (`subtle.ConstantTimeCompare`). Never use `==`, `!=`, `bytes.Equal`, or `strings.EqualFold` on secrets, keys, fingerprints, nonces, or hashes.
 - ALWAYS authenticate encryption keys via attestation binding.
 - ALWAYS use authenticated encryption. No plaintext fallback.
-- ALWAYS use httptest.NewTLSServer() in tests that require an HTTP server.
+- ALWAYS use httptest.NewTLSServer() in tests that require an HTTP server. When
+  testing a production client that must retain system WebPKI configuration,
+  use `testtls.RunWithFallbackRoot` and `authority.NewTLSServer` so a generated
+  CA is trusted only through an isolated child process's fallback system roots;
+  never set custom roots or `InsecureSkipVerify` on the production transport.
 - ALWAYS exercise cryptographic pathways in test code.
 - Nonce generation MUST use `crypto/rand`. Fail on error; never use a weak source.
 - Zero ephemeral key material after use.

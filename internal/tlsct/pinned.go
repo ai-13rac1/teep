@@ -17,10 +17,11 @@ import (
 var ErrSPKIMismatch = errors.New("TLS peer SPKI does not match attested fingerprint")
 
 // NewSPKIPinnedHTTPClientWithTransport returns an HTTP client that performs
-// normal WebPKI verification and then compares the live leaf SPKI with the
-// attested fingerprint during every new TLS handshake. Connections that pass
-// may be safely reused by the transport because a TLS peer identity cannot
-// change during an established connection.
+// system-root WebPKI verification and then compares the live leaf SPKI with
+// the attested fingerprint during every new TLS handshake. It rejects any
+// caller-provided TLSClientConfig or TLS dialer, then installs the complete
+// TLS configuration itself. Connections that pass may be safely reused
+// because a TLS peer identity cannot change during an established connection.
 //
 // Certificate-transparency enforcement is retained through
 // NewHTTPClientWithTransport. The caller must dedicate base to this pin; a
@@ -43,18 +44,12 @@ func NewSPKIPinnedHTTPClientWithTransport(
 		}
 		base = dt.Clone()
 	}
+	if err := validateSystemWebPKITransport(base); err != nil {
+		return nil, err
+	}
 
 	tlsConfig := &tls.Config{}
-	if base.TLSClientConfig != nil {
-		tlsConfig = base.TLSClientConfig.Clone()
-	}
-	previousVerify := tlsConfig.VerifyConnection
 	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
-		if previousVerify != nil {
-			if err := previousVerify(state); err != nil {
-				return err
-			}
-		}
 		if len(state.PeerCertificates) == 0 {
 			return errors.New("TLS peer did not provide a certificate")
 		}
@@ -67,6 +62,32 @@ func NewSPKIPinnedHTTPClientWithTransport(
 	base.TLSClientConfig = tlsConfig
 
 	return NewHTTPClientWithTransport(timeout, base, ctEnabled...), nil
+}
+
+func validateSystemWebPKITransport(base *http.Transport) error {
+	if base.DialTLSContext != nil {
+		return errors.New("SPKI-pinned transport must not set DialTLSContext")
+	}
+	cfg := base.TLSClientConfig
+	if cfg == nil {
+		return nil
+	}
+	if cfg.InsecureSkipVerify {
+		return errors.New("SPKI-pinned transport must not disable certificate verification")
+	}
+	if cfg.RootCAs != nil {
+		return errors.New("SPKI-pinned transport must use system root CAs")
+	}
+	if cfg.VerifyPeerCertificate != nil {
+		return errors.New("SPKI-pinned transport must not set VerifyPeerCertificate")
+	}
+	if cfg.VerifyConnection != nil {
+		return errors.New("SPKI-pinned transport must not set VerifyConnection")
+	}
+	if cfg.ServerName != "" {
+		return errors.New("SPKI-pinned transport must derive the server name from the request URL")
+	}
+	return errors.New("SPKI-pinned transport must not provide a custom TLSClientConfig")
 }
 
 // SPKIFingerprintsEqual compares two hex-encoded SHA-256 SPKI fingerprints in

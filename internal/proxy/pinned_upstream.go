@@ -15,6 +15,13 @@ import (
 
 const maxPinnedUpstreamPools = 1000
 
+func newUpstreamTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+}
+
 type pinnedUpstreamKey struct {
 	provider  string
 	authority string
@@ -45,9 +52,6 @@ func (s *Server) pinnedUpstreamClient(prov *provider.Provider, baseURL, expected
 	if s.pinnedUpstreams == nil {
 		return nil, errors.New("TLS-pinned upstream pool is not initialized")
 	}
-	if s.upstreamTransport == nil {
-		return nil, errors.New("base upstream transport is not initialized")
-	}
 	if s.cfg == nil {
 		return nil, errors.New("server config is not initialized")
 	}
@@ -66,7 +70,7 @@ func (s *Server) pinnedUpstreamClient(prov *provider.Provider, baseURL, expected
 		return client, nil
 	}
 
-	base := s.upstreamTransport.Clone()
+	base := newUpstreamTransport()
 	client, err := tlsct.NewSPKIPinnedHTTPClientWithTransport(0, base, expectedSPKI, !s.cfg.Offline)
 	if err != nil {
 		s.pinnedUpstreams.mu.Unlock()

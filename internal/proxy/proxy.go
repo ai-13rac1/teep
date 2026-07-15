@@ -442,7 +442,6 @@ type Server struct {
 	verifyQuote        attestation.TDXVerifier // constructed from cfg.Offline + collateral
 	sevVerifier        attestation.SEVVerifier // constructed from cfg.Offline + AMD KDS getter
 	upstreamClient     *http.Client            // for chat completions forwards
-	upstreamTransport  *http.Transport         // template cloned for SPKI-pinned pools
 	pinnedUpstreams    *pinnedUpstreamPools    // provider+authority SPKI-pinned pools
 	sseConns           atomic.Int64            // active SSE /events connections
 	e2eeFailed         sync.Map                // cacheKey → true; tracks provider+model pairs with E2EE decryption failures
@@ -484,16 +483,12 @@ func New(cfg *config.Config) (*Server, error) {
 		tlsct.WrapLogging(attestClient.Transport),
 		onReq, onErr)
 
-	upstreamTransport := &http.Transport{
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	}
+	upstreamTransport := newUpstreamTransport()
 	upstreamClient := tlsct.NewHTTPClientWithTransport(0, upstreamTransport, !cfg.Offline)
 	upstreamClient.Transport = tlsct.WrapCounting(
 		tlsct.WrapLogging(upstreamClient.Transport),
 		onReq, onErr)
 	s.upstreamClient = upstreamClient
-	s.upstreamTransport = upstreamTransport
 	s.pinnedUpstreams = newPinnedUpstreamPools()
 
 	s.rekorClient = attestation.NewRekorClient(attestClient)
@@ -2756,7 +2751,7 @@ func (s *Server) verifyUpstreamTLSBinding(
 		return &httpError{http.StatusBadGateway, "tls_binding_failed",
 			errors.New("upstream TLS binding failed: no TLS peer state on upstream connection")}
 	}
-	if subtle.ConstantTimeCompare([]byte(peerSPKI), []byte(attestedFP)) != 1 {
+	if !tlsct.SPKIFingerprintsEqual(peerSPKI, attestedFP) {
 		slog.ErrorContext(ctx, "upstream TLS SPKI mismatch: live peer does not match attested fingerprint",
 			"provider", prov.Name, "model", upstreamModel,
 			"live_spki", provider.Truncate(peerSPKI, 16),
