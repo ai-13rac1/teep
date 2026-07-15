@@ -32,13 +32,17 @@ const ctEnabledDefault = true
 
 var defaultChecker = NewChecker()
 
+// TLS verification callbacks do not expose a request context. The HTTP
+// client's hard timeout bounds log-list retrieval on this context.
+var tlsHandshakeContext = context.Background()
+
 type certCacheEntry struct {
 	checkedAt time.Time
 }
 
 // Checker verifies SCT evidence using Google's CT package and public log list.
-// Successful checks are cached briefly to avoid repeated work on pooled
-// connections.
+// Successful checks are cached briefly to avoid repeated work across new and
+// pooled connections presenting the same certificate.
 type Checker struct {
 	mu      sync.Mutex
 	entries map[string]certCacheEntry
@@ -84,8 +88,9 @@ func (c *Checker) SetEnabled(enabled bool) {
 	c.enabled.Store(enabled)
 }
 
-// NewHTTPClient returns an HTTP client that enforces CT for all HTTPS requests.
-// All outgoing requests are logged at DEBUG level via WrapLogging.
+// NewHTTPClient returns an HTTP client that enforces CT during public HTTPS
+// TLS handshakes, before sending HTTP requests. All outgoing requests are
+// logged at DEBUG level via WrapLogging.
 func NewHTTPClient(timeout time.Duration, ctEnabled ...bool) *http.Client {
 	dt, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -96,8 +101,9 @@ func NewHTTPClient(timeout time.Duration, ctEnabled ...bool) *http.Client {
 	return client
 }
 
-// NewHTTPClientWithTransport returns an HTTP client that enforces CT for all
-// HTTPS requests while using the provided base transport settings.
+// NewHTTPClientWithTransport returns an HTTP client that enforces CT during
+// every public HTTPS TLS handshake, before any HTTP request bytes are sent,
+// while using the provided base transport settings.
 func NewHTTPClientWithTransport(timeout time.Duration, base *http.Transport, ctEnabled ...bool) *http.Client {
 	if base == nil {
 		dt, ok := http.DefaultTransport.(*http.Transport)
@@ -106,18 +112,35 @@ func NewHTTPClientWithTransport(timeout time.Duration, base *http.Transport, ctE
 		}
 		base = dt.Clone()
 	}
-	if base.TLSClientConfig == nil {
-		base.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
-	} else if base.TLSClientConfig.MinVersion < tls.VersionTLS13 {
-		base.TLSClientConfig.MinVersion = tls.VersionTLS13
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	if base.TLSClientConfig != nil {
+		tlsConfig = base.TLSClientConfig.Clone()
+		if tlsConfig.MinVersion < tls.VersionTLS13 {
+			tlsConfig.MinVersion = tls.VersionTLS13
+		}
 	}
-	transport := http.RoundTripper(base)
 	if ctEnabledFromOpt(ctEnabled...) {
-		transport = WrapTransport(base)
+		validateCTTransport(base)
+		addCTVerifyConnection(tlsConfig, defaultChecker)
 	}
+	base.TLSClientConfig = tlsConfig
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: transport,
+		Transport: base,
+	}
+}
+
+func validateCTTransport(base *http.Transport) {
+	if base.DialTLSContext != nil || base.DialTLS != nil { //nolint:staticcheck // deprecated hook must also be rejected
+		panic("CT-enforced transport must not provide a custom TLS dialer")
+	}
+	if config := base.TLSClientConfig; config != nil {
+		if config.InsecureSkipVerify {
+			panic("CT-enforced transport must not disable WebPKI verification")
+		}
+		if config.RootCAs != nil {
+			panic("CT-enforced transport must use system root CAs")
+		}
 	}
 }
 
@@ -128,41 +151,58 @@ func ctEnabledFromOpt(enabled ...bool) bool {
 	return enabled[0]
 }
 
-// WrapTransport wraps an existing transport with post-handshake CT checks.
-func WrapTransport(base http.RoundTripper) http.RoundTripper {
-	if base == nil {
-		base = http.DefaultTransport
+func addCTVerifyConnection(config *tls.Config, checker *Checker) {
+	previousVerify := config.VerifyConnection
+	configuredServerName := config.ServerName
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if previousVerify != nil {
+			if err := previousVerify(state); err != nil {
+				return err
+			}
+		}
+		host := ctConnectionHost(&state, configuredServerName)
+		if err := checker.checkTLSState(host, &state, checker.loadLogListForHandshake); err != nil {
+			return fmt.Errorf("certificate transparency check failed: %w", err)
+		}
+		return nil
 	}
-	return &ctRoundTripper{base: base, checker: defaultChecker}
 }
 
-type ctRoundTripper struct {
-	base    http.RoundTripper
-	checker *Checker
-}
-
-func (t *ctRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.base.RoundTrip(req)
-	if err != nil {
-		return nil, err
+func ctConnectionHost(state *tls.ConnectionState, configuredServerName string) string {
+	if state.ServerName != "" {
+		return state.ServerName
 	}
-	if req.URL == nil || req.URL.Scheme != "https" {
-		return resp, nil
+	if configuredServerName != "" {
+		return configuredServerName
 	}
-	if resp.TLS == nil {
-		_ = resp.Body.Close()
-		return nil, errors.New("missing TLS connection state")
+	if len(state.PeerCertificates) == 0 {
+		return ""
 	}
-	if err := t.checker.CheckTLSState(req.Context(), req.URL.Hostname(), resp.TLS); err != nil {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("certificate transparency check failed: %w", err)
+	var privateIP string
+	for _, ip := range state.PeerCertificates[0].IPAddresses {
+		if !isPrivateHost(ip.String()) {
+			return ip.String()
+		}
+		if privateIP == "" {
+			privateIP = ip.String()
+		}
 	}
-	return resp, nil
+	return privateIP
 }
 
 // CheckTLSState verifies that the peer cert chain provides valid SCT evidence
 // anchored to a known CT log in Google's public log list.
 func (c *Checker) CheckTLSState(ctx context.Context, host string, state *tls.ConnectionState) error {
+	return c.checkTLSState(host, state, func() (*loglist3.LogList, error) {
+		return c.loadLogList(ctx)
+	})
+}
+
+func (c *Checker) checkTLSState(
+	host string,
+	state *tls.ConnectionState,
+	loadLogList func() (*loglist3.LogList, error),
+) error {
 	if c == nil || !c.enabled.Load() {
 		return nil
 	}
@@ -182,11 +222,6 @@ func (c *Checker) CheckTLSState(ctx context.Context, host string, state *tls.Con
 		return nil
 	}
 	c.mu.Unlock()
-
-	logList, err := c.loadLogList(ctx)
-	if err != nil {
-		return fmt.Errorf("load CT log list: %w", err)
-	}
 
 	ctChain, err := toCTChain(state.PeerCertificates)
 	if err != nil {
@@ -220,6 +255,11 @@ func (c *Checker) CheckTLSState(ctx context.Context, host string, state *tls.Con
 
 	if len(scts) == 0 {
 		return errors.New("no SCTs found in certificate or TLS handshake")
+	}
+
+	logList, err := loadLogList()
+	if err != nil {
+		return fmt.Errorf("load CT log list: %w", err)
 	}
 
 	var verifyErrs []string
@@ -276,6 +316,30 @@ func (c *Checker) addCacheEntry(key string) {
 }
 
 func (c *Checker) loadLogList(parentCtx context.Context) (*loglist3.LogList, error) {
+	return c.loadLogListWithRequest(func() (*http.Request, func(), error) {
+		ctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, loglist3.AllLogListURL, http.NoBody)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		return req, cancel, nil
+	})
+}
+
+// loadLogListForHandshake is used by tls.Config.VerifyConnection, which does
+// not expose a request context. logListHTTP has a hard 20-second client
+// timeout, so the handshake remains bounded.
+func (c *Checker) loadLogListForHandshake() (*loglist3.LogList, error) {
+	return c.loadLogListWithRequest(func() (*http.Request, func(), error) {
+		req, err := http.NewRequestWithContext(tlsHandshakeContext, http.MethodGet, loglist3.AllLogListURL, http.NoBody)
+		return req, func() {}, err
+	})
+}
+
+func (c *Checker) loadLogListWithRequest(
+	newRequest func() (*http.Request, func(), error),
+) (*loglist3.LogList, error) {
 	c.logListMu.RLock()
 	if c.logList != nil && time.Since(c.logListAt) <= logListCacheTTL {
 		ll := c.logList
@@ -295,13 +359,11 @@ func (c *Checker) loadLogList(parentCtx context.Context) (*loglist3.LogList, err
 	}
 	c.logListMu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, loglist3.AllLogListURL, http.NoBody)
+	req, cleanup, err := newRequest()
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	SetUserAgent(req)
 	resp, err := c.logListHTTP.Do(req)
 	if err != nil {

@@ -235,7 +235,10 @@ type Provider struct {
 	SigstoreRepoForModel func(model string) string
 
 	// UsesTLSBinding declares that this provider performs live TLS channel
-	// binding (comparing the live peer SPKI against an attested fingerprint).
+	// binding. The proxy authenticates each new upstream TLS connection against
+	// the attested SPKI before transmitting request data, then checks the peer
+	// SPKI again on every response as defense in depth. Authenticated connections
+	// may be pooled and reused for subsequent requests to the same authority.
 	// When true, evalTLSKeyBinding fails closed if the attestation's
 	// TLSFingerprint is empty, preventing a future provider from silently
 	// skipping TLS binding. Tinfoil sets this; E2EE-only providers do not.

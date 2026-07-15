@@ -747,14 +747,23 @@ func checkNoHTTPClientLiteral(r *result, files []*ast.File, names []string) {
 //
 // To use httptest.NewTLSServer correctly:
 //  1. Create the server with httptest.NewTLSServer(handler).
-//  2. Configure the HTTP client with the test server's certificate pool:
+//  2. For tests whose client trust configuration is not under test, use the
+//     test server's certificate pool:
 //     client := srv.Client()
 //     The returned *http.Client trusts the server's self-signed
 //     certificate automatically.
-//  3. If the test needs the live peer SPKI (e.g. attestation channel binding),
+//  3. Tests of a production client that must use system WebPKI (RootCAs nil,
+//     InsecureSkipVerify false, and no custom verification hooks) MUST use
+//     testtls.RunWithFallbackRoot. Inside its callback, create the server with
+//     authority.NewTLSServer. The helper installs a generated CA into the
+//     fallback system pool only in an isolated child process, so the real
+//     production transport completes a valid TLS handshake without weakening
+//     its trust configuration. Never weaken a production constructor to make
+//     a test certificate pass.
+//  4. If the test needs the live peer SPKI (e.g. attestation channel binding),
 //     extract it from srv.Certificate() and compute SHA-256(SPKI DER) to
 //     match against the attested tls_key_fp / tls_cert_fingerprint.
-//  4. If a custom tls.Config is needed (e.g. custom certificate), use
+//  5. If a custom tls.Config is needed (e.g. custom certificate), use
 //     httptest.NewUnstartedServer, set srv.TLS = &tls.Config{...}, then
 //     call srv.StartTLS().
 //

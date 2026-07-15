@@ -132,7 +132,9 @@ func tinfoilUpstreamModel(t *testing.T, providerName, model string) string {
 }
 
 // integrationTinfoilPlaintextConfig returns a config pointing at the live
-// Tinfoil API with E2EE disabled and Offline true.
+// Tinfoil API with E2EE disabled and Offline true. Online policy enforcement
+// requires e2ee_usable, so plaintext protocol coverage explicitly uses the
+// supported offline mode.
 func integrationTinfoilPlaintextConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
@@ -150,12 +152,12 @@ func integrationTinfoilPlaintextConfig(t *testing.T) *config.Config {
 }
 
 // integrationTinfoilE2EEConfig returns a config pointing at the live Tinfoil
-// API with E2EE enabled and Offline true.
+// API with E2EE enabled and full online verification enabled.
 func integrationTinfoilE2EEConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		Offline:    true,
+		Offline:    false,
 		Providers: map[string]*config.Provider{
 			"tinfoil_v3_cloud": {
 				Name:    "tinfoil_v3_cloud",
@@ -186,7 +188,7 @@ func integrationTinfoilDirectE2EEConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
 		ListenAddr: "127.0.0.1:0",
-		Offline:    true,
+		Offline:    false,
 		Providers: map[string]*config.Provider{
 			"tinfoil_v3_direct": {
 				Name:   "tinfoil_v3_direct",
@@ -511,7 +513,7 @@ func postTinfoilAudioTranscription(t *testing.T, proxyURL, model string) *http.R
 		t.Fatalf("close multipart writer: %v", err)
 	}
 
-	resp, err := integrationClient.Post(proxyURL+"/v1/audio/transcriptions", mw.FormDataContentType(), &buf)
+	resp, err := integrationPost(t, proxyURL+"/v1/audio/transcriptions", mw.FormDataContentType(), &buf)
 	if err != nil {
 		t.Fatalf("POST audio transcription: %v", err)
 	}
