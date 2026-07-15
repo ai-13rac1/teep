@@ -43,10 +43,11 @@ Cloud).
 Flag any code that:
 
 - Returns a nil error, default value, or falls through on a factor validation failure.
-- Catches an error and continues instead of aborting (error fallback).
+- Converts an error into success or less strictly validated behavior (error fallback).
 - Uses a fallback, default, or degraded mode when a security check fails.
 - Introduces a "best-effort", "soft-fail", or "skip-on-error" code path.
-- Adds backwards-compatible shims that weaken validation.
+- Adds backwards-compatibility code for previous code revisions, provider API
+  versions, config formats, CLI commands, or internal API behaviors.
 - Silently drops malformed elements instead of rejecting the whole input.
 - Allows an unattested or partially-attested request to be forwarded.
 - Serves stale or cached data when re-validation fails, without blocking.
@@ -54,9 +55,11 @@ Flag any code that:
 - Uses special cases to handle the tests or test environment, including bypassing factor validation.
 - Adds exemptions to teeplint for new code.
 
-If an error path does anything other than return/propagate an error, it is a
-defect. There are NO acceptable workarounds, fallbacks, or error recoveries for
-security validation.
+Error paths MUST fail closed. They may also log, clean up, zero key material,
+invalidate caches, and record metrics, but must never silently continue or
+return success. Request-time and untrusted-input failures should return errors.
+Panics are acceptable for startup failures and violated internal invariants
+after validated construction, such as nil required parameters or members.
 
 Expected factors or verification steps must fail loudly, not silently. Flag any
 path that skips or fails a factor because prerequisites are missing, malformed,
@@ -65,11 +68,13 @@ clear non-secret diagnostic at warn level or stronger.
 
 ## Factor Enforcement in Tests
 
-Tests MUST use the same factor enforcement semantics as `teep verify` and
-`teep serve`. Review tests as part of the security boundary: a test helper that
-allows all factors to fail, injects broad `allow_fail`, forces offline behavior,
-or otherwise papers over enforced-factor failures is a fail-open defect unless
-the production path under test is explicitly exercising that exception.
+Positive-path integration tests MUST use the same factor enforcement semantics
+as `teep verify` and `teep serve`. Unit and negative-path tests may select an
+explicit policy only when that policy behavior is itself under test. Review
+tests as part of the security boundary: a test helper that allows all factors
+to fail, injects broad `allow_fail`, forces offline behavior, or otherwise
+papers over enforced-factor failures is a fail-open defect unless that policy
+behavior is explicitly under test.
 
 Flag any test code that:
 
@@ -78,17 +83,16 @@ Flag any test code that:
 - Exercises provider verification through a weaker policy than `teep verify` or
   `teep serve` would use for the same configuration.
 - Uses `allow_fail`, `--force`, `--offline`, disabled checks, or mock verifier
-  shortcuts without asserting that the exception is explicit and scoped to the
-  behavior under test.
+  shortcuts outside a test of that explicit, scoped policy behavior.
 - Special-cases the harness so `serve` and `verify` diverge in factor
   enforcement, request blocking, diagnostics, or cache behavior.
 - Replaces a failed factor with a canned success result without exercising the
   cryptographic, attestation, or supply-chain verification path relevant to the
   change.
 
-Regression tests for review findings and audit findings must preserve the live
-fail-closed behavior, even when that means the test itself should fail until the
-factor enforcement bug is fixed.
+Regression tests for review findings and audit findings must exercise the
+production security pathway relevant to the finding and preserve fail-closed
+behavior.
 
 ## Cryptographic Safety
 
@@ -96,10 +100,19 @@ factor enforcement bug is fixed.
   `subtle.ConstantTimeCompare`. Flag any use of `==`, `!=`, `bytes.Equal`,
   or `strings.EqualFold` on security-sensitive values.
 - Encryption keys MUST be bound to TEE attestation.
-- Encryption MUST be used when requested; plaintext fallback is unacceptable!
+- Authenticated encryption MUST always be used. Plaintext, empty-key, and
+  unauthenticated-cryptography fallbacks are unacceptable.
 - Nonce generation MUST use `crypto/rand`. If randomness fails, the code MUST
   panic or return an error — never use a weak source.
-- New tests must ALWAYS use `httptest.NewTLSServer()`
+- Tests that exercise TLS clients or network trust MUST use a TLS test server,
+  normally `httptest.NewTLSServer()`. Plain HTTP is permitted only when
+  plaintext behavior is the subject of the test and the existing lint policy
+  allows it.
+- When a production client must retain system WebPKI configuration, use
+  `testtls.RunWithFallbackRoot` and `authority.NewTLSServer`; never set custom
+  roots or `InsecureSkipVerify` on the production transport.
+- Tests of cryptographic behavior MUST exercise the production cryptographic
+  pathway rather than replace it with plaintext or unauthenticated mocks.
 
 ## Sensitive Data Handling
 
@@ -110,13 +123,32 @@ factor enforcement bug is fixed.
 
 ## Attestation Integrity
 
-- Attestation MUST be verified before any inference request is forwarded.
+- Every forwarded request MUST be covered by a currently valid attestation for
+  its provider, model or route, cryptographic identity, and key epoch.
 - The nonce MUST originate from the client, not the server response.
 - No provider-asserted "verified" field may be trusted without independent
   cryptographic verification.
-- Cache misses MUST trigger full re-attestation, never pass-through.
-- Cache eviction under memory pressure MUST NOT allow unattested connections.
+- An attestation cache miss MUST initiate or join full re-attestation, never
+  pass through unverified.
+- Attestation or key cache eviction MUST prevent later use of stale
+  attestation, pins, or key material.
 - Provider or model routing MUST be unique and deterministic. Flag any selection logic that depends on map iteration order, unspecified ordering, or another non-deterministic mechanism.
+- Every inference TLS handshake must use TLS 1.3, pass WebPKI, and retain CT
+  validation before request bytes are sent.
+- Connection reuse MUST remain within the current attestation scope. Key TLS
+  pools by provider, authority, and applicable attestation scope.
+- For TLS-SPKI providers, scope reuse to the SPKI pin, check the currently
+  attested fingerprint before sending request bytes, and disable TLS session
+  resumption for those pools. Elsewhere, resumption must not bypass
+  attestation-bound identity checks.
+- For E2EE/router providers, scope attestation to the backend model endpoint
+  and E2EE key. Relay TLS connections may be reused independently, but every
+  request must use a currently attested model/route key; invalidate and
+  re-attest on key expiry, rejection, or change.
+- Rotate only connection pools whose trust depends on an evicted or changed
+  attestation epoch. Prefer HTTP/2 multiplexing within these constraints.
+  `Connection: close` is a last-resort HTTP/1.1 boundary mechanism, never a
+  per-request default; HTTP/2 forbids it.
 
 ## Error Handling Style
 
@@ -126,9 +158,10 @@ factor enforcement bug is fixed.
 - JSON unmarshalling MUST use the internal/jsonstrict parser.
 - All low-level parsers MUST return unknown field names to callers instead of logging or deduplicating them internally. Callers own the policy decision to fail, warn once per logical operation, or use lower-severity logging in hot paths.
 - Malformed attestation data MUST fail the entire response, not skip elements.
-- **Do not request nil checks for internal objects and required arguments**.
-  In all cases, we prefer panics to fallbacks or workarounds. Never suggest
-  fallback-based nil handling.
+- **Do not request fallback-based nil handling for internal objects and required
+  arguments after validated construction**. A panic is acceptable for a
+  violated internal invariant; request-time or untrusted-input failures should
+  return blocking errors.
 
 ## Concurrency Safety
 
@@ -169,8 +202,8 @@ Preferred patterns:
 - All new code and bug fixes require unit test coverage.
 - New providers or major features require integration test coverage.
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
-- Use `Connection: close` or equivalent to prevent TLS connection reuse
-  across attestation boundaries.
+- Ensure connection reuse stays within the attestation scope described above;
+  do not require per-request `Connection: close`.
 - Default test paths should not depend on live external network access. Flag live-network tests unless they are explicitly opt-in via either TEEP_LIVE_TESTS and/or API key environment variable presence.
 
 ## Provider Routing Checklist
