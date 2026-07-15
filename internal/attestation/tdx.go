@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -177,6 +178,12 @@ type TDXVerifyResult struct {
 // debug mode and its memory can be inspected by the host.
 const tdxDebugBit = 0x01
 
+// tdxSeptVeDisableBit is bit 28 of the little-endian uint64 view of
+// TD_ATTRIBUTES (Intel TDX Module ABI spec). When set, EPT-violation
+// conversion to #VE is disabled for guest TD accesses to PENDING pages.
+// Mirrors tdxAttributesSeptVeDisSupport in go-tdx-guest's validate package.
+const tdxSeptVeDisableBit = 1 << 28
+
 // tdxTimeSet builds a *tdxverify.TimeSet pinning every collateral currency
 // check (PCK cert chain x509 validity, tcbInfo, QE identity, PCK CRL, root CA
 // CRL) to t. This mirrors the SEV/NRAS/PoC replay-time mechanism (see
@@ -303,7 +310,13 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string, verifyTime time
 		copy(result.RTMRs[i][:], r)
 	}
 
-	slog.DebugContext(ctx, "TDX measurements extracted",
+	// TD_ATTRIBUTES is an 8-byte little-endian bitmask (Intel TDX Module ABI
+	// spec). The debug bit (bit 0) lives in byte 0 and is checked directly;
+	// wider hazard bits like SEPT_VE_DISABLE (bit 28) require decoding the
+	// full uint64.
+	debugBitSet := len(tdAttrs) > 0 && (tdAttrs[0]&tdxDebugBit) != 0
+
+	logArgs := []any{
 		"mrtd", hex.EncodeToString(mrTD),
 		"rtmr0", hex.EncodeToString(safeSlice(rtmrs, 0)),
 		"rtmr1", hex.EncodeToString(safeSlice(rtmrs, 1)),
@@ -314,12 +327,18 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string, verifyTime time
 		"mr_config_id", hex.EncodeToString(mrConfigID),
 		"mr_owner", hex.EncodeToString(mrOwner),
 		"mr_owner_config", hex.EncodeToString(mrOwnerConfig),
-	)
-
-	// Factor 6: debug flag. TD_ATTRIBUTES is 8 bytes; bit 0 of byte 0 is debug.
-	if len(tdAttrs) > 0 && (tdAttrs[0]&tdxDebugBit) != 0 {
-		result.DebugEnabled = true
+		"td_attributes", hex.EncodeToString(tdAttrs),
+		"xfam", hex.EncodeToString(xfam),
+		"tud_debug", debugBitSet,
 	}
+	if len(tdAttrs) == 8 {
+		tdAttrsVal := binary.LittleEndian.Uint64(tdAttrs)
+		logArgs = append(logArgs, "sept_ve_disable", tdAttrsVal&tdxSeptVeDisableBit != 0)
+	}
+	slog.DebugContext(ctx, "TDX measurements extracted", logArgs...)
+
+	// Factor 6: debug flag.
+	result.DebugEnabled = debugBitSet
 
 	// Factors 4 + 5: certificate chain and signature verification (no network).
 	opts := &tdxverify.Options{
