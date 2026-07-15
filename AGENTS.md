@@ -65,34 +65,45 @@ Failing closed is a FEATURE, not a BUG. It is more important to protect confiden
 - Unknown, misspelled, ambiguous, or semantically invalid config values MUST be rejected at startup.
 - JSON unmarshalling MUST use the internal/jsonstrict parser.
 - All low-level parsers MUST return unknown field names to callers instead of logging or deduplicating them internally. Callers own the policy decision to fail, warn once per logical operation, or use lower-severity logging in hot paths.
-- Error paths MUST only return or propagate errors. Any other behavior is a defect.
-- In all cases, prefer errors and panics over fallbacks or workarounds.
+- Error paths MUST fail closed. They may also log, clean up, zero key material, invalidate caches, and record metrics, but must never silently continue or return success.
+- Return errors for request-time and untrusted-input failures. Panics are acceptable for startup failures and violated internal invariants after validated construction (such as nil values for required parameters and members).
 - Fail loudly, not silently: when an expected factor or verification step is skipped or fails because prerequisites are missing, malformed, or unexpectedly unavailable, emit a clear non-secret diagnostic at warn level or stronger.
 - Failed factor validation MUST block requests unless specifically whitelisted by `allow_fail`, by `--force` (debug builds only: bypasses all enforced factors), or by `--offline` (skips network-dependent checks such as Intel PCS, NRAS, sigstore, and Proof of Cloud).
-- ALL tests MUST use the same factor enforcement as `teep verify` and `teep serve`, and MUST fail closed in the same way as the live codepaths do, even if this means failing tests.
+- Positive-path integration tests MUST use the same factor enforcement as `teep verify` and `teep serve`. Unit and negative-path tests may select an explicit policy only when that policy behavior is itself under test.
 - If you can't make development progress due to a failing factor or other validation, STOP and ask for advice.
 
 ### Always Ensure Attestation Integrity
 
-- Attestation MUST be verified before any request is forwarded.
-- Use `Connection: close` to prevent TLS connection reuse across attestation boundaries.
+- Every forwarded request MUST be covered by a currently valid attestation for its provider, model or route, cryptographic identity, and key epoch.
 - Nonces MUST originate from the client, not the server response.
 - Never trust provider-asserted "verified" fields without independent cryptographic verification.
-- Cache misses MUST trigger full re-attestation, never pass-through.
-- Cache eviction MUST NOT allow unattested connections.
 - Provider and model routing MUST ensure uniqueness and determinism.
+- Every inference TLS handshake must use TLS-1.3, pass WebPKI, and CT validation must remain enforced, before sending the request.
+- Connection reuse MUST remain within the currently valid attestation scope:
+  - Key any TLS connection pools by provider, authority, and applicable attestation scope.
+  - **TLS-SPKI providers:**
+    - TLS reuse attestation scope is the SPKI pin.
+    - Perform the currently attested SPKI fingerprint check *before* any request bytes are sent.
+    - Disable TLS session resumption for TLS-SPKI pools. Elsewhere, resumption MUST NOT bypass attestation-bound identity checks.
+  - **E2EE/router providers:**
+    - Attestation scope is the attested backend model endpoint and E2EE key.
+    - Relay TLS connections may be reused independently, but every request must use a currently attested model/route E2EE key.
+    - Invalidate and re-attest on key expiry, rejection, or change.
+  - Attestation or key cache eviction MUST prevent later use of stale attestation, pin, or key material. Rotate only connection pools whose trust depends on that epoch.
+  - We prefer HTTP/2 usage and associated request multiplexing where possible, within these constraints.
+  - `Connection: close` is a last-resort HTTP/1.1 boundary mechanism, never a per-request default; HTTP/2 forbids it.
+- An attestation cache miss MUST initiate or join full re-attestation; never pass through unverified.
 
 ### Always Ensure Cryptographic Safety
 
 - All cryptographic comparisons MUST be constant-time (`subtle.ConstantTimeCompare`). Never use `==`, `!=`, `bytes.Equal`, or `strings.EqualFold` on secrets, keys, fingerprints, nonces, or hashes.
 - ALWAYS authenticate encryption keys via attestation binding.
 - ALWAYS use authenticated encryption. No plaintext fallback.
-- ALWAYS use httptest.NewTLSServer() in tests that require an HTTP server. When
-  testing a production client that must retain system WebPKI configuration,
-  use `testtls.RunWithFallbackRoot` and `authority.NewTLSServer` so a generated
-  CA is trusted only through an isolated child process's fallback system roots;
-  never set custom roots or `InsecureSkipVerify` on the production transport.
-- ALWAYS exercise cryptographic pathways in test code.
+- Tests that exercise TLS clients or network trust MUST use a TLS test server, normally `httptest.NewTLSServer()`.
+  - Plain HTTP is permitted only when plaintext behavior is the subject of the test and the existing lint policy allows it.
+  - When a production client must retain system WebPKI configuration, use `testtls.RunWithFallbackRoot` and `authority.NewTLSServer`.
+  - Never set custom roots or `InsecureSkipVerify` on the production transport.
+- Tests of cryptographic behavior MUST exercise the production cryptographic pathway rather than replacing it with plaintext or unauthenticated mocks.
 - Nonce generation MUST use `crypto/rand`. Fail on error; never use a weak source.
 - Zero ephemeral key material after use.
 
@@ -139,15 +150,14 @@ Reference implementations to mirror when adding providers or verification logic:
 - Follow Effective Go idioms and best practices.
 - When uncertain, prefer DEFENSE IN DEPTH validation.
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
-- Prefer mocks over live tests: any live-network test must be gated behind the TEEP_LIVE_TESTS environment variable.
+- Prefer mocks over live tests: any live-network test must be gated behind the `TEEP_LIVE_TESTS` environment variable or API keys.
 - ALWAYS add regression test coverage for code review issues and audit findings.
 
 ### No Fallbacks or Backwards Compatibility
 
-- NEVER weaken or bypass validation behavior unless it has been explicitly disabled. This includes tests.
+- NEVER weaken or bypass factor validation, unless it has been explicitly disabled via `--offline`, `--force`, or an `allow_fail` policy.
+- NEVER fall back to plaintext, accept or use empty keys, or perform unauthenticated cryptography.
+- NEVER convert an error into successful or less strictly validated behavior through a fallback path.
 - NEVER add exemptions to teeplint for new code.
-- NO HTTP, empty-key, or cryptographic fallbacks.
-- NO SPECIAL CASES for test harness behavior. This includes factor validation.
-- NO WORKAROUNDS.
-- NO ERROR FALLBACKS.
-- NO BACKWARDS COMPATIBILITY.
+- Tests MUST NOT special-case production code to bypass security behavior.
+- Teep does NOT preserve compatibility with previous code revisions, prior provider API versions, prior config file formats, prior cli commands, or previous internal API behaviors. Do NOT add backwards compatibility code in these or any similar scenarios.
