@@ -135,6 +135,22 @@ func tlsBindingTestProvider(baseURL string) *provider.Provider {
 	return &provider.Provider{Name: "tinfoil_test", UsesTLSBinding: true, BaseURL: baseURL}
 }
 
+func TestSetUpstreamConnectionHeaders_TLSBindingCacheBehavior(t *testing.T) {
+	prov := tlsBindingTestProvider("https://example.com")
+
+	cacheMissReq := httptest.NewRequest(http.MethodPost, "https://example.com", http.NoBody)
+	setUpstreamConnectionHeaders(cacheMissReq, prov, &attestation.RawAttestation{}, nil)
+	if got := cacheMissReq.Header.Get("Connection"); got != "close" {
+		t.Fatalf("cache miss Connection = %q, want close", got)
+	}
+
+	cacheHitReq := httptest.NewRequest(http.MethodPost, "https://example.com", http.NoBody)
+	setUpstreamConnectionHeaders(cacheHitReq, prov, nil, nil)
+	if got := cacheHitReq.Header.Get("Connection"); got != "" {
+		t.Fatalf("cache hit Connection = %q, want empty", got)
+	}
+}
+
 // closeUpstream releases resources returned by a successful doUpstreamRoundtrip.
 func closeUpstream(ur *upstreamResult) {
 	if ur == nil {

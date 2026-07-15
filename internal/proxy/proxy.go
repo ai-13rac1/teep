@@ -2718,14 +2718,12 @@ type upstreamResult struct {
 }
 
 // setUpstreamConnectionHeaders sets Connection and EHBP headers on the
-// upstream request. For TLS-binding providers, Connection: close is set
-// unconditionally (belt-and-braces): even though verifyUpstreamTLSBinding
-// now runs a real per-response SPKI check on every request — cache hit or
-// miss — forcing a fresh TLS connection per request removes any dependency
-// on that check running correctly to prevent connection reuse across an
-// attestation boundary (AGENTS.md).
-func setUpstreamConnectionHeaders(req *http.Request, prov *provider.Provider, ehbp *e2ee.EHBPSession) {
-	if prov.UsesTLSBinding {
+// upstream request. For TLS-binding providers, Connection: close is set when
+// a fresh attestation was fetched. Cache-hit requests remain eligible for
+// connection reuse; verifyUpstreamTLSBinding checks their live peer SPKI on
+// every response.
+func setUpstreamConnectionHeaders(req *http.Request, prov *provider.Provider, raw *attestation.RawAttestation, ehbp *e2ee.EHBPSession) {
+	if prov.UsesTLSBinding && raw != nil {
 		req.Header.Set("Connection", "close")
 	}
 	if ehbp != nil {
@@ -2877,7 +2875,7 @@ func (s *Server) doUpstreamRoundtrip(
 		}
 		upstreamReq.Header.Set("Content-Type", contentType)
 		provider.SetUserAgent(upstreamReq)
-		setUpstreamConnectionHeaders(upstreamReq, prov, ehbp)
+		setUpstreamConnectionHeaders(upstreamReq, prov, freshRaw, ehbp)
 
 		if prepErr := prepareUpstreamHeaders(upstreamReq, prov, session, meta, stream, endpointPath); prepErr != nil {
 			cancel()
