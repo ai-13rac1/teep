@@ -4384,6 +4384,37 @@ func TestTinfoilComponentsFailClosedOnEmptyComponents(t *testing.T) {
 	assertSingleFactor(t, evalComponentSignatureRecognition(in), Fail)
 }
 
+// TestAllowedFailedFactors covers the accessor the proxy uses to warn about
+// factors that failed without blocking. An allowed failure is otherwise
+// silent, so the split between enforced and allowed failures must be exact.
+func TestAllowedFailedFactors(t *testing.T) {
+	r := &VerificationReport{Factors: []FactorResult{
+		{Name: "enforced_fail", Status: Fail, Enforced: true},
+		{Name: "allowed_fail", Status: Fail, Enforced: false},
+		{Name: "allowed_pass", Status: Pass, Enforced: false},
+		{Name: "not_applicable", Status: NotApplicable, Enforced: false},
+		{Name: "second_allowed_fail", Status: Fail, Enforced: false},
+	}}
+
+	got := r.AllowedFailedFactors()
+	want := []string{"allowed_fail", "second_allowed_fail"}
+	if len(got) != len(want) {
+		t.Fatalf("AllowedFailedFactors() returned %d factors, want %d: %+v", len(got), len(want), got)
+	}
+	for i, f := range got {
+		if f.Name != want[i] {
+			t.Errorf("AllowedFailedFactors()[%d] = %q, want %q", i, f.Name, want[i])
+		}
+	}
+	// The two accessors must not overlap: an enforced failure blocks and is
+	// logged by logReportBlockedFactors instead.
+	for _, f := range r.BlockedFactors() {
+		if !f.Enforced {
+			t.Errorf("BlockedFactors() returned unenforced factor %q", f.Name)
+		}
+	}
+}
+
 func TestEvalSigstoreCodeVerified(t *testing.T) {
 	t.Run("nil_tinfoilSC", func(t *testing.T) {
 		in := buildTinfoilInput(nil)

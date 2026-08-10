@@ -188,6 +188,21 @@ func (r *VerificationReport) BlockedFactors() []FactorResult {
 	return out
 }
 
+// AllowedFailedFactors returns the factors that failed but are allowed to
+// fail by policy, so they do not block the request. Callers log these: an
+// allowed failure is the only signal that a factor stopped holding, and
+// without it the failure is silent (SEE: AGENTS.md, "Fail loudly, not
+// silently").
+func (r *VerificationReport) AllowedFailedFactors() []FactorResult {
+	var out []FactorResult
+	for _, f := range r.Factors {
+		if f.Status == Fail && !f.Enforced {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // ReportDataBindingPassed returns true if the tee_reportdata_binding factor
 // passed. Without this, a MITM can substitute the enclave public key and
 // E2EE becomes security theater. E2EE must never be activated unless this

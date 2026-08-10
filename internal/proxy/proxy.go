@@ -2339,6 +2339,7 @@ func (s *Server) attestAndCache(
 			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
 			return &attestResult{AttestDur: time.Since(attestStart)}, "attest_failed"
 		}
+		s.logReportAllowedFailures(ctx, report, prov, upstreamModel)
 		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
 	}
 
@@ -2536,6 +2537,38 @@ func (s *Server) logReportBlockedFactors(
 	}
 	for _, f := range report.BlockedFactors() {
 		s.logRuntimeFactorBlock(ctx, prov, model, action, f)
+	}
+}
+
+// logReportAllowedFailures warns for each factor that failed but is allowed
+// to fail by policy. The request proceeds, so this warning is the only signal
+// that the factor stopped holding: an unlisted Tinfoil component repo, for
+// example, fails only the allow-fail component_recognition factor.
+//
+// Called once per fresh attestation, not per request, so a cached report does
+// not repeat the warning on every forwarded request.
+func (s *Server) logReportAllowedFailures(
+	ctx context.Context,
+	report *attestation.VerificationReport,
+	prov *provider.Provider,
+	model string,
+) {
+	if report == nil {
+		return
+	}
+	providerName := ""
+	if prov != nil {
+		providerName = prov.Name
+	}
+	for _, f := range report.AllowedFailedFactors() {
+		slog.WarnContext(ctx, "verification factor failed but is allowed to fail by policy",
+			"action", "allow_fail",
+			"provider", providerName,
+			"model", model,
+			"factor", f.Name,
+			"tier", f.Tier,
+			"detail", f.Detail,
+		)
 	}
 }
 
