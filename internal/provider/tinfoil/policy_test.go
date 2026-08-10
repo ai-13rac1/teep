@@ -40,6 +40,36 @@ func TestOrgRepoPatternWidth(t *testing.T) {
 	}
 }
 
+// TestIsValidSigstoreRepo pins the shape check on the repo path the proxy
+// discovery response assigns to a model. The value is provider-controlled and
+// reaches release URL paths and the supply chain policy.
+func TestIsValidSigstoreRepo(t *testing.T) {
+	tests := []struct {
+		repo string
+		want bool
+	}{
+		{"tinfoilsh/confidential-gemma4-31b", true},
+		{"tinfoilsh/hardware-measurements", true},
+		{"a/b", true},
+		{"tinfoilsh/..", false},
+		{"tinfoilsh/.", false},
+		{"", false},
+		{"tinfoilsh", false},
+		{"tinfoilsh/a/b", false},
+		{"tinfoilsh/repo?query=1", false},
+		{"tinfoilsh/repo name", false},
+		{"-tinfoilsh/repo", false},
+		{"tinfoilsh/", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.repo, func(t *testing.T) {
+			if got := isValidSigstoreRepo(tc.repo); got != tc.want {
+				t.Errorf("isValidSigstoreRepo(%q) = %v, want %v", tc.repo, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestOrgSignerExemptReposAreListed guards the narrow orgRepoPattern: the
 // Tinfoil components outside the confidential- namespace must stay explicit
 // Images entries, because Lookup is the only path that resolves them.
