@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -582,10 +583,10 @@ type TinfoilComponentResult struct {
 // supply chain verification and code/hardware measurement comparison.
 // Nil for non-Tinfoil providers.
 type TinfoilSupplyChainResult struct {
-	// ComponentRepos are the Tinfoil GitHub repositories whose Sigstore
-	// release bundles were verified or attempted for this attestation.
-	ComponentRepos []string
-	Components     []TinfoilComponentResult
+	// Components are the per-repository Sigstore verification results for
+	// the Tinfoil GitHub repositories whose release bundles were verified
+	// or attempted for this attestation.
+	Components []TinfoilComponentResult
 
 	// SigstoreVerified is true when the Sigstore DSSE bundle was fetched
 	// and cryptographically verified for the provider's repo.
@@ -1622,6 +1623,10 @@ func evalBuildTransparencyLog(in *ReportInput) []FactorResult {
 	return []FactorResult{rekorProvenanceResult(in, scPolicy)}
 }
 
+// tinfoilBuildTransparencyResult reports the build_transparency_log factor for
+// a Tinfoil result. The SigstoreVerified and SigstoreErr scalars describe the
+// first repo only, so this checks every component as well: a later component
+// that failed must not report Pass here (SEE: tinfoilComponentsVerified).
 func tinfoilBuildTransparencyResult(sc *TinfoilSupplyChainResult) FactorResult {
 	f := FactorResult{Tier: TierSupplyChain, Name: FactorBuildTransparency}
 	if sc.SigstoreErr != nil {
@@ -1632,6 +1637,16 @@ func tinfoilBuildTransparencyResult(sc *TinfoilSupplyChainResult) FactorResult {
 	if !sc.SigstoreVerified {
 		f.Status = Fail
 		f.Detail = "Tinfoil Sigstore DSSE bundle not verified"
+		return f
+	}
+	if repo, err := tinfoilComponentVerificationErr(sc); err != nil {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("Tinfoil component %q failed Sigstore verification: %v", repo, err)
+		return f
+	}
+	if !tinfoilComponentsVerified(sc) {
+		f.Status = Fail
+		f.Detail = "Tinfoil supply chain components not verified"
 		return f
 	}
 	f.Status = Pass
@@ -2160,9 +2175,6 @@ func isTinfoilProviderTrustedSignerRepo(repo string) bool {
 }
 
 func tinfoilComponentRepos(sc *TinfoilSupplyChainResult) []string {
-	if len(sc.Components) == 0 {
-		return sc.ComponentRepos
-	}
 	repos := make([]string, 0, len(sc.Components))
 	for _, component := range sc.Components {
 		repos = append(repos, component.Repo)
@@ -2170,9 +2182,12 @@ func tinfoilComponentRepos(sc *TinfoilSupplyChainResult) []string {
 	return repos
 }
 
+// tinfoilComponentsVerified reports whether every recorded component passed
+// Sigstore verification. An empty Components slice is unverified; the empty
+// loop does not make it verified.
 func tinfoilComponentsVerified(sc *TinfoilSupplyChainResult) bool {
 	if len(sc.Components) == 0 {
-		return sc.SigstoreVerified
+		return false
 	}
 	for _, component := range sc.Components {
 		if !component.SigstoreVerified {
@@ -2182,9 +2197,12 @@ func tinfoilComponentsVerified(sc *TinfoilSupplyChainResult) bool {
 	return true
 }
 
+// tinfoilComponentVerificationErr returns the first component verification
+// error, if any. An empty Components slice returns a non-nil error so a
+// result with no components is unverified.
 func tinfoilComponentVerificationErr(sc *TinfoilSupplyChainResult) (string, error) {
 	if len(sc.Components) == 0 {
-		return "", sc.SigstoreErr
+		return "", errors.New("no supply chain components verified")
 	}
 	for _, component := range sc.Components {
 		if component.SigstoreErr != nil {
