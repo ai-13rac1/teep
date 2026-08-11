@@ -126,6 +126,7 @@ Intel publishes MRSEAM hashes directly in their official TDX module release note
 | `7bf063280e94fb05...` | **1.5.16** | Sapphire/Emerald Rapids | nanogpt (nearcloud) |
 | `476a2997c62bccc7...` | **2.0.08** | Granite Rapids | (not yet observed) |
 | `685f891ea5c20e8f...` | **2.0.02** | Granite Rapids | (not yet observed) |
+| `d0d80c085166ba78...` | **1.5.20** | Sapphire/Emerald Rapids | tinfoil_v3_direct (glm-5-2 on B200) |
 | `5b38e33a64879589...` | **1.5.05** | Sapphire/Emerald Rapids | (Phala docs, older) |
 
 The complete list of MRSEAM-to-version mappings is available from Intel's release pages. Tinfoil (`tinfoilsh/tinfoil-python`) also maintains a curated list of accepted MRSEAM values with version labels.

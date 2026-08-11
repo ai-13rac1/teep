@@ -28,13 +28,18 @@ type v3Response struct {
 	ReportData v3ReportData    `json:"report_data"`
 	CPU        v3CPU           `json:"cpu"`
 	GPU        json.RawMessage `json:"gpu"`
-	NVSwitch   json.RawMessage `json:"nvswitch"`
+	// NVSwitch is present only on NVSwitch topologies. omitempty marks it
+	// optional so jsonstrict does not report it missing, which would fail
+	// response_schema on every single-GPU enclave.
+	NVSwitch json.RawMessage `json:"nvswitch,omitempty"`
 
 	Certificate string `json:"certificate"` // PEM certificate
 	Signature   string `json:"signature"`   // base64 ECDSA DER
 
-	// Body is a legacy V2 field — its presence causes rejection.
-	Body *json.RawMessage `json:"body"`
+	// Body is a legacy V2 field — its presence causes rejection. A V3
+	// response never carries it, so omitempty marks it optional and
+	// jsonstrict does not report it missing.
+	Body *json.RawMessage `json:"body,omitempty"`
 }
 
 // v3ReportData holds the parsed report_data fields.

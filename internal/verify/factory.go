@@ -105,24 +105,32 @@ func newReportDataVerifier(name string) provider.ReportDataVerifier {
 	}
 }
 
-func supplyChainPolicy(name string) *attestation.SupplyChainPolicy {
+// supplyChainPolicy returns the supply chain policy for a known provider
+// name, or an error for an unrecognized one. Known providers always return
+// non-nil: a real policy or the NoSupplyChainPolicy sentinel (SEE:
+// attestation.NoSupplyChainSurface).
+func supplyChainPolicy(name string) (*attestation.SupplyChainPolicy, error) {
 	switch name {
 	case "venice":
-		return venice.SupplyChainPolicy()
+		return venice.SupplyChainPolicy(), nil
 	case "neardirect":
-		return neardirect.SupplyChainPolicy()
+		return neardirect.SupplyChainPolicy(), nil
 	case "nearcloud":
-		return nearcloud.SupplyChainPolicy()
+		return nearcloud.SupplyChainPolicy(), nil
 	case "nanogpt":
-		return nanogpt.SupplyChainPolicy()
+		return nanogpt.SupplyChainPolicy(), nil
 	case "phalacloud":
-		return nil // no supply chain policy yet
+		// TODO: author a real phalacloud policy (GH #118); the sentinel
+		// keeps teep verify reporting NotApplicable until then.
+		return attestation.NoSupplyChainPolicy(), nil
 	case "chutes":
-		return nil // cosign+IMA model, no docker-compose
-	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
-		return nil // Sigstore-based, not compose-based
+		return attestation.NoSupplyChainPolicy(), nil // cosign+IMA model, no docker-compose surface
+	case "tinfoil_v3_cloud":
+		return tinfoil.CloudSupplyChainPolicy(), nil
+	case "tinfoil_v3_direct":
+		return tinfoil.DirectSupplyChainPolicy(), nil
 	default:
-		return nil
+		return nil, fmt.Errorf("unknown provider %q: no supply chain policy mapping", name)
 	}
 }
 

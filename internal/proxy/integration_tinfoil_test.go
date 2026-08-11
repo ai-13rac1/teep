@@ -21,7 +21,7 @@ import (
 
 const (
 	tinfoilDefaultChatModel       = "gemma4-31b"
-	tinfoilDefaultVisionModel     = "kimi-k2-6"
+	tinfoilDefaultVisionModel     = "gemma4-31b"
 	tinfoilDefaultEmbeddingsModel = "nomic-embed-text"
 	tinfoilDefaultAudioModel      = "whisper-large-v3-turbo"
 	tinfoilDefaultSpeechModel     = "qwen3-tts"

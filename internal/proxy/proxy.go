@@ -804,7 +804,10 @@ func fromConfig(
 				attestation.FormatDstack: venice.ReportDataVerifier{},
 			},
 		}
-		p.SupplyChainPolicy = nil // no supply chain policy yet
+		// TODO: author a real phalacloud policy (GH #118) — it can route to
+		// a dstack backend that exposes compose data. The sentinel reports
+		// NotApplicable until then.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 	case "chutes":
 		p.BaseURL = chutesProvider.DefaultLLMBaseURL
 		p.ChatPath = "/v1/chat/completions"
@@ -815,7 +818,9 @@ func fromConfig(
 		p.Encryptor = chutesProvider.NewE2EE()
 		p.Preparer = chutesProvider.NewPreparer(cp.APIKey, cp.BaseURL)
 		p.ReportDataVerifier = chutesProvider.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // cosign+IMA model, no docker-compose
+		// Chutes runs sek8s with cosign image admission + IMA; it has no
+		// compose/component supply chain surface.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 		p.ModelLister = chutesProvider.NewModelLister(chutesProvider.DefaultModelsBaseURL, cp.APIKey, config.NewAttestationClient(offline))
 		p.E2EEMaterialFetcher = chutesProvider.NewNoncePool(
 			cp.BaseURL, cp.APIKey, attester.Resolver(), config.NewAttestationClient(offline),
@@ -831,9 +836,13 @@ func fromConfig(
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		// The Tinfoil-specific evaluators (attested Fulcio identity vs
+		// policy) use this, not the generic compose dispatcher — a non-nil
+		// TinfoilSC skips that path. SEE:
+		// evalTinfoilProviderSignerRecognition.
+		p.SupplyChainPolicy = tinfoil.CloudSupplyChainPolicy()
 		p.SigstoreRepoForModel = func(_ string) string {
-			return "tinfoilsh/confidential-model-router"
+			return tinfoil.RouterRepo
 		}
 		p.ModelLister = provider.NewValidatingModelLister(
 			provider.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline)),
@@ -855,7 +864,11 @@ func fromConfig(
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		// The Tinfoil-specific evaluators (attested Fulcio identity vs
+		// policy) use this, not the generic compose dispatcher. An unlisted
+		// model repo signed by the Tinfoil org WARNs; a foreign signer
+		// fails. SEE: attestation.OrgSignerPolicy.
+		p.SupplyChainPolicy = tinfoil.DirectSupplyChainPolicy()
 		p.SigstoreRepoForModel = func(model string) string {
 			m, err := resolver.ResolveMapping(context.Background(), model)
 			if err != nil || m.Repo == "" {
@@ -903,6 +916,13 @@ func fromConfig(
 	// This check prevents future providers from silently omitting the resolver.
 	if p.PinnedHandler != nil && p.SPKIDomainForModel == nil {
 		return nil, fmt.Errorf("provider %q has PinnedHandler but no SPKIDomainForModel; SPKI eviction would fail", cp.Name)
+	}
+
+	// Every provider sets a real SupplyChainPolicy or the
+	// NoSupplyChainPolicy sentinel, never nil; a malformed policy is a
+	// startup error, not a request-time skip (SEE: NoSupplyChainSurface).
+	if err := p.SupplyChainPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("provider %q: %w", cp.Name, err)
 	}
 
 	return p, nil
@@ -1164,12 +1184,20 @@ type supplyChainResult struct {
 }
 
 // verifySupplyChain runs compose binding, sigstore digest, and rekor provenance checks.
+//
+// scPolicy must be non-nil (set at config load, SEE: fromConfig). A nil
+// here is a configuration error; the panic stops the request (net/http
+// recovers it) instead of serving unvalidated compose data (GH #118,
+// commit 766cb3f).
 func (s *Server) verifySupplyChain(
 	ctx context.Context,
 	raw *attestation.RawAttestation,
 	tdxResult *attestation.TDXVerifyResult,
 	scPolicy *attestation.SupplyChainPolicy,
 ) (supplyChainResult, time.Duration) {
+	if scPolicy == nil {
+		panic("verifySupplyChain: nil SupplyChainPolicy; provider must supply a real policy or attestation.NoSupplyChainPolicy()")
+	}
 	if raw.AppCompose == "" || tdxResult == nil || tdxResult.ParseErr != nil {
 		if tdxResult != nil && tdxResult.ParseErr != nil {
 			slog.WarnContext(ctx, "supply chain verification skipped: TDX quote parse failed",
@@ -1230,7 +1258,7 @@ func (s *Server) verifyTinfoilSupplyChain(
 		}, 0
 	}
 	start := time.Now()
-	result := &attestation.TinfoilSupplyChainResult{ComponentRepos: []string{sigstoreRepo}}
+	result := &attestation.TinfoilSupplyChainResult{}
 
 	// Check GPU hash bound from REPORTDATA verification detail.
 	bindingDetail := ""
@@ -1256,7 +1284,7 @@ func (s *Server) verifyTinfoilSupplyChain(
 
 	// Sigstore DSSE bundle verification.
 	sv := tinfoil.NewSigstoreVerifier(config.NewAttestationClient(s.cfg.Offline))
-	predicateBytes, predicateType, err := sv.FetchAndVerify(ctx, sigstoreRepo)
+	predicateBytes, predicateType, signer, err := sv.FetchAndVerify(ctx, sigstoreRepo)
 	if err != nil {
 		result.SigstoreErr = err
 		result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: sigstoreRepo, SigstoreErr: err})
@@ -1265,7 +1293,10 @@ func (s *Server) verifyTinfoilSupplyChain(
 		return result, time.Since(start)
 	}
 	result.SigstoreVerified = true
-	result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: sigstoreRepo, SigstoreVerified: true})
+	result.Components = append(result.Components, attestation.TinfoilComponentResult{
+		Repo: sigstoreRepo, SigstoreVerified: true,
+		OIDCIssuer: signer.OIDCIssuer, SAN: signer.SAN,
+	})
 	result.SigstoreDetail = fmt.Sprintf("Sigstore DSSE verified for %s (predicate: %s)", sigstoreRepo, predicateType)
 
 	// Parse code measurements from the verified predicate.
@@ -1292,17 +1323,19 @@ func (s *Server) verifyTinfoilSupplyChain(
 		}
 
 		// Hardware measurement match (TDX only).
-		result.ComponentRepos = append(result.ComponentRepos, "tinfoilsh/hardware-measurements")
-		hwPredBytes, hwPredType, hwErr := sv.FetchAndVerify(ctx, "tinfoilsh/hardware-measurements")
+		hwPredBytes, hwPredType, hwSigner, hwErr := sv.FetchAndVerify(ctx, tinfoil.HardwareMeasurementsRepo)
 		switch {
 		case hwErr != nil:
-			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: hwErr})
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: hwErr})
 			result.HWMatchErr = fmt.Errorf("fetch hardware measurements: %w", hwErr)
 		case hwPredType != tinfoil.PredicateHardwareMeasurements:
-			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: fmt.Errorf("unexpected hardware predicate type %q", hwPredType)})
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: fmt.Errorf("unexpected hardware predicate type %q", hwPredType)})
 			result.HWMatchErr = fmt.Errorf("unexpected hardware predicate type %q", hwPredType)
 		default:
-			result.Components = append(result.Components, attestation.TinfoilComponentResult{Repo: "tinfoilsh/hardware-measurements", SigstoreVerified: true})
+			result.Components = append(result.Components, attestation.TinfoilComponentResult{
+				Repo: tinfoil.HardwareMeasurementsRepo, SigstoreVerified: true,
+				OIDCIssuer: hwSigner.OIDCIssuer, SAN: hwSigner.SAN,
+			})
 			entries, parseErr := tinfoil.ParseHardwareMeasurements(hwPredBytes)
 			if parseErr != nil {
 				result.HWMatchErr = fmt.Errorf("parse hardware measurements: %w", parseErr)
@@ -2306,6 +2339,7 @@ func (s *Server) attestAndCache(
 			http.Error(w, "attestation fetch failed; see server logs", http.StatusBadGateway)
 			return &attestResult{AttestDur: time.Since(attestStart)}, "attest_failed"
 		}
+		s.logReportAllowedFailures(ctx, report, prov, upstreamModel)
 		s.cache.Put(prov.Name, cacheModelFor(ctx, upstreamModel), report)
 	}
 
@@ -2503,6 +2537,38 @@ func (s *Server) logReportBlockedFactors(
 	}
 	for _, f := range report.BlockedFactors() {
 		s.logRuntimeFactorBlock(ctx, prov, model, action, f)
+	}
+}
+
+// logReportAllowedFailures warns for each factor that failed but is allowed
+// to fail by policy. The request proceeds, so this warning is the only signal
+// that the factor stopped holding: an unlisted Tinfoil component repo, for
+// example, fails only the allow-fail component_recognition factor.
+//
+// Called once per fresh attestation, not per request, so a cached report does
+// not repeat the warning on every forwarded request.
+func (s *Server) logReportAllowedFailures(
+	ctx context.Context,
+	report *attestation.VerificationReport,
+	prov *provider.Provider,
+	model string,
+) {
+	if report == nil {
+		return
+	}
+	providerName := ""
+	if prov != nil {
+		providerName = prov.Name
+	}
+	for _, f := range report.AllowedFailedFactors() {
+		slog.WarnContext(ctx, "verification factor failed but is allowed to fail by policy",
+			"action", "allow_fail",
+			"provider", providerName,
+			"model", model,
+			"factor", f.Name,
+			"tier", f.Tier,
+			"detail", f.Detail,
+		)
 	}
 }
 

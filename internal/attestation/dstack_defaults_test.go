@@ -6,8 +6,8 @@ import (
 )
 
 func TestDstackMRSEAMAllow(t *testing.T) {
-	if len(dstackMRSEAMAllow) != 4 {
-		t.Errorf("dstackMRSEAMAllow has %d entries, want 4", len(dstackMRSEAMAllow))
+	if len(dstackMRSEAMAllow) != 5 {
+		t.Errorf("dstackMRSEAMAllow has %d entries, want 5", len(dstackMRSEAMAllow))
 	}
 	for h := range dstackMRSEAMAllow {
 		b, err := hex.DecodeString(h)

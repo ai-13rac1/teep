@@ -2,6 +2,7 @@ package attestation_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
+	"github.com/13rac1/teep/internal/provider/tinfoil"
 )
 
 // ---------------------------------------------------------------------------
@@ -460,17 +462,29 @@ func TestSupplyChainComponentRecognitionNanoGPTComposeOnly(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.NotApplicable)
 }
 
+// tinfoilComponent builds a TinfoilComponentResult for repo with a verified
+// Fulcio signer identity matching the given workflow file and tag, i.e. what
+// tinfoil.SigstoreVerifier.FetchAndVerify records on a successful
+// verification (see tinfoil.SignerIdentity).
+func tinfoilComponent(repo, workflow, tag string) attestation.TinfoilComponentResult {
+	return attestation.TinfoilComponentResult{
+		Repo:             repo,
+		SigstoreVerified: true,
+		OIDCIssuer:       tinfoil.GithubActionsOIDCIssuer,
+		SAN:              fmt.Sprintf("https://github.com/%s/.github/workflows/%s@refs/tags/%s", repo, workflow, tag),
+	}
+}
+
 func TestSupplyChainComponentRecognitionTinfoil(t *testing.T) {
 	sc := &attestation.TinfoilSupplyChainResult{
-		ComponentRepos:   []string{"tinfoilsh/confidential-model-router", "tinfoilsh/hardware-measurements"},
 		SigstoreVerified: true,
 		SigstoreDetail:   "Sigstore DSSE verified for tinfoilsh/confidential-model-router",
 		Components: []attestation.TinfoilComponentResult{
-			{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
-			{Repo: "tinfoilsh/hardware-measurements", SigstoreVerified: true},
+			tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+			tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
 		},
 	}
-	in := &attestation.ReportInput{TinfoilSC: sc}
+	in := &attestation.ReportInput{TinfoilSC: sc, SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy()}
 
 	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
@@ -478,32 +492,474 @@ func TestSupplyChainComponentRecognitionTinfoil(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
 }
 
+// TestSupplyChainComponentRecognitionTinfoil_NewTagStillAllowed checks that
+// a known component re-signed by the same trusted signer under a new
+// release tag is still recognized (the workflow pattern is independent of
+// the release tag; SEE: tinfoil.WorkflowPattern).
+func TestSupplyChainComponentRecognitionTinfoil_NewTagStillAllowed(t *testing.T) {
+	sc := &attestation.TinfoilSupplyChainResult{
+		SigstoreVerified: true,
+		Components: []attestation.TinfoilComponentResult{
+			tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v9.9.99-brand-new"),
+			tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v9.9.99-brand-new"),
+		},
+	}
+	in := &attestation.ReportInput{TinfoilSC: sc, SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy()}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
 func TestSupplyChainComponentRecognitionTinfoilFailures(t *testing.T) {
 	t.Run("unknown_repo", func(t *testing.T) {
-		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
-			ComponentRepos:   []string{"attacker/confidential-model-router"},
-			SigstoreVerified: true,
-			Components: []attestation.TinfoilComponentResult{
-				{Repo: "attacker/confidential-model-router", SigstoreVerified: true},
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("attacker/confidential-model-router", "release.yml", "v0.0.1"),
+				},
 			},
-		}}
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
 	})
 
 	t.Run("support_component_signature_error", func(t *testing.T) {
-		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
-			ComponentRepos: []string{"tinfoilsh/confidential-model-router", "tinfoilsh/hardware-measurements"},
-			Components: []attestation.TinfoilComponentResult{
-				{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
-				{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: errors.New("fetch failed")},
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: errors.New("fetch failed")},
+				},
 			},
-		}}
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
 	})
+
+	t.Run("wrong_oidc_issuer", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					{
+						Repo:             tinfoil.RouterRepo,
+						SigstoreVerified: true,
+						OIDCIssuer:       "https://attacker.example/oidc",
+						SAN:              "https://github.com/tinfoilsh/confidential-model-router/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.18",
+					},
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("wrong_repo_in_san", func(t *testing.T) {
+		// Attested signer identity is a legitimate tinfoilsh GH Actions
+		// identity, but for a *different* repo than the one being checked —
+		// e.g. a component-swap where the router's Sigstore-verified digest
+		// somehow points at the hardware-measurements repo's signature.
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		in.TinfoilSC.Components[0].Repo = tinfoil.RouterRepo // recognized repo, mismatched SAN
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// A repo missing from directModelRepos but carrying a verified tinfoilsh
+	// org signer identity: the enforced signer factors pass via the OrgSigner
+	// rule; only allow-fail component_recognition fails (WARN, not block).
+	// Guards the GH #118 requirement that a new Tinfoil model works without
+	// a teep release.
+	t.Run("unlisted_org_signed_direct_model_repo", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+	})
+
+	t.Run("unlisted_org_repo_wrong_san_repo", func(t *testing.T) {
+		// An unlisted org repo whose verified SAN belongs to a different
+		// tinfoilsh repo must fail: the SAN-to-repo binding holds for
+		// org-trusted repos too (SEE: orgImageFor).
+		component := tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "tinfoil-release-publish.yml", "v0.0.1")
+		component.Repo = "tinfoilsh/confidential-brand-new-model"
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components:       []attestation.TinfoilComponentResult{component},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("unlisted_org_repo_wrong_issuer", func(t *testing.T) {
+		component := tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1")
+		component.OIDCIssuer = "https://attacker.example/oidc"
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components:       []attestation.TinfoilComponentResult{component},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("known_direct_model_repo", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-gemma4-31b", "tinfoil-release-publish.yml", "v0.0.42"),
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+	})
+
+	t.Run("nil_policy_fails_closed", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+				},
+			},
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// A tinfoilsh repo outside the enclave namespace must not reach the org
+	// signer rule. The rule builds the expected SAN from the attested repo
+	// name, so a wider orgRepoPattern would make the enforced
+	// component_signature_recognition factor pass for any org repo with a
+	// Fulcio-signed release. Before GH #118 this factor rejected such a repo.
+	t.Run("non_confidential_org_repo_fails_enforced_factors", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/verifier", "tinfoil-release-publish.yml", "v0.0.7"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// An empty RepoPattern compiles and matches every string, so a
+	// zero-value OrgSignerPolicy must be rejected by orgImageFor rather than
+	// granting org trust to every repo. Validate rejects it at startup; this
+	// pins the evaluator behavior independently of Validate.
+	t.Run("empty_org_repo_pattern_trusts_nothing", func(t *testing.T) {
+		policy := tinfoil.DirectSupplyChainPolicy()
+		policy.OrgSigner.RepoPattern = ""
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1"),
+				},
+			},
+			SupplyChainPolicy: policy,
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// The SigstoreVerified and SigstoreErr scalars describe the first repo
+	// only. A later component that failed verification must not report Pass
+	// on build_transparency_log, the same vacuous-truth removal applied to
+	// tinfoilComponentsVerified.
+	t.Run("build_transparency_fails_on_later_component_error", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				SigstoreDetail:   "Sigstore DSSE verified for " + tinfoil.RouterRepo,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: errors.New("fetch attestation: HTTP 500")},
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Fail)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// GH #118 part 2: mandatory supply chain policy — nil-policy hole closure
+// ---------------------------------------------------------------------------
+
+// TestSupplyChainPolicy_NilPolicyWithDataFailsClosed is a regression test for
+// the commit 766cb3f failure mode (GH #118): raw attestation produced real
+// compose/component supply chain data (ImageRepos, Rekor provenance) but no
+// SupplyChainPolicy was configured to validate it. The compose/component
+// dispatchers must render Fail ("supply chain data is present but no policy
+// is configured"), not pass as NotApplicable without an error.
+func TestSupplyChainPolicy_NilPolicyWithDataFailsClosed(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	in := &attestation.ReportInput{
+		Provider:          "testprovider",
+		Raw:               raw,
+		SupplyChainPolicy: nil, // accidentally omitted, as in commit 766cb3f
+		ImageRepos:        []string{"myrepo/model"},
+		DigestToRepo:      map[string]string{digest: "myrepo/model"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:  digest,
+			HasCert: true,
+		}},
+	}
+
+	for name, factors := range map[string][]attestation.FactorResult{
+		"component_recognition":  attestation.EvalComponentRecognitionForTest(in),
+		"provider_signer":        attestation.EvalProviderSignerRecognitionForTest(in),
+		"component_signature":    attestation.EvalComponentSignatureRecognitionForTest(in),
+		"build_transparency_log": attestation.EvalBuildTransparencyLogForTest(in),
+	} {
+		f := attestation.AssertSingleFactorForTest(t, factors, attestation.Fail)
+		if !strings.Contains(f.Detail, "no policy is configured") {
+			t.Errorf("%s detail = %q, want mention of missing policy", name, f.Detail)
+		}
+	}
+}
+
+// TestSupplyChainPolicy_NilPolicyNoDataStaysNotApplicable confirms that a nil
+// SupplyChainPolicy with no compose/component data extracted (a provider that
+// genuinely produced no supply chain evidence in this attestation) still
+// reports NotApplicable rather than Fail — only data-present-but-unvalidated
+// must fail closed.
+func TestSupplyChainPolicy_NilPolicyNoDataStaysNotApplicable(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	in := &attestation.ReportInput{
+		Provider:          "testprovider",
+		Raw:               raw,
+		SupplyChainPolicy: nil,
+	}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.NotApplicable)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.NotApplicable)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.NotApplicable)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Fail) // no build transparency log at all
+}
+
+// TestSupplyChainPolicy_SentinelIsNotApplicable confirms that the explicit
+// attestation.NoSupplyChainPolicy() sentinel reports NotApplicable — even
+// when compose data happens to be present — because "no supply chain
+// policy" is a reviewed decision for this provider, distinct from an
+// accidental nil.
+func TestSupplyChainPolicy_SentinelIsNotApplicable(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	in := &attestation.ReportInput{
+		Provider:          "chutes",
+		Raw:               raw,
+		SupplyChainPolicy: attestation.NoSupplyChainPolicy(),
+		ImageRepos:        []string{"myrepo/model"}, // even with data present
+	}
+
+	for name, factors := range map[string][]attestation.FactorResult{
+		"component_recognition": attestation.EvalComponentRecognitionForTest(in),
+		"provider_signer":       attestation.EvalProviderSignerRecognitionForTest(in),
+		"component_signature":   attestation.EvalComponentSignatureRecognitionForTest(in),
+	} {
+		f := attestation.AssertSingleFactorForTest(t, factors, attestation.NotApplicable)
+		if !strings.Contains(f.Detail, "reviewed decision") {
+			t.Errorf("%s detail = %q, want mention of reviewed decision", name, f.Detail)
+		}
+	}
+	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.NotApplicable)
+}
+
+// TestNoSupplyChainPolicy_IsNoSupplyChainSurface checks the sentinel
+// constructor and its nil-safe predicate.
+func TestNoSupplyChainPolicy_IsNoSupplyChainSurface(t *testing.T) {
+	sentinel := attestation.NoSupplyChainPolicy()
+	if !sentinel.IsNoSupplyChainSurface() {
+		t.Error("NoSupplyChainPolicy().IsNoSupplyChainSurface() = false, want true")
+	}
+
+	var nilPolicy *attestation.SupplyChainPolicy
+	if nilPolicy.IsNoSupplyChainSurface() {
+		t.Error("nil.IsNoSupplyChainSurface() = true, want false")
+	}
+
+	realPolicy := neardirect.SupplyChainPolicy()
+	if realPolicy.IsNoSupplyChainSurface() {
+		t.Error("real policy IsNoSupplyChainSurface() = true, want false")
+	}
+}
+
+// TestSupplyChainPolicy_Validate exercises the startup-validation entry
+// point: nil is always rejected, the sentinel is always accepted, and a
+// non-sentinel policy with zero images is rejected.
+func TestSupplyChainPolicy_Validate(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		var p *attestation.SupplyChainPolicy
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() on nil = nil, want error")
+		}
+	})
+	t.Run("sentinel", func(t *testing.T) {
+		if err := attestation.NoSupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on sentinel = %v, want nil", err)
+		}
+	})
+	t.Run("empty_non_sentinel", func(t *testing.T) {
+		p := &attestation.SupplyChainPolicy{}
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() on empty non-sentinel policy = nil, want error")
+		}
+	})
+	t.Run("real_policy", func(t *testing.T) {
+		if err := neardirect.SupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on real policy = %v, want nil", err)
+		}
+	})
+	t.Run("tinfoil_cloud", func(t *testing.T) {
+		if err := tinfoil.CloudSupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on tinfoil cloud policy = %v, want nil", err)
+		}
+	})
+	t.Run("tinfoil_direct", func(t *testing.T) {
+		if err := tinfoil.DirectSupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on tinfoil direct policy = %v, want nil", err)
+		}
+	})
+	t.Run("org_signer_invalid_repo_pattern", func(t *testing.T) {
+		p := tinfoil.DirectSupplyChainPolicy()
+		p.OrgSigner.RepoPattern = "([unclosed"
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() with invalid org signer repo pattern = nil, want error")
+		}
+	})
+	t.Run("org_signer_missing_issuer", func(t *testing.T) {
+		p := tinfoil.DirectSupplyChainPolicy()
+		p.OrgSigner.OIDCIssuer = ""
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() with empty org signer OIDC issuer = nil, want error")
+		}
+	})
+}
+
+// TestTinfoilOrgSignerWarnNotBlock pins the allow-fail invariants behind
+// the GH #118 new-model semantics: component_recognition (the only factor
+// an unlisted org-signed repo fails) must be allow-fail by default for both
+// Tinfoil providers, while the signer factors stay enforced.
+func TestTinfoilOrgSignerWarnNotBlock(t *testing.T) {
+	for name, allowFail := range map[string][]string{
+		"tinfoil_v3_cloud":  attestation.TinfoilCloudDefaultAllowFail,
+		"tinfoil_v3_direct": attestation.TinfoilDirectDefaultAllowFail,
+	} {
+		allowed := make(map[string]bool, len(allowFail))
+		for _, f := range allowFail {
+			allowed[f] = true
+		}
+		if !allowed[attestation.FactorComponentRecognition] {
+			t.Errorf("%s: component_recognition not in default allow_fail; an unlisted org-signed repo would block", name)
+		}
+		for _, enforced := range []string{attestation.FactorProviderSigner, attestation.FactorComponentSignature} {
+			if allowed[enforced] {
+				t.Errorf("%s: %s is in default allow_fail; signer policy would be advisory only", name, enforced)
+			}
+		}
+	}
+}
+
+// TestBuildReport_MissingPolicyBlocksRequest is an end-to-end regression test
+// for the commit 766cb3f failure mode at the BuildReport level: a compose
+// report with real component data (ImageRepos, Rekor) but no SupplyChainPolicy
+// configured must render the affected factors Fail and, because
+// provider_signer_recognition / component_signature_recognition are enforced
+// by default (not in DefaultAllowFail), the overall report must be Blocked.
+func TestBuildReport_MissingPolicyBlocksRequest(t *testing.T) {
+	nonce := attestation.NewNonce()
+	sigKey := attestation.ValidSigningKeyForTest(t)
+	raw := attestation.BuildMinimalRawForTest(nonce, sigKey)
+	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+
+	report := attestation.BuildReport(&attestation.ReportInput{
+		Provider:          "testprovider",
+		Model:             "m",
+		Raw:               raw,
+		Nonce:             nonce,
+		AllowFail:         attestation.DefaultAllowFail,
+		SupplyChainPolicy: nil, // accidentally omitted, as in commit 766cb3f
+		ImageRepos:        []string{"myrepo/model"},
+		DigestToRepo:      map[string]string{digest: "myrepo/model"},
+		Rekor: []attestation.RekorProvenance{{
+			Digest:  digest,
+			HasCert: true,
+		}},
+	})
+
+	if !report.Blocked() {
+		t.Fatal("expected report.Blocked() = true when compose data is present but no supply chain policy is configured")
+	}
+	for _, name := range []string{"provider_signer_recognition", "component_signature_recognition"} {
+		f := findFactorForTest(t, report, name)
+		if f.Status != attestation.Fail {
+			t.Errorf("factor %q: got %s, want Fail", name, f.Status)
+		}
+		if !f.Enforced {
+			t.Errorf("factor %q: got Enforced=false, want true (not in DefaultAllowFail)", name)
+		}
+	}
+}
+
+func findFactorForTest(t *testing.T, report *attestation.VerificationReport, name string) attestation.FactorResult {
+	t.Helper()
+	for _, f := range report.Factors {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("factor %q not found in report", name)
+	return attestation.FactorResult{}
 }
 
 // ---------------------------------------------------------------------------

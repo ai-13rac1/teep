@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -302,6 +303,15 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 		if len(valid) == 0 {
 			continue
 		}
+		// An empty repo asserts nothing, and SigstoreRepoForModel falls back
+		// to the RepoForModel naming convention. A non-empty but malformed
+		// repo is a broken or hostile response: drop the model with a
+		// warning, as for an invalid enclave domain above.
+		if pm.Repo != "" && !isValidSigstoreRepo(pm.Repo) {
+			slog.WarnContext(ctx, "tinfoil: proxy discovery: skipping model with malformed repo",
+				"model", model, "repo", pm.Repo)
+			continue
+		}
 		mapping[model] = ModelMapping{
 			Domain:  valid[0],
 			Repo:    pm.Repo,
@@ -333,6 +343,25 @@ func sortedEnclaveDomains(enclaves map[string]proxyEnclave) []string {
 	}
 	sort.Strings(domains)
 	return domains
+}
+
+// sigstoreRepoPattern matches an owner/name GitHub repo path, using the
+// GitHub charset and length limits for each segment.
+var sigstoreRepoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
+
+// isValidSigstoreRepo validates the repo path the proxy discovery response
+// assigns to a model. The value reaches release URL paths and the supply
+// chain policy, so reject a malformed one at the boundary instead of passing
+// it inward. A "." or ".." name segment traverses the release URL path.
+//
+// An empty repo is not valid here. The caller decides whether an absent repo
+// is acceptable; for proxy discovery it is, and the naming convention applies.
+func isValidSigstoreRepo(repo string) bool {
+	if !sigstoreRepoPattern.MatchString(repo) {
+		return false
+	}
+	name := repo[strings.IndexByte(repo, '/')+1:]
+	return name != "." && name != ".."
 }
 
 // isValidBackendDomain validates that a backend enclave domain is a

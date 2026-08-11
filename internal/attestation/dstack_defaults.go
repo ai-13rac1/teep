@@ -18,6 +18,8 @@ var dstackMRSEAMAllow = map[string]struct{}{
 	"476a2997c62bccc78370913d0a80b956e3721b24272bc66c4d6307ced4be2865c40e26afac75f12df3425b03eb59ea7c": {},
 	// TDX module 2.0.02 — Granite Rapids
 	"685f891ea5c20e8fa27b151bf34bf3b50fbaf7143cc53662727cbdb167c0ad8385f1f6f3571539a91e104a1c96d75e04": {},
+	// TDX module 1.5.20 — Sapphire/Emerald Rapids
+	"d0d80c085166ba78ccc69af268e5753cf0f3394523cb4ff7c50b08d9265c82489c099c377be6a400e4d2b57da924012c": {},
 }
 
 // dstackMRTDAllow contains the TD virtual firmware measurement hashes for
