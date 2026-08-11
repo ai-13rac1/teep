@@ -245,7 +245,9 @@ type Provider struct {
 	UsesTLSBinding bool
 
 	// SupplyChainPolicy defines the allowed container image repos for this
-	// provider. May be nil if the provider has no policy.
+	// provider. Never nil on a constructed Provider: set a real policy, or
+	// attestation.NoSupplyChainPolicy() for a provider with no supply chain
+	// surface. SEE: proxy.fromConfig, which calls Validate and rejects nil.
 	SupplyChainPolicy *attestation.SupplyChainPolicy
 
 	// MeasurementPolicy is the merged TDX measurement allowlist for this

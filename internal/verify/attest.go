@@ -172,7 +172,11 @@ func verifyNearcloudGateway(
 	return tdx, compose, poc
 }
 
-// checkSigstore checks sigstore digests and fetches Rekor provenance for matches.
+// checkSigstore checks sigstore digests and fetches Rekor provenance for
+// matches. Tolerates a nil scPolicy: the policy here only selects which
+// Rekor entry is preferred per digest; policy-vs-data validation happens in
+// the report dispatchers, which fail closed on a nil policy (SEE:
+// attestation.NoSupplyChainSurface).
 func checkSigstore(
 	ctx context.Context,
 	digests []string,

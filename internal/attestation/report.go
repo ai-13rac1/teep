@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -1610,10 +1611,20 @@ func evalMeasuredModelWeights(in *ReportInput) []FactorResult {
 	return factor(TierSupplyChain, FactorMeasuredWeights, Fail, "no model weight hashes")
 }
 func evalBuildTransparencyLog(in *ReportInput) []FactorResult {
-	scPolicy := in.SupplyChainPolicy
-
 	if in.TinfoilSC != nil {
 		return []FactorResult{tinfoilBuildTransparencyResult(in.TinfoilSC)}
+	}
+
+	scPolicy := in.SupplyChainPolicy
+	if scPolicy.IsNoSupplyChainSurface() {
+		return []FactorResult{{Tier: TierSupplyChain, Name: FactorBuildTransparency, Status: NotApplicable,
+			Detail: "provider has no supply chain policy to enforce (reviewed decision)"}}
+	}
+	if scPolicy == nil && hasComposeSupplyChainData(in) {
+		// Supply chain data with no policy fails closed rather than N/A
+		// (SEE: NoSupplyChainSurface).
+		return []FactorResult{{Tier: TierSupplyChain, Name: FactorBuildTransparency, Status: Fail,
+			Detail: "supply chain data is present but no policy is configured"}}
 	}
 
 	if len(in.Rekor) == 0 {
@@ -1621,6 +1632,18 @@ func evalBuildTransparencyLog(in *ReportInput) []FactorResult {
 	}
 
 	return []FactorResult{rekorProvenanceResult(in, scPolicy)}
+}
+
+// hasComposeSupplyChainData reports whether raw attestation processing
+// extracted docker-compose supply chain evidence (component repos, Rekor
+// provenance, or a compose hash), independent of whether a policy is
+// configured to validate it. The supply chain dispatchers use it to fail
+// closed on data-with-no-policy while keeping no-data NotApplicable.
+func hasComposeSupplyChainData(in *ReportInput) bool {
+	return len(in.ImageRepos) > 0 ||
+		len(in.GatewayImageRepos) > 0 ||
+		len(in.Rekor) > 0 ||
+		(in.Raw != nil && in.Raw.ComposeHash != "")
 }
 
 // tinfoilBuildTransparencyResult reports the build_transparency_log factor for
@@ -1705,7 +1728,7 @@ func buildTransparencyNoRekor(in *ReportInput, scPolicy *SupplyChainPolicy) Fact
 		return FactorResult{Tier: TierSupplyChain, Name: FactorBuildTransparency, Status: Fail,
 			Detail: "no Rekor provenance fetched for attested component digests"}
 	}
-	if in.Raw.ComposeHash != "" {
+	if in.Raw != nil && in.Raw.ComposeHash != "" {
 		hashPreview := in.Raw.ComposeHash
 		if len(hashPreview) > 8 {
 			hashPreview = hashPreview[:8] + "..."
@@ -1930,8 +1953,14 @@ func evalComponentRecognition(in *ReportInput) []FactorResult {
 	switch {
 	case in.TinfoilSC != nil:
 		return []FactorResult{evalTinfoilComponentRecognition(in.TinfoilSC)}
+	case in.SupplyChainPolicy.IsNoSupplyChainSurface():
+		return factor(TierSupplyChain, FactorComponentRecognition, NotApplicable,
+			"provider has no supply chain policy to enforce (reviewed decision)")
 	case in.SupplyChainPolicy != nil:
 		return []FactorResult{evalComposeComponentRecognition(in)}
+	case hasComposeSupplyChainData(in):
+		return factor(TierSupplyChain, FactorComponentRecognition, Fail,
+			"supply chain data is present but no policy is configured")
 	default:
 		return factor(TierSupplyChain, FactorComponentRecognition, NotApplicable,
 			"provider has no component supply chain policy")
@@ -1971,8 +2000,14 @@ func evalProviderSignerRecognition(in *ReportInput) []FactorResult {
 	switch {
 	case in.TinfoilSC != nil:
 		return []FactorResult{evalTinfoilProviderSignerRecognition(in.TinfoilSC)}
+	case in.SupplyChainPolicy.IsNoSupplyChainSurface():
+		return factor(TierSupplyChain, FactorProviderSigner, NotApplicable,
+			"provider has no supply chain policy to enforce (reviewed decision)")
 	case in.SupplyChainPolicy != nil:
 		return []FactorResult{evalComposeProviderSignerRecognition(in)}
+	case hasComposeSupplyChainData(in):
+		return factor(TierSupplyChain, FactorProviderSigner, Fail,
+			"supply chain data is present but no policy is configured")
 	default:
 		return factor(TierSupplyChain, FactorProviderSigner, NotApplicable,
 			"provider has no signer supply chain policy")
@@ -2052,8 +2087,14 @@ func evalComponentSignatureRecognition(in *ReportInput) []FactorResult {
 	switch {
 	case in.TinfoilSC != nil:
 		return []FactorResult{evalTinfoilComponentSignatureRecognition(in.TinfoilSC)}
+	case in.SupplyChainPolicy.IsNoSupplyChainSurface():
+		return factor(TierSupplyChain, FactorComponentSignature, NotApplicable,
+			"provider has no supply chain policy to enforce (reviewed decision)")
 	case in.SupplyChainPolicy != nil:
 		return []FactorResult{evalComposeComponentSignatureRecognition(in)}
+	case hasComposeSupplyChainData(in):
+		return factor(TierSupplyChain, FactorComponentSignature, Fail,
+			"supply chain data is present but no policy is configured")
 	default:
 		return factor(TierSupplyChain, FactorComponentSignature, NotApplicable,
 			"provider has no component signature policy")
@@ -2617,11 +2658,78 @@ type ImageProvenance struct {
 	// FulcioSigned entries with source repo policy and SigstorePresent entries
 	// with a key fingerprint are trusted provider-wide by default.
 	ProviderSignerTrusted bool
+	// WorkflowPattern is the Fulcio SAN identity regex expected for this
+	// component, e.g.
+	// `^https://github.com/{repo}/\.github/workflows/[^@]+@refs/tags/[^/]+$`.
+	// Empty for docker-compose-based providers, where the compose manifest
+	// binding plus Rekor/Sigstore digest lookup is the trust anchor
+	// instead. TODO: enforce in the Tinfoil evaluators (GH #118 part 1).
+	WorkflowPattern string
 }
+
+// SupplyChainPolicyMode selects how a SupplyChainPolicy's absence of
+// enforceable images should be interpreted.
+type SupplyChainPolicyMode int
+
+const (
+	// ComposeSupplyChain is the default (zero-value) mode: Images defines the
+	// recognized docker-compose component repos, provider-signer trust, and
+	// per-component signature policy for a provider whose attestation
+	// includes compose data.
+	ComposeSupplyChain SupplyChainPolicyMode = iota
+	// NoSupplyChainSurface marks a provider reviewed as having no
+	// compose/component supply chain policy to enforce: no compose surface
+	// at all, a supply chain verified via a separate path, or a real policy
+	// deferred as a tracked gap. Construct via NoSupplyChainPolicy(), never
+	// a nil policy: Validate rejects nil at startup and evaluation fails
+	// closed, because a nil policy once bypassed compose validation without
+	// an error (GH #118, commit 766cb3f).
+	NoSupplyChainSurface
+)
 
 // SupplyChainPolicy defines the allowed container image repos for a provider.
 type SupplyChainPolicy struct {
 	Images []ImageProvenance
+	// Mode selects how this policy is interpreted. The zero value,
+	// ComposeSupplyChain, means Images governs compose validation. Use
+	// NoSupplyChainPolicy() to construct the explicit NoSupplyChainSurface
+	// sentinel.
+	Mode SupplyChainPolicyMode
+}
+
+// NoSupplyChainPolicy returns the sentinel policy for a provider with no
+// compose/component supply chain surface (SEE: NoSupplyChainSurface).
+func NoSupplyChainPolicy() *SupplyChainPolicy {
+	return &SupplyChainPolicy{Mode: NoSupplyChainSurface}
+}
+
+// IsNoSupplyChainSurface reports whether p is the NoSupplyChainPolicy
+// sentinel. Nil-safe: a nil receiver returns false.
+func (p *SupplyChainPolicy) IsNoSupplyChainSurface() bool {
+	return p != nil && p.Mode == NoSupplyChainSurface
+}
+
+// Validate rejects a nil policy, a non-sentinel policy with no images, and
+// a pattern that does not compile. Run at provider config/startup so a
+// malformed policy fails before any request is served.
+func (p *SupplyChainPolicy) Validate() error {
+	if p == nil {
+		return errors.New("supply chain policy is nil; use NoSupplyChainPolicy() for a provider with no supply chain surface")
+	}
+	if p.Mode == NoSupplyChainSurface {
+		return nil
+	}
+	if len(p.Images) == 0 {
+		return errors.New("supply chain policy has no images configured")
+	}
+	for i := range p.Images {
+		if p.Images[i].WorkflowPattern != "" {
+			if _, err := regexp.Compile(p.Images[i].WorkflowPattern); err != nil {
+				return fmt.Errorf("image[%d] %q: invalid workflow pattern: %w", i, p.Images[i].Repo, err)
+			}
+		}
+	}
+	return nil
 }
 
 // TrustedProviderSigner reports whether img has a signer policy strong enough

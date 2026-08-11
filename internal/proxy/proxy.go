@@ -804,7 +804,10 @@ func fromConfig(
 				attestation.FormatDstack: venice.ReportDataVerifier{},
 			},
 		}
-		p.SupplyChainPolicy = nil // no supply chain policy yet
+		// TODO: author a real phalacloud policy (GH #118) — it can route to
+		// a dstack backend that exposes compose data. The sentinel reports
+		// NotApplicable until then.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 	case "chutes":
 		p.BaseURL = chutesProvider.DefaultLLMBaseURL
 		p.ChatPath = "/v1/chat/completions"
@@ -815,7 +818,9 @@ func fromConfig(
 		p.Encryptor = chutesProvider.NewE2EE()
 		p.Preparer = chutesProvider.NewPreparer(cp.APIKey, cp.BaseURL)
 		p.ReportDataVerifier = chutesProvider.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // cosign+IMA model, no docker-compose
+		// Chutes runs sek8s with cosign image admission + IMA; it has no
+		// compose/component supply chain surface.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 		p.ModelLister = chutesProvider.NewModelLister(chutesProvider.DefaultModelsBaseURL, cp.APIKey, config.NewAttestationClient(offline))
 		p.E2EEMaterialFetcher = chutesProvider.NewNoncePool(
 			cp.BaseURL, cp.APIKey, attester.Resolver(), config.NewAttestationClient(offline),
@@ -831,7 +836,10 @@ func fromConfig(
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		// TODO: real Tinfoil policy content (GH #118 part 1). Tinfoil's own
+		// Sigstore path (verifyTinfoilSupplyChain, short-circuited by a
+		// non-nil TinfoilSC) is unaffected by the sentinel.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 		p.SigstoreRepoForModel = func(_ string) string {
 			return "tinfoilsh/confidential-model-router"
 		}
@@ -855,7 +863,10 @@ func fromConfig(
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
 		p.ReportDataVerifier = tinfoil.ReportDataVerifier{}
-		p.SupplyChainPolicy = nil // Sigstore-based, not compose-based
+		// TODO: real Tinfoil policy content (GH #118 part 1). Tinfoil's own
+		// Sigstore path (verifyTinfoilSupplyChain, short-circuited by a
+		// non-nil TinfoilSC) is unaffected by the sentinel.
+		p.SupplyChainPolicy = attestation.NoSupplyChainPolicy()
 		p.SigstoreRepoForModel = func(model string) string {
 			m, err := resolver.ResolveMapping(context.Background(), model)
 			if err != nil || m.Repo == "" {
@@ -903,6 +914,13 @@ func fromConfig(
 	// This check prevents future providers from silently omitting the resolver.
 	if p.PinnedHandler != nil && p.SPKIDomainForModel == nil {
 		return nil, fmt.Errorf("provider %q has PinnedHandler but no SPKIDomainForModel; SPKI eviction would fail", cp.Name)
+	}
+
+	// Every provider sets a real SupplyChainPolicy or the
+	// NoSupplyChainPolicy sentinel, never nil; a malformed policy is a
+	// startup error, not a request-time skip (SEE: NoSupplyChainSurface).
+	if err := p.SupplyChainPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("provider %q: %w", cp.Name, err)
 	}
 
 	return p, nil
@@ -1164,12 +1182,20 @@ type supplyChainResult struct {
 }
 
 // verifySupplyChain runs compose binding, sigstore digest, and rekor provenance checks.
+//
+// scPolicy must be non-nil (set at config load, SEE: fromConfig). A nil
+// here is a configuration error; the panic stops the request (net/http
+// recovers it) instead of serving unvalidated compose data (GH #118,
+// commit 766cb3f).
 func (s *Server) verifySupplyChain(
 	ctx context.Context,
 	raw *attestation.RawAttestation,
 	tdxResult *attestation.TDXVerifyResult,
 	scPolicy *attestation.SupplyChainPolicy,
 ) (supplyChainResult, time.Duration) {
+	if scPolicy == nil {
+		panic("verifySupplyChain: nil SupplyChainPolicy; provider must supply a real policy or attestation.NoSupplyChainPolicy()")
+	}
 	if raw.AppCompose == "" || tdxResult == nil || tdxResult.ParseErr != nil {
 		if tdxResult != nil && tdxResult.ParseErr != nil {
 			slog.WarnContext(ctx, "supply chain verification skipped: TDX quote parse failed",
