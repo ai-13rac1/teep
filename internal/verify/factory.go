@@ -125,11 +125,10 @@ func supplyChainPolicy(name string) (*attestation.SupplyChainPolicy, error) {
 		return attestation.NoSupplyChainPolicy(), nil
 	case "chutes":
 		return attestation.NoSupplyChainPolicy(), nil // cosign+IMA model, no docker-compose surface
-	case "tinfoil_v3_cloud", "tinfoil_v3_direct":
-		// TODO: real Tinfoil policy content (GH #118 part 1). Tinfoil's own
-		// Sigstore path (verifyTinfoilSupplyChain) is unaffected by the
-		// sentinel.
-		return attestation.NoSupplyChainPolicy(), nil
+	case "tinfoil_v3_cloud":
+		return tinfoil.CloudSupplyChainPolicy(), nil
+	case "tinfoil_v3_direct":
+		return tinfoil.DirectSupplyChainPolicy(), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q: no supply chain policy mapping", name)
 	}

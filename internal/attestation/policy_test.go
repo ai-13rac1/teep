@@ -2,6 +2,7 @@ package attestation_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/13rac1/teep/internal/provider/nanogpt"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
+	"github.com/13rac1/teep/internal/provider/tinfoil"
 )
 
 // ---------------------------------------------------------------------------
@@ -460,16 +462,29 @@ func TestSupplyChainComponentRecognitionNanoGPTComposeOnly(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.NotApplicable)
 }
 
+// tinfoilComponent builds a TinfoilComponentResult for repo with a verified
+// Fulcio signer identity matching the given workflow file and tag, i.e. what
+// tinfoil.SigstoreVerifier.FetchAndVerify records on a successful
+// verification (see tinfoil.SignerIdentity).
+func tinfoilComponent(repo, workflow, tag string) attestation.TinfoilComponentResult {
+	return attestation.TinfoilComponentResult{
+		Repo:             repo,
+		SigstoreVerified: true,
+		OIDCIssuer:       tinfoil.GithubActionsOIDCIssuer,
+		SAN:              fmt.Sprintf("https://github.com/%s/.github/workflows/%s@refs/tags/%s", repo, workflow, tag),
+	}
+}
+
 func TestSupplyChainComponentRecognitionTinfoil(t *testing.T) {
 	sc := &attestation.TinfoilSupplyChainResult{
 		SigstoreVerified: true,
 		SigstoreDetail:   "Sigstore DSSE verified for tinfoilsh/confidential-model-router",
 		Components: []attestation.TinfoilComponentResult{
-			{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
-			{Repo: "tinfoilsh/hardware-measurements", SigstoreVerified: true},
+			tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+			tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
 		},
 	}
-	in := &attestation.ReportInput{TinfoilSC: sc}
+	in := &attestation.ReportInput{TinfoilSC: sc, SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy()}
 
 	attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Pass)
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
@@ -477,29 +492,236 @@ func TestSupplyChainComponentRecognitionTinfoil(t *testing.T) {
 	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
 }
 
+// TestSupplyChainComponentRecognitionTinfoil_NewTagStillAllowed checks that
+// a known component re-signed by the same trusted signer under a new
+// release tag is still recognized (the workflow pattern is independent of
+// the release tag; SEE: tinfoil.WorkflowPattern).
+func TestSupplyChainComponentRecognitionTinfoil_NewTagStillAllowed(t *testing.T) {
+	sc := &attestation.TinfoilSupplyChainResult{
+		SigstoreVerified: true,
+		Components: []attestation.TinfoilComponentResult{
+			tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v9.9.99-brand-new"),
+			tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v9.9.99-brand-new"),
+		},
+	}
+	in := &attestation.ReportInput{TinfoilSC: sc, SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy()}
+
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+	attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+}
+
 func TestSupplyChainComponentRecognitionTinfoilFailures(t *testing.T) {
 	t.Run("unknown_repo", func(t *testing.T) {
-		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
-			SigstoreVerified: true,
-			Components: []attestation.TinfoilComponentResult{
-				{Repo: "attacker/confidential-model-router", SigstoreVerified: true},
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("attacker/confidential-model-router", "release.yml", "v0.0.1"),
+				},
 			},
-		}}
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
 	})
 
 	t.Run("support_component_signature_error", func(t *testing.T) {
-		in := &attestation.ReportInput{TinfoilSC: &attestation.TinfoilSupplyChainResult{
-			Components: []attestation.TinfoilComponentResult{
-				{Repo: "tinfoilsh/confidential-model-router", SigstoreVerified: true},
-				{Repo: "tinfoilsh/hardware-measurements", SigstoreErr: errors.New("fetch failed")},
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: errors.New("fetch failed")},
+				},
 			},
-		}}
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
 		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("wrong_oidc_issuer", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					{
+						Repo:             tinfoil.RouterRepo,
+						SigstoreVerified: true,
+						OIDCIssuer:       "https://attacker.example/oidc",
+						SAN:              "https://github.com/tinfoilsh/confidential-model-router/.github/workflows/tinfoil-release-publish.yml@refs/tags/v0.0.18",
+					},
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("wrong_repo_in_san", func(t *testing.T) {
+		// Attested signer identity is a legitimate tinfoilsh GH Actions
+		// identity, but for a *different* repo than the one being checked —
+		// e.g. a component-swap where the router's Sigstore-verified digest
+		// somehow points at the hardware-measurements repo's signature.
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		in.TinfoilSC.Components[0].Repo = tinfoil.RouterRepo // recognized repo, mismatched SAN
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// A repo missing from directModelRepos but carrying a verified tinfoilsh
+	// org signer identity: the enforced signer factors pass via the OrgSigner
+	// rule; only allow-fail component_recognition fails (WARN, not block).
+	// Guards the GH #118 requirement that a new Tinfoil model works without
+	// a teep release.
+	t.Run("unlisted_org_signed_direct_model_repo", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+	})
+
+	t.Run("unlisted_org_repo_wrong_san_repo", func(t *testing.T) {
+		// An unlisted org repo whose verified SAN belongs to a different
+		// tinfoilsh repo must fail: the SAN-to-repo binding holds for
+		// org-trusted repos too (SEE: orgImageFor).
+		component := tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "tinfoil-release-publish.yml", "v0.0.1")
+		component.Repo = "tinfoilsh/confidential-brand-new-model"
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components:       []attestation.TinfoilComponentResult{component},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("unlisted_org_repo_wrong_issuer", func(t *testing.T) {
+		component := tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1")
+		component.OIDCIssuer = "https://attacker.example/oidc"
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components:       []attestation.TinfoilComponentResult{component},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	t.Run("known_direct_model_repo", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-gemma4-31b", "tinfoil-release-publish.yml", "v0.0.42"),
+					tinfoilComponent(tinfoil.HardwareMeasurementsRepo, "build.yml", "v0.0.35"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Pass)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Pass)
+	})
+
+	t.Run("nil_policy_fails_closed", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+				},
+			},
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// A tinfoilsh repo outside the enclave namespace must not reach the org
+	// signer rule. The rule builds the expected SAN from the attested repo
+	// name, so a wider orgRepoPattern would make the enforced
+	// component_signature_recognition factor pass for any org repo with a
+	// Fulcio-signed release. Before GH #118 this factor rejected such a repo.
+	t.Run("non_confidential_org_repo_fails_enforced_factors", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/verifier", "tinfoil-release-publish.yml", "v0.0.7"),
+				},
+			},
+			SupplyChainPolicy: tinfoil.DirectSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// An empty RepoPattern compiles and matches every string, so a
+	// zero-value OrgSignerPolicy must be rejected by orgImageFor rather than
+	// granting org trust to every repo. Validate rejects it at startup; this
+	// pins the evaluator behavior independently of Validate.
+	t.Run("empty_org_repo_pattern_trusts_nothing", func(t *testing.T) {
+		policy := tinfoil.DirectSupplyChainPolicy()
+		policy.OrgSigner.RepoPattern = ""
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent("tinfoilsh/confidential-brand-new-model", "tinfoil-release-publish.yml", "v0.0.1"),
+				},
+			},
+			SupplyChainPolicy: policy,
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalProviderSignerRecognitionForTest(in), attestation.Fail)
+		attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(in), attestation.Fail)
+	})
+
+	// The SigstoreVerified and SigstoreErr scalars describe the first repo
+	// only. A later component that failed verification must not report Pass
+	// on build_transparency_log, the same vacuous-truth removal applied to
+	// tinfoilComponentsVerified.
+	t.Run("build_transparency_fails_on_later_component_error", func(t *testing.T) {
+		in := &attestation.ReportInput{
+			TinfoilSC: &attestation.TinfoilSupplyChainResult{
+				SigstoreVerified: true,
+				SigstoreDetail:   "Sigstore DSSE verified for " + tinfoil.RouterRepo,
+				Components: []attestation.TinfoilComponentResult{
+					tinfoilComponent(tinfoil.RouterRepo, "tinfoil-release-publish.yml", "v0.0.18"),
+					{Repo: tinfoil.HardwareMeasurementsRepo, SigstoreErr: errors.New("fetch attestation: HTTP 500")},
+				},
+			},
+			SupplyChainPolicy: tinfoil.CloudSupplyChainPolicy(),
+		}
+		attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(in), attestation.Fail)
 	})
 }
 
@@ -638,6 +860,54 @@ func TestSupplyChainPolicy_Validate(t *testing.T) {
 			t.Errorf("Validate() on real policy = %v, want nil", err)
 		}
 	})
+	t.Run("tinfoil_cloud", func(t *testing.T) {
+		if err := tinfoil.CloudSupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on tinfoil cloud policy = %v, want nil", err)
+		}
+	})
+	t.Run("tinfoil_direct", func(t *testing.T) {
+		if err := tinfoil.DirectSupplyChainPolicy().Validate(); err != nil {
+			t.Errorf("Validate() on tinfoil direct policy = %v, want nil", err)
+		}
+	})
+	t.Run("org_signer_invalid_repo_pattern", func(t *testing.T) {
+		p := tinfoil.DirectSupplyChainPolicy()
+		p.OrgSigner.RepoPattern = "([unclosed"
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() with invalid org signer repo pattern = nil, want error")
+		}
+	})
+	t.Run("org_signer_missing_issuer", func(t *testing.T) {
+		p := tinfoil.DirectSupplyChainPolicy()
+		p.OrgSigner.OIDCIssuer = ""
+		if err := p.Validate(); err == nil {
+			t.Error("Validate() with empty org signer OIDC issuer = nil, want error")
+		}
+	})
+}
+
+// TestTinfoilOrgSignerWarnNotBlock pins the allow-fail invariants behind
+// the GH #118 new-model semantics: component_recognition (the only factor
+// an unlisted org-signed repo fails) must be allow-fail by default for both
+// Tinfoil providers, while the signer factors stay enforced.
+func TestTinfoilOrgSignerWarnNotBlock(t *testing.T) {
+	for name, allowFail := range map[string][]string{
+		"tinfoil_v3_cloud":  attestation.TinfoilCloudDefaultAllowFail,
+		"tinfoil_v3_direct": attestation.TinfoilDirectDefaultAllowFail,
+	} {
+		allowed := make(map[string]bool, len(allowFail))
+		for _, f := range allowFail {
+			allowed[f] = true
+		}
+		if !allowed[attestation.FactorComponentRecognition] {
+			t.Errorf("%s: component_recognition not in default allow_fail; an unlisted org-signed repo would block", name)
+		}
+		for _, enforced := range []string{attestation.FactorProviderSigner, attestation.FactorComponentSignature} {
+			if allowed[enforced] {
+				t.Errorf("%s: %s is in default allow_fail; signer policy would be advisory only", name, enforced)
+			}
+		}
+	}
 }
 
 // TestBuildReport_MissingPolicyBlocksRequest is an end-to-end regression test
