@@ -356,8 +356,8 @@ func (c *PoCClient) CheckQuote(ctx context.Context, hexQuote string) *PoCResult 
 			}
 
 			// Cross-check wrapper fields against JWT claims (fail closed).
-			// The JWT is the authenticated source of truth; wrapper fields are
-			// unauthenticated. A mismatch indicates a misbehaving final peer.
+			// Only the JWT is authenticated; the wrapper fields are not.
+			// A mismatch indicates a misbehaving final peer.
 			if s2.MachineID != "" && s2.MachineID != claims.MachineID {
 				return &PoCResult{Err: fmt.Errorf("stage 2: peer %s wrapper machineId %q disagrees with JWT claim %q",
 					n.peerURL, s2.MachineID, claims.MachineID)}

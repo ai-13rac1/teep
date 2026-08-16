@@ -367,7 +367,7 @@ PoC results fall into three categories with different caching behavior:
   hardware registry is append-only; positive registrations never expire.
 - **Authenticated negative results** (`poc_registered: false` with a valid,
   authenticated response from the registry): Cached up to `max_cache_age`
-  (default 7 days, see Section 4d). This avoids hammering the registry for
+  (default 7 days, see Section 4d). This avoids repeated requests to the registry for
   machines that are genuinely not registered. PoC is currently `allow_fail`
   for all providers.
 - **Connectivity and response errors** (network timeout, DNS failure, HTTP
@@ -520,7 +520,7 @@ including pinned TDX register values, is an explicit local policy change and
 must be treated as operator-authored trust data rather than re-verified cached
 evidence.
 
-**File permissions and safety**: Because the cache contains trust anchors (for
+**File permissions and safety**: Because the cache contains trust roots (for
 example pinned TDX measurements and verified image provenance), cache file
 access must be protected with the same strict local file safety policy used
 for sensitive config. On every read, enforce owner-only style permissions (for
@@ -840,7 +840,7 @@ per-model `images` list in the cache stores full Rekor provenance data.
 **Proof of Cloud (factors 8–9)**: Hardware registry is append-only. Positive
 registrations never expire. Authenticated negative results (`poc_registered:
 false` with a valid registry response) are cached up to `max_cache_age`
-(default 7 days) to avoid hammering the registry — PoC is currently
+(default 7 days) to avoid repeated requests to the registry — PoC is currently
 `allow_fail` for all providers. Connectivity and response errors are NOT
 cached (see Section 4c). Cached positive `poc_registered: true` is valid
 indefinitely.

@@ -1318,7 +1318,7 @@ func TestCheckNoPlainHTTPTestServer_PassOnRepoRoot(t *testing.T) {
 
 func TestCheckNoPlainHTTPTestServer_AllowlistContainsKnownFiles(t *testing.T) {
 	// Verify that every _test.go file in the repo that uses httptest.NewServer
-	// is in the allowlist. This is a sanity check — the real enforcement is
+	// is in the allowlist. This is a basic check — the real enforcement is
 	// checkNoPlainHTTPTestServer itself.
 	repoRoot(t)
 	dirs := []string{"internal", "cmd"}

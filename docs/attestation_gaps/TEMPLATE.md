@@ -149,7 +149,7 @@ contextualize the verification surface against a known baseline (e.g.,
 comparing a novel provider architecture against a well-understood one).
 
 For provider assessments where server-side-only security mechanisms
-(admission controllers, boot gating, runtime re-attestation) form part
+(admission controllers, boot enforcement, runtime re-attestation) form part
 of the provider's security story but are not client-verifiable, summarize
 them here to establish context, then analyze the trust implications in
 Detailed Gap Analysis. -->

@@ -77,7 +77,7 @@ const (
 	modelsCacheTTL = 10 * time.Minute
 
 	// upstreamNonStreamTimeout is the context deadline for non-streaming
-	// upstream requests. Must be generous — attestation + E2EE setup can
+	// upstream requests. Attestation and E2EE setup can
 	// consume 20+ seconds before the upstream request even starts, and
 	// large models may need minutes to generate a full response.
 	upstreamNonStreamTimeout = 5 * time.Minute
@@ -312,11 +312,11 @@ func rewriteMultipartModel(contentType string, body []byte, upstreamModel string
 // chutesRetryableError returns true if the upstream error or response status
 // indicates a Chutes instance-level failure that warrants failover to a
 // different instance. Returns false for client-induced cancellations
-// (context.Canceled) so we don't burn retries after the caller is gone.
+// (context.Canceled), which would consume retries after the caller is gone.
 //
-// Note: 429 (Too Many Requests) is explicitly NOT retried. Chutes rate
-// limits are account-level, not instance-level, so retrying with a
-// different instance amplifies the rate limit and burns nonces uselessly.
+// 429 (Too Many Requests) is not retried. Chutes rate limits are
+// account-level, not instance-level, so retrying with a different instance
+// amplifies the rate limit and consumes nonces for nothing.
 func chutesRetryableError(err error, resp *http.Response) bool {
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -452,7 +452,7 @@ type Server struct {
 	modelsFlight       singleflight.Group
 }
 
-// New builds a Server from cfg. Providers are wired with their Attester and
+// New builds a Server from cfg. Providers are given their Attester and
 // Preparer implementations based on provider name.
 func New(cfg *config.Config) (*Server, error) {
 	spkiCache := attestation.NewSPKICache()
@@ -1903,8 +1903,8 @@ func (s *Server) relayWithRetry(
 		}
 
 		// Fail closed: if Chutes E2EE metadata was populated (meta != nil)
-		// but the session is missing, something went wrong during key
-		// encapsulation. Forwarding ciphertext as plaintext would leak data.
+		// but the session is missing, key encapsulation failed. Forwarding
+		// ciphertext as plaintext would leak data.
 		if meta != nil && meta.Session == nil {
 			cleanupAttempt()
 			if relayAttempt < maxRelayAttempts-1 && !ri.headerSent {
@@ -2599,7 +2599,7 @@ func blockedFactorNames(report *attestation.VerificationReport) []string {
 	if report == nil {
 		return nil
 	}
-	// Keep the primary summary compact and human-scannable. The same log record
+	// Keep the primary summary compact and readable at a glance. The same log record
 	// also carries blocked_factor_results when callers need tier/detail fields.
 	blocked := report.BlockedFactors()
 	names := make([]string, len(blocked))

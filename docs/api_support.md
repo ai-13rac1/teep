@@ -93,7 +93,7 @@ This matrix applies to OpenAI-compatible inference endpoints.
 | Reranking | Yes | Yes | — | — | — | — | — |
 | Score | Yes | Yes | — | — | — | — | — |
 
-**—** = Not wired. Provider returns HTTP 400.
+**—** = Not implemented. Provider returns HTTP 400.
 
 ## E2EE Support Matrix
 
@@ -302,12 +302,12 @@ Venice only exposes chat completions. No other endpoints are available.
 
 | Backend | Attestation Format | E2EE |
 |---|---|---|
-| Chutes | `attestation_type` key present | Not yet wired |
+| Chutes | `attestation_type` key present | Not yet implemented |
 | dstack | `intel_quote` key present | No E2EE |
-| Tinfoil | `format` key present | Not yet wired |
+| Tinfoil | `format` key present | Not yet implemented |
 | Gateway | `gateway_attestation` key present | Not yet supported |
 
-When a Chutes-format backend is detected, the attestation is parsed using the Chutes protocol, but E2EE is not yet wired through the Phala proxy layer.
+When a Chutes-format backend is detected, the attestation is parsed using the Chutes protocol, but E2EE is not yet implemented through the Phala proxy layer.
 
 ### Tinfoil Cloud (`tinfoil_v3_cloud`)
 
@@ -322,7 +322,7 @@ When a Chutes-format backend is detected, the attestation is parsed using the Ch
 | Chat completions | `/v1/chat/completions` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
 | Responses | `/v1/responses` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
 | Embeddings | `/v1/embeddings` | Yes | Full-body EHBP encryption |
-| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is wired, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
+| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is implemented, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
 | Text-to-speech | `/v1/audio/speech` | Yes | Full-body EHBP encryption |
 
 **E2EE field coverage:** EHBP encrypts the entire HTTP request and response body. There are **no field-level encryption gaps** — all request fields (messages, tools, parameters) and all response fields (content, tool_calls, usage) are encrypted by construction. Adding new OpenAI API fields requires zero changes to the encryption layer.
@@ -348,7 +348,7 @@ When a Chutes-format backend is detected, the attestation is parsed using the Ch
 | Chat completions | `/v1/chat/completions` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
 | Responses | `/v1/responses` | Yes | Full-body EHBP encryption; streaming and non-streaming supported |
 | Embeddings | `/v1/embeddings` | Yes | Full-body EHBP encryption |
-| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is wired, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
+| Audio transcriptions | `/v1/audio/transcriptions` | No when E2EE is enabled | Multipart route is implemented, but current proxy guard rejects non-pinned E2EE multipart requests before routing. Plaintext mode can forward after attestation |
 | Text-to-speech | `/v1/audio/speech` | Yes | Full-body EHBP encryption |
 
 **E2EE field coverage:** Identical to Tinfoil Cloud — full-body EHBP, no field-level gaps.

@@ -233,7 +233,7 @@ type cacheEntry struct {
 }
 
 // evictWarnInterval throttles eviction warnings so that sustained cache
-// pressure does not flood the log.
+// pressure does not fill the log.
 const evictWarnInterval = 10 * time.Second
 
 // Cache stores expensive attestation verification results keyed by
@@ -355,7 +355,7 @@ func (c *Cache) Models() []CacheInfo {
 }
 
 // NegativeCache records attestation failures to prevent repeated upstream
-// hammering when attestation has recently failed. Entries expire after TTL.
+// requests when attestation has recently failed. Entries expire after TTL.
 type NegativeCache struct {
 	mu            sync.RWMutex
 	entries       map[cacheKey]time.Time

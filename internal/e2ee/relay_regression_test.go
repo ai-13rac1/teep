@@ -11,7 +11,7 @@ import (
 
 // TestExtractChunkMeta_DecryptsToolCallsForNearCloud regression test for:
 // https://github.com/13rac1/teep/pull/103#discussion_r3263139818
-// extractChunkMeta must gate on "tool_calls[].function.name" (leaf path) not
+// extractChunkMeta must check "tool_calls[].function.name" (leaf path) not
 // "tool_calls" (container path), so that tool_calls function fields are
 // decrypted for NearCloud/NearDirect full-field E2EE.
 func TestExtractChunkMeta_DecryptsToolCallsForNearCloud(t *testing.T) {
@@ -50,7 +50,7 @@ func TestExtractChunkMeta_DecryptsToolCallsForNearCloud(t *testing.T) {
 		t.Fatalf("encrypt tool call arguments: %v", err)
 	}
 
-	// If extractChunkMeta gated on the container path ("tool_calls") instead of
+	// If extractChunkMeta checked the container path ("tool_calls") instead of
 	// the leaf path ("tool_calls[].function.name"), the NearCloud policy would
 	// return false and decryption would be skipped — the assertions below would
 	// then fail because the ciphertext blob would survive intact in the output.
@@ -99,7 +99,7 @@ func TestExtractChunkMeta_DecryptsToolCallsForNearCloud(t *testing.T) {
 
 // TestDecryptResponseChoices_DecryptsLogprobsForNearCloud regression test for:
 // https://github.com/13rac1/teep/pull/103#discussion_r3263139828
-// DecryptSSEChunk for non-stream responses must gate on "logprobs.content[].token"
+// DecryptSSEChunk for non-stream responses must check "logprobs.content[].token"
 // (leaf path) not "logprobs" (container path), so that logprobs token fields
 // are decrypted for NearCloud/NearDirect full-field E2EE.
 func TestDecryptResponseChoices_DecryptsLogprobsForNearCloud(t *testing.T) {

@@ -96,7 +96,7 @@ Understanding the security semantics of each register is critical for assessing 
 
 **MRSEAM** — Measurement of the TDX module (SEAM firmware). This 48-byte hash represents the identity and integrity of the Intel TDX module running in Secure Arbitration Mode. Intel signs and guarantees TDX module integrity; the MRSEAM value should correspond to a known Intel-released TDX module version. Verification of MRSEAM ensures the TDX firmware has not been tampered with and is a recognised, trusted version. Without MRSEAM verification, an attacker who compromises the hypervisor could potentially load a modified TDX module that subverts TD isolation guarantees.
 
-**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the root-of-trust anchor for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
+**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the trust root for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
 
 **RTMR0** — Runtime firmware configuration measurement. RTMR0 records the CVM's virtual hardware setup as measured by OVMF, including CPU count, memory size, device configuration, secure boot policy variables (PK, KEK, db, dbx), boot variables, and TdHob/CFV data provided by the VMM. Corresponds to TPM PCR[1,7]. While dstack uses fixed devices, CPU and memory specifications can vary, so RTMR0 can be computed from the dstack image given specific CPU and RAM parameters. Without RTMR0 verification, a malicious VMM could alter the virtual hardware configuration (e.g., inject rogue devices or disable secure boot) without detection.
 
@@ -110,11 +110,11 @@ Understanding the security semantics of each register is critical for assessing 
 
 For complete attestation of a dstack-based CVM, the verification process should:
 
-1. **Obtain golden values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
+1. **Obtain reference values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
 
 2. **Verify MRSEAM against Intel's published values**: MRSEAM should match a known Intel TDX module release. Intel publishes TDX module versions; the expected MRSEAM value can be derived from the specific TDX module version running on the platform.
 
-3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against golden values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
+3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against reference values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
 
 4. **Verify RTMR3 via event log replay**: RTMR3 contains runtime-specific measurements that cannot be pre-calculated. Replay the event log, compare the replayed RTMR3 against the quoted value, and then inspect the event log entries for expected compose hash, app ID, and key provider values.
 
@@ -144,8 +144,8 @@ The code supports an allowlist-based `MeasurementPolicy` for MRTD, MRSEAM, and R
 **The audit MUST recommend** that the inference provider publish:
 1. The specific dstack OS version and TDX module version used in their deployments,
 2. Reproducible build instructions or source references for their CVM image,
-3. Pre-computed golden values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration,
-4. A versioned, signed measurement manifest (ideally Sigstore-signed and Rekor-recorded) that teep can consume automatically,
+3. Pre-computed reference values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration,
+4. A versioned, signed measurement manifest, Sigstore-signed and Rekor-recorded, that teep can consume automatically,
 5. Advance notice of infrastructure changes that alter measurement values, so operators can pre-configure new allowlist entries.
 
 See `docs/attestation_gaps/dstack_integrity.md` for a detailed analysis of this gap and the recommended in-band publication model.
@@ -429,7 +429,7 @@ The audit MUST explicitly document each cache layer, its keys, TTLs, expiry/prun
 | Cache | Expected Keys | Expected TTL | Security-Critical Properties |
 |-------|--------------|-------------|------------------------------|
 | Attestation report cache | (provider, model) | ~minutes | Signing key MUST NOT be cached; must be fetched fresh for each E2EE session |
-| Negative cache | (provider, model) | ~seconds | Must prevent upstream hammering; must expire so recovery is possible |
+| Negative cache | (provider, model) | ~seconds | Must prevent repeated upstream requests; must expire so recovery is possible |
 | SPKI pin cache | (domain, spkiHash) | ~hour | Must be populated only after successful attestation; eviction must force re-attestation |
 | Endpoint mapping cache | model→domain | ~minutes | Stale mapping must not bypass attestation |
 

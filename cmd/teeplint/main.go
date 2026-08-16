@@ -1,7 +1,7 @@
 // Command teeplint is an architectural linter for the teep project.
 // It discovers providers from internal/provider/*/ and enforces structural
 // consistency (AST checks) and architectural completeness (every provider
-// wired into all integration points).
+// connected to all integration points).
 //
 // Provider discovery is fully automatic: any package under internal/provider/
 // with an Attester struct is a provider. The archetype (direct, gateway,
@@ -805,10 +805,10 @@ var plainHTTPTestServerAllowlist = []string{
 }
 
 // checkNoPlainHTTPTestServer walks all _test.go files under internal/ and cmd/
-// and flags httptest.NewServer calls that are not in the allowlist. This
-// enforces a blanket ban on plain-HTTP test servers with an escape hatch for
-// audited files. New test files must use httptest.NewTLSServer or be added to
-// the allowlist with justification.
+// and flags httptest.NewServer calls that are not in the allowlist: plain-HTTP
+// test servers are rejected everywhere except the listed files. New test files
+// must use httptest.NewTLSServer or be added to the allowlist with
+// justification.
 func checkNoPlainHTTPTestServer(r *result, fset *token.FileSet) {
 	dirs := []string{"internal", "cmd"}
 	var violations []string

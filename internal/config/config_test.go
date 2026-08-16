@@ -743,7 +743,7 @@ func TestCheckFilePermissionsWorldReadable(t *testing.T) {
 
 func TestCheckFilePermissionsOwnerOnly(t *testing.T) {
 	path := writeConfigFile(t, "[policy]", 0o700)
-	// 0700 has no read bits for group/world, so it's fine (owner execute).
+	// 0700 has no read bits for group or world, so checkFilePermissions accepts it.
 	if err := checkFilePermissions(path); err != nil {
 		t.Errorf("checkFilePermissions(0700): unexpected error: %v", err)
 	}

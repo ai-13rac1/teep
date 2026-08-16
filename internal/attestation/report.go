@@ -304,9 +304,8 @@ func (r *VerificationReport) recomputeCounters() {
 
 // DefaultAllowFail lists the factor names that are allowed to fail without
 // blocking the proxy. Every factor in KnownFactors that is NOT in this list
-// is enforced by default. This inversion is safer than a positive enforce
-// list: any new factor added to KnownFactors is automatically enforced
-// unless explicitly exempted here.
+// is enforced by default, so a new factor added to KnownFactors is enforced
+// until it is listed here.
 var DefaultAllowFail = []string{
 	FactorTEEQuotePresent,
 	FactorTEEQuoteStructure,
@@ -457,9 +456,10 @@ var ChutesDefaultAllowFail = []string{
 // cpu_id_registry is allowed to fail because Tinfoil does not participate in
 // Proof of Cloud. intel_pcs_collateral is allowed because SEV-SNP uses AMD
 // KDS instead of Intel PCS. SEV-SNP certificate-chain and quote-signature
-// checks require hitting kdsintf.amd.com, which is often down or flaky for
-// tinfoil_v3_cloud; the gateway pair carries that fetch now that the router
-// reports there, so both pairs are listed. NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
+// checks require a request to kdsintf.amd.com, which is often unavailable or
+// returns errors for tinfoil_v3_cloud; the gateway pair carries that fetch
+// now that the router reports there, so both pairs are listed.
+// NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
 // reported but currently allowed to fail by default, due to the hashing
 // issue documented in docs/attestation_gaps/tinfoil_nvidia_json.md
 // response_schema is enforced: the parser reads the document Tinfoil serves,
@@ -538,7 +538,7 @@ var KnownFactors = []string{
 // external services (Intel PCS, NVIDIA NRAS, Proof of Cloud, Sigstore/Rekor,
 // live E2EE inference test).
 //
-// Note: e2ee_usable is included because it is evaluated via a live encrypted
+// e2ee_usable is included because it is evaluated via a live encrypted
 // inference against the provider (see testE2EE in cmd/teep/main.go). The
 // local crypto self-test (TestE2EESetup) validates key exchange and encryption
 // without network access, but does not exercise the full E2EE round-trip and
@@ -633,7 +633,7 @@ var knownSigningAlgos = map[string]bool{
 // E2EEKeyType returns the canonical E2EE key-type string for the attestation.
 // Returns "" when no signing key is present.
 // When SigningAlgo is absent, the type is inferred from key length as a
-// best-effort heuristic; this is informational only and must not be used for
+// key length; this is informational only and must not be used for
 // security decisions.
 func (r *RawAttestation) E2EEKeyType() string {
 	if r.SigningKey == "" {
@@ -645,7 +645,7 @@ func (r *RawAttestation) E2EEKeyType() string {
 		}
 		return "unknown"
 	}
-	// Infer from key length as best-effort fallback (informational only).
+	// Infer from key length (informational only).
 	if len(r.SigningKey) == 64 {
 		return "ed25519"
 	}
@@ -850,7 +850,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 	// Deferred factors (e.g. e2ee_usable) stay Skip because they can only
 	// be evaluated via a live roundtrip — promoting them to Fail would
 	// block the very request needed to prove they work. Post-relay
-	// enforcement catches failures instead.
+	// enforcement reports failures instead.
 	for i := range factors {
 		if factors[i].Status == Skip && factors[i].Enforced && !factors[i].Deferred {
 			factors[i].Status = Fail
@@ -2957,7 +2957,7 @@ type ImageProvenance struct {
 	// component, enforced by tinfoilVerifySignerIdentity (SEE:
 	// GitHubReleaseWorkflowPattern). Empty for docker-compose-based
 	// providers, where the compose manifest binding plus Rekor/Sigstore
-	// digest lookup is the trust anchor instead.
+	// digest lookup is the trust root instead.
 	WorkflowPattern string
 }
 
@@ -3358,7 +3358,7 @@ func buildMetadata(in *ReportInput) map[string]string {
 	}
 
 	// Include full TDX measurement register values so operators can
-	// identify golden values for allowlist policy configuration.
+	// identify reference values for allowlist policy configuration.
 	if in.TDX != nil && in.TDX.ParseErr == nil {
 		if v := hex.EncodeToString(in.TDX.MRSeam); v != "" {
 			m["mrseam"] = v

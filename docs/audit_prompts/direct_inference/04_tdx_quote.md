@@ -2,7 +2,7 @@
 
 ## Scope
 
-Audit Intel TDX quote verification pipeline: parsing, certificate chain validation, signature checks, debug status checks, and collateral currency behavior. This covers the full cryptographic verification path from raw quote bytes through to the Intel root CA trust anchor.
+Audit Intel TDX quote verification pipeline: parsing, certificate chain validation, signature checks, debug status checks, and collateral currency behavior. This covers the full cryptographic verification path from raw quote bytes through to the Intel root CA, the trust root of the chain.
 
 ## Primary Files
 
@@ -39,7 +39,7 @@ Verify and report:
 
 Verify and report:
 - full chain validation: PCK leaf certificate → Intermediate CA (Platform CA or Processor CA) → Intel SGX Root CA,
-- that the Intel SGX Root CA trust anchor is embedded in the code (not fetched from the network at verification time),
+- that the Intel SGX Root CA trust root is embedded in the code (not fetched from the network at verification time),
 - how the embedded root CA is identified and verified (e.g., hardcoded SHA-256 fingerprint of the root CA certificate),
 - that certificate validity periods (NotBefore/NotAfter) are checked against current time,
 - that certificate key usage and extended key usage fields are validated where applicable,

@@ -19,7 +19,7 @@ Additionally, the model backend's attestation provides an E2EE signing key (Ed25
 - **No compose binding**: sek8s does not use docker-compose or MRCONFIGID. Container image integrity relies on a cosign admission controller running inside the measured TEE.
 - **No client-visible event log**: RTMR3/IMA measurements are verified server-side by the Chutes validator; the event log is not exposed to clients.
 - **ML-KEM-768 E2EE**: Chutes uses post-quantum ML-KEM-768 key encapsulation + ChaCha20-Poly1305, not Ed25519/X25519/XChaCha20-Poly1305.
-- **LUKS boot gating**: Disk decryption is gated on measurement verification by the Chutes validator — VMs that fail measurement checks cannot boot.
+- **LUKS boot enforcement**: Disk decryption is conditional on measurement verification by the Chutes validator — VMs that fail measurement checks cannot boot.
 - **Different REPORTDATA scheme**: `SHA256(nonce_hex + e2e_pubkey_base64)` bound to TDX quote, with no signing_address or tls_fingerprint.
 
 For a detailed analysis of the sek8s integrity model and residual trust assumptions, see `docs/attestation_gaps/sek8s_integrity.md`.
@@ -151,7 +151,7 @@ Understanding the security semantics of each register is critical for assessing 
 
 **MRSEAM** — Measurement of the TDX module (SEAM firmware). This 48-byte hash represents the identity and integrity of the Intel TDX module running in Secure Arbitration Mode. Intel signs and guarantees TDX module integrity; the MRSEAM value should correspond to a known Intel-released TDX module version. Verification of MRSEAM ensures the TDX firmware has not been tampered with and is a recognised, trusted version. Without MRSEAM verification, an attacker who compromises the hypervisor could potentially load a modified TDX module that subverts TD isolation guarantees.
 
-**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the root-of-trust anchor for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
+**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the trust root for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
 
 **RTMR0** — Runtime firmware configuration measurement. RTMR0 records the CVM's virtual hardware setup as measured by OVMF, including CPU count, memory size, device configuration, secure boot policy variables (PK, KEK, db, dbx), boot variables, and TdHob/CFV data provided by the VMM. Corresponds to TPM PCR[1,7]. While dstack uses fixed devices, CPU and memory specifications can vary, so RTMR0 can be computed from the dstack image given specific CPU and RAM parameters. Without RTMR0 verification, a malicious VMM could alter the virtual hardware configuration (e.g., inject rogue devices or disable secure boot) without detection.
 
@@ -178,11 +178,11 @@ Sek8s uses standard Intel TDX registers, but the measurements reflect a differen
 
 For complete attestation of a dstack-based CVM — applicable to BOTH the gateway CVM and the model backend CVM — the verification process should:
 
-1. **Obtain golden values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version, for both the gateway and model backend deployments. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
+1. **Obtain reference values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version, for both the gateway and model backend deployments. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
 
 2. **Verify MRSEAM against Intel's published values**: MRSEAM should match a known Intel TDX module release. Intel publishes TDX module versions; the expected MRSEAM value can be derived from the specific TDX module version running on the platform.
 
-3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against golden values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
+3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against reference values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
 
 4. **Verify RTMR3 via event log replay**: RTMR3 contains runtime-specific measurements that cannot be pre-calculated. Replay the event log, compare the replayed RTMR3 against the quoted value, and then inspect the event log entries for expected compose hash, app ID, and key provider values.
 
@@ -198,11 +198,11 @@ For sek8s-based CVMs, the verification process differs from dstack in several im
 
 3. **MRSEAM allowlist extended for sek8s fleet**: The sek8s fleet runs TDX module versions (1.5.0d, 2.0.06) that may differ from the dstack fleet. These are included in the chutes measurement policy.
 
-4. **RTMR3 verified server-side only**: The Chutes validator verifies RTMR3 against golden baselines as part of the LUKS boot gate. Teep cannot independently replay RTMR3.
+4. **RTMR3 verified server-side only**: The Chutes validator verifies RTMR3 against reference baselines as part of LUKS boot enforcement. Teep cannot independently replay RTMR3.
 
 5. **Container image integrity is trust-delegated**: Instead of client-verifiable compose binding + Sigstore/Rekor, sek8s relies on a cosign admission controller inside the TEE. Teep has zero visibility into which containers are running on a Chutes node. This is a documented trust assumption, not a teep deficiency.
 
-6. **Golden values pinned from observed deployments**: Sek8s measurement values are captured from live Chutes deployments and coded in Go defaults. Independent reproduction requires building sek8s from source (`chutesai/sek8s`).
+6. **Reference values pinned from observed deployments**: Sek8s measurement values are captured from live Chutes deployments and coded in Go defaults. Independent reproduction requires building sek8s from source (`chutesai/sek8s`).
 
 See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model analysis.
 
@@ -242,11 +242,11 @@ Chutes uses a separate set of Go-coded measurement defaults, defined in `interna
 
 **RTMR0, RTMR1, RTMR2** — Values specific to the sek8s 8×H200 deployment class. Sek8s host-tools explicitly fix VM parameters (memory, vCPU, GPU MMIO, PCI hole sizing) to make these deterministic.
 
-**RTMR3** — Not enforced by teep. Sek8s validates RTMR3 server-side via its LUKS boot gate; the event log is not exposed to clients.
+**RTMR3** — Not enforced by teep. Sek8s validates RTMR3 server-side via its LUKS boot enforcement; the event log is not exposed to clients.
 
 **MRCONFIGID** — Not used. Sek8s does not bind compose hashes. Container image integrity depends on the cosign admission controller running inside the TEE.
 
-**Measurement bootstrapping.** The `teep verify chutes --model <model> --update-config` command captures observed sek8s measurements. Unlike dstack, there is no golden-value reproduction tooling available to teep; values are pinned from observed deployments.
+**Measurement bootstrapping.** The `teep verify chutes --model <model> --update-config` command captures observed sek8s measurements. Unlike dstack, there is no reference-value reproduction tooling available to teep; values are pinned from observed deployments.
 
 **Residual risk.** The sek8s measurement defaults are pinned from observed Chutes deployments and cannot be independently reproduced without building sek8s from source. Additionally, the absence of compose binding, event log replay, and Sigstore/Rekor checks means that the MRTD/RTMR0-2 allowlists are the sole client-side controls for the sek8s boot chain. See `docs/attestation_gaps/sek8s_integrity.md` for a detailed trust model analysis.
 
@@ -283,7 +283,7 @@ The attestation response is a JSON object that includes:
 > The audit MUST verify: (a) that the instances response is fetched and validated before the evidence request, (b) strict JSON unmarshalling for both responses, (c) bounds checking on all array lengths, (d) that evidence is matched to instances by instance ID, (e) that an instance must have a non-empty `e2e_pubkey` and at least one nonce, (f) that `failed_instance_ids` are excluded from selection, (g) that no `e2e_pubkey` is used without a corresponding verified TDX quote.
 
 The audit MUST verify the attestation response parsing path, including:
-- maximum response body size limit (to prevent memory exhaustion — per Part 1 input bounds rules; note that gateway responses are larger due to dual payloads),
+- maximum response body size limit (to prevent memory exhaustion — per Part 1 input bounds rules; gateway responses are larger due to dual payloads),
 - JSON strict unmarshalling behavior (unknown fields rejection or warning — per Part 1 error handling rules) for BOTH the top-level gateway response AND the inner model attestation,
 - whether unknown-field warnings are rate-limited/deduplicated,
 - handling of polymorphic response formats for the model attestation (array vs flat object),
@@ -461,7 +461,7 @@ The audit MUST verify:
 
 The audit MUST also state the exact security boundary of this check: event log replay validates internal consistency of event-log-derived RTMR values with quoted RTMR values, but does not by itself prove that RTMR values match an approved software baseline. If no baseline policy is enforced for MRTD/RTMR/MRSEAM-class measurements, that gap MUST be reported explicitly — for both gateway and model backend.
 
-> **Known divergence: Chutes/Sek8s.** Event log replay (§4.10 and §4.11) does not apply to chutes. Chutes performs RTMR verification server-side (validator-side) against a golden baseline; the event log is not exposed to clients. The `event_log_integrity` factor returns `Skip` with message: "chutes performs RTMR verification validator-side against a golden baseline; event log not exposed to clients". When auditing chutes, skip §4.10 and §4.11 and instead verify that the `Skip` result is correctly returned. The residual risk is that teep cannot independently verify RTMR3 runtime measurements for chutes.
+> **Known divergence: Chutes/Sek8s.** Event log replay (§4.10 and §4.11) does not apply to chutes. Chutes performs RTMR verification server-side (validator-side) against a reference baseline; the event log is not exposed to clients. The `event_log_integrity` factor returns `Skip` with message: "chutes performs RTMR verification validator-side against a reference baseline; event log not exposed to clients". When auditing chutes, skip §4.10 and §4.11 and instead verify that the `Skip` result is correctly returned. The residual risk is that teep cannot independently verify RTMR3 runtime measurements for chutes.
 
 ### 4.12 Encryption Binding — Model Backend REPORTDATA
 
@@ -490,7 +490,7 @@ The audit MUST also verify that the model backend's REPORTDATA verifier is the s
 >
 > The chutes REPORTDATA verifier is in `internal/provider/chutes/reportdata.go` (a separate implementation from the nearai verifier). The audit for chutes MUST verify: (a) the string concatenation order is `nonce_hex + pubkey_base64` with no separator, (b) the ML-KEM-768 public key is the same key from the instances endpoint that will be used for E2EE, (c) a missing or empty `e2e_pubkey` results in a hard failure, (d) the comparison is constant-time.
 
-> NOTE: The model backend's `tls_cert_fingerprint` in REPORTDATA refers to the model backend's own TLS certificate, not the gateway's. Since the proxy connects to the gateway (not the model backend), the proxy cannot directly verify the model backend's TLS fingerprint against a live connection. The model backend's REPORTDATA binding establishes that the signing key for E2EE is bound to the attested model backend — but the TLS channel pinning is handled separately by the gateway attestation. The audit MUST document this trust delegation and note that the gateway's TLS attestation is the link that binds the live TLS connection to the overall attestation chain.
+> NOTE: The model backend's `tls_cert_fingerprint` in REPORTDATA refers to the model backend's own TLS certificate, not the gateway's. Since the proxy connects to the gateway (not the model backend), the proxy cannot directly verify the model backend's TLS fingerprint against a live connection. The model backend's REPORTDATA binding establishes that the signing key for E2EE is bound to the attested model backend — but the TLS channel pinning is handled separately by the gateway attestation. The audit MUST document this trust delegation and state that the gateway's TLS attestation is the link that binds the live TLS connection to the overall attestation chain.
 
 ### 4.13 Encryption Binding — Gateway REPORTDATA
 
@@ -716,7 +716,7 @@ The audit MUST explicitly document each cache layer, its keys, TTLs, expiry/prun
 | Cache | Expected Keys | Expected TTL | Security-Critical Properties |
 |-------|--------------|-------------|------------------------------|
 | Attestation report cache | (provider, model) | ~minutes | Signing key MUST NOT be cached; must be fetched fresh for each E2EE session |
-| Negative cache | (provider, model) | ~seconds | Must prevent upstream hammering; must expire so recovery is possible |
+| Negative cache | (provider, model) | ~seconds | Must prevent repeated upstream requests; must expire so recovery is possible |
 | SPKI pin cache | (domain, spkiHash) | ~hour | Must be populated only after successful attestation of BOTH gateway and model; eviction must force re-attestation |
 | Signing key cache | (provider, model) | ~minute | Shorter than attestation cache; holds REPORTDATA-verified signing key for E2EE key exchange |
 
@@ -822,8 +822,8 @@ The chutes trust model differs from the nearcloud gateway model. The Chutes gate
 
 **Residual trust assumptions specific to chutes/sek8s** (documented in `docs/attestation_gaps/sek8s_integrity.md`):
 - **Cosign admission controller**: Teep trusts that the cosign admission webhook inside each sek8s TEE VM is correctly configured and enforcing. Teep has zero visibility into which containers are running.
-- **LUKS boot gating**: Teep trusts that the Chutes validator (`chutes-api`) correctly withholds the LUKS decryption key for VMs whose measurements do not match golden values. If the LUKS passphrase leaked, measurement-passing VMs could be substituted.
-- **Golden measurement correctness**: Teep's pinned MRTD/RTMR0-2 values are captured from observed Chutes deployments. They are only trustworthy if the deployment was running the correct sek8s image at capture time.
+- **LUKS boot enforcement**: Teep trusts that the Chutes validator (`chutes-api`) correctly withholds the LUKS decryption key for VMs whose measurements do not match reference values. If the LUKS passphrase leaked, measurement-passing VMs could be substituted.
+- **Reference measurement correctness**: Teep's pinned MRTD/RTMR0-2 values are captured from observed Chutes deployments. They are only trustworthy if the deployment was running the correct sek8s image at capture time.
 - **Runtime attestation**: RTMR3/IMA verification is entirely server-side. Teep trusts that Chutes re-attests running VMs.
 - **Model weight integrity**: Depends entirely on the measured boot chain preventing unauthorized image loading. Neither watchtower verification nor cllmv per-token verification is available to teep for TEE instances.
 

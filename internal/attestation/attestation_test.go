@@ -401,7 +401,7 @@ func TestCachePutEviction(t *testing.T) {
 	c.Put("p", "final", &VerificationReport{})
 	t.Logf("cache Len after eviction = %d", c.Len())
 
-	// After eviction, only "final" (and maybe a few not-yet-expired) should remain.
+	// After eviction, "final" remains; entries that have not yet expired may also remain.
 	if c.Len() > 5 {
 		t.Errorf("expected most entries evicted, got Len = %d", c.Len())
 	}

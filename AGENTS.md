@@ -134,7 +134,7 @@ func (h *Handler) attestOnConn(...) (*Report, error) {
     raw, err := h.sendAttestationRequest(...)
     tdxResult := h.verifyTDX(ctx, raw, nonce)
     nvidiaResult, nrasResult := h.verifyNVIDIA(ctx, raw, nonce)
-    // ... TLS fingerprint check (inline — fatal trust anchor) ...
+    // ... TLS fingerprint check (inline — fatal trust root) ...
     compose, repos, digests, sig, rekor := h.verifySupplyChain(ctx, raw, tdxResult)
     return buildReport(...)
 }
@@ -148,7 +148,7 @@ Reference implementations to mirror when adding providers or verification logic:
 ### Follow Go Conventions
 
 - Follow Effective Go idioms and best practices.
-- When uncertain, prefer DEFENSE IN DEPTH validation.
+- When uncertain, prefer DEFENSE IN DEPTH validation: a check of a different kind, not the same property re-checked in a second place (SEE: `docs/writing_style.md` § Security).
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
 - Prefer mocks over live tests: any live-network test must require the `TEEP_LIVE_TESTS` environment variable or API keys.
 - ALWAYS add regression test coverage for code review issues and audit findings.

@@ -31,7 +31,7 @@ The audit is to be performed by four sub-agents, each given one the following gr
 	- [`10_nvidia_tee.md`](10_nvidia_tee.md)
 	- [`11_proof_of_cloud.md`](11_proof_of_cloud.md)
 
-Note that *all* of the four (4) sub-agents are given [`00_shared_preamble.md`](00_shared_preamble.md).
+*All* of the four (4) sub-agents are given [`00_shared_preamble.md`](00_shared_preamble.md).
 
 The four sub-agents are *not* given this README file. This README file contains orchestration and report assembly instructions only. You MAY give this README file to a fifth sub-agent, along with all of the result *files* from the four other sub-agents, to write the final report file.
 

@@ -565,8 +565,8 @@ func TestVerifyTDX_ParseOK_Tinfoil(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	// Tinfoil has a ReportDataVerifier. With a zeroed ReportData + zeroed Nonce,
-	// the binding check will likely fail — that's fine, we're covering the code path.
+	// Tinfoil has a ReportDataVerifier. With a zeroed ReportData and zeroed Nonce
+	// the binding check fails; this test covers the code path, not the outcome.
 	t.Logf("verifyTDX(tinfoil, ParseOK): ReportDataBindingErr=%v Detail=%q",
 		result.ReportDataBindingErr, result.ReportDataBindingDetail)
 }

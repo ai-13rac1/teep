@@ -1,12 +1,12 @@
 # Sek8s Integrity Chain — Chutes Provider
 
-Chutes runs a custom Kubernetes distribution called **sek8s** inside Intel TDX confidential VMs with a fundamentally different attestation model than dstack providers. While hardware-level TDX measurements can be independently verified by remote clients, the application-layer integrity chain — container image identity, model weights, runtime measurements, and boot gating — relies entirely on server-side controls that are not exposed in the client-facing evidence API.
+Chutes runs a custom Kubernetes distribution called **sek8s** inside Intel TDX confidential VMs with a fundamentally different attestation model than dstack providers. While hardware-level TDX measurements can be independently verified by remote clients, the application-layer integrity chain — container image identity, model weights, runtime measurements, and boot enforcement — relies entirely on server-side controls that are not exposed in the client-facing evidence API.
 
 ## The Problem
 
 Chutes' attestation architecture splits trust between two enforcement layers: hardware measurements verified by the Intel TDX platform, and application-layer controls verified by the Chutes validator infrastructure. Only the hardware layer produces evidence available to external clients. The application layer — which determines what software actually runs inside the TEE and what model weights are loaded — is enforced exclusively by Chutes' own systems.
 
-This means that users of Chutes' confidential inference service cannot independently verify which container images are running, whether the correct model was loaded, whether disk decryption was properly gated on measurement verification, or whether runtime integrity monitoring is active. They must trust that Chutes' cosign admission controller, LUKS boot gating, IMA measurement system, and model weight verification are all correctly implemented and enforced.
+This means that users of Chutes' confidential inference service cannot independently verify which container images are running, whether the correct model was loaded, whether disk decryption was properly conditional on measurement verification, or whether runtime integrity monitoring is active. They must trust that Chutes' cosign admission controller, LUKS boot enforcement, IMA measurement system, and model weight verification are all correctly implemented and enforced.
 
 Unlike dstack-based providers where the Docker Compose manifest hash is bound into a TDX register and container image digests are available for independent supply chain verification, Chutes exposes none of this metadata to clients. The supply chain verification gap is complete: there is zero external visibility into the application-layer software stack.
 
@@ -18,7 +18,7 @@ Unlike dstack-based providers where the Docker Compose manifest hash is bound in
 
 - **LUKS key leakage:** If the LUKS decryption passphrase leaked or if a code path in `chutes-api` released the key without full measurement verification, a VM with a substituted lower stack could boot and serve traffic. Clients verifying only hardware measurements would see a valid quote from a compromised guest.
 
-- **Golden measurement poisoning:** If the `tee_measurements.yaml` ConfigMap contained a malicious measurement set or fell out of sync with production images, the LUKS gate and measurement verification would pass for the wrong sek8s image. All downstream integrity checks (cosign, IMA, runtime attestation) would inherit this compromise.
+- **Reference measurement poisoning:** If the `tee_measurements.yaml` ConfigMap contained a malicious measurement set or fell out of sync with production images, LUKS boot enforcement and measurement verification would pass for the wrong sek8s image. All downstream integrity checks (cosign, IMA, runtime attestation) would inherit this compromise.
 
 - **Model weight substitution:** For TEE instances, model weight integrity depends entirely on the boot chain and cosign admission controller. The watchtower's runtime weight verification explicitly excludes TEE instances, and cllmv per-token verification is not enforced for TEE chutes. A time-of-check-to-time-of-use gap exists: the boot chain verifies the software stack at boot, but does not continuously prove that the expected model revision was loaded into VRAM. TEE memory isolation and the aegis locked-down execution environment mitigate but do not cryptographically prove this.
 
@@ -51,7 +51,7 @@ Sek8s uses standard Intel TDX registers, but the measurements reflect a differen
 | **MRCONFIGID** | **Not used** | Sek8s does not bind a compose manifest or any configuration hash here |
 | **REPORTDATA** | Nonce + key binding | Two different formats for server-side and client-side attestation |
 
-Measurement computation uses Intel's `tdx-measure` tool with boot artifacts extracted during the sek8s build process. Golden values are maintained in a Kubernetes ConfigMap (`tee_measurements.yaml`) loaded by `chutes-api`.
+Measurement computation uses Intel's `tdx-measure` tool with boot artifacts extracted during the sek8s build process. Reference values are maintained in a Kubernetes ConfigMap (`tee_measurements.yaml`) loaded by `chutes-api`.
 
 ### Chutes Security Architecture — Additional Components
 
@@ -91,7 +91,7 @@ The Intel TDX module MRSEAM values are **platform constants** at the TDX module 
 
 ### MRTD — Virtual firmware image
 
-Sek8s uses its own OVMF build, distinct from dstack. The MRTD value is deterministic per sek8s firmware version and can be pinned once golden values are obtained. Enforceable via `mrtd_allow` in the provider's TOML policy section.
+Sek8s uses its own OVMF build, distinct from dstack. The MRTD value is deterministic per sek8s firmware version and can be pinned once reference values are obtained. Enforceable via `mrtd_allow` in the provider's TOML policy section.
 
 **Status:** Enforced. Pinned in `internal/provider/chutes/policy.go`.
 
@@ -129,7 +129,7 @@ Verified using the client-generated nonce and the ML-KEM-768 public key from the
 
 Chutes implements several strong server-side controls that are **not client-verifiable** but form part of the provider's security story:
 
-- **LUKS boot gating:** The `chutes-api` validator only releases the LUKS decryption key after verifying MRTD + all RTMRs against the golden `TeeMeasurementConfig`. If measurements fail, the VM cannot decrypt its root filesystem and cannot boot.
+- **LUKS boot enforcement:** The `chutes-api` validator only releases the LUKS decryption key after verifying MRTD + all RTMRs against the reference `TeeMeasurementConfig`. If measurements fail, the VM cannot decrypt its root filesystem and cannot boot.
 
 - **Cosign admission controller:** A Kubernetes admission webhook (`chutesai/sek8s/sek8s/validators/cosign.py`) inside the TEE calls `cosign verify` on every container image before allowing pod scheduling. The Chutes build system (`forge`) signs all images during the build process.
 
@@ -145,12 +145,12 @@ The trust implications of these server-side-only mechanisms are analyzed in Deta
 | App-layer binding | `MRCONFIGID` = `0x01 \|\| SHA256(compose)` | Not used; cosign admission inside TEE |
 | Container image verification | Client inspects compose image digests + Sigstore/Rekor | Validator-side only; not visible to clients |
 | Event log | Exposed; client replays RTMR3 | Not exposed to clients |
-| Boot gating | None; host launches VM regardless | LUKS key withheld until measurements verified |
+| Boot enforcement | None; host launches VM regardless | LUKS key withheld until measurements verified |
 | Supply chain visibility | Full (compose + image digests + Rekor) | None (trust the cosign admission controller) |
 | Model weight verification | Not applicable (no model-specific attestation) | Watchtower (non-TEE only) + cllmv (non-TEE enforced); neither available to clients. See [model_weights.md](model_weights.md) |
 | Per-token output binding | Not applicable | cllmv: closed-source, TEE-exempt, not client-verifiable. See [model_weights.md](model_weights.md) |
 
-The trade-off is clear: dstack gives remote verifiers **more independent verification surface** (compose binding, image digests, event log replay), while sek8s gives the **validator stronger boot-time enforcement** (LUKS gating prevents non-compliant VMs from starting) at the cost of requiring trust in the validator's implementation.
+The trade-off is clear: dstack gives remote verifiers **more independent verification surface** (compose binding, image digests, event log replay), while sek8s gives the **validator stronger boot-time enforcement** (LUKS boot enforcement prevents non-compliant VMs from starting) at the cost of requiring trust in the validator's implementation.
 
 ---
 
@@ -171,9 +171,9 @@ Chutes has two mechanisms for verifying model weights, neither of which is avail
 
 Both are analyzed in detail in [model_weights.md](model_weights.md).
 
-### Gap 3: LUKS boot gating not independently verifiable
+### Gap 3: LUKS boot enforcement not independently verifiable
 
-The LUKS boot gate is a strong server-side control, but remote clients have no way to independently verify that the LUKS gate was applied or that the decryption key was withheld for a non-matching VM.
+LUKS boot enforcement is a strong server-side control, but remote clients have no way to independently verify that LUKS boot enforcement was applied or that the decryption key was withheld for a non-matching VM.
 
 ### Gap 4: Runtime attestation (RTMR3) not exposed to clients
 
@@ -193,9 +193,9 @@ The sek8s attestation model requires trusting Chutes to correctly implement seve
 
 1. **Cosign admission controller is deployed and enforcing.** A compromise of the cosign signing key, a misconfigured admission controller, or a bypass of the webhook would allow unauthorized container images to run inside an otherwise-valid TEE.
 
-2. **LUKS gating is correctly implemented.** If the LUKS passphrase leaked, or if a code path in `chutes-api` released the key without full measurement verification, a VM with a substituted lower stack could boot and serve traffic.
+2. **LUKS boot enforcement is correctly implemented.** If the LUKS passphrase leaked, or if a code path in `chutes-api` released the key without full measurement verification, a VM with a substituted lower stack could boot and serve traffic.
 
-3. **Golden measurements are correct and current.** If the `tee_measurements.yaml` ConfigMap contained a malicious measurement set, or if it fell out of sync with production images, the LUKS gate and measurement verification would pass for the wrong image. When MRTD and RTMR values are pinned via `--update-config`, the recorded values are only trustworthy if the deployment was running the correct sek8s image at capture time.
+3. **Reference measurements are correct and current.** If the `tee_measurements.yaml` ConfigMap contained a malicious measurement set, or if it fell out of sync with production images, LUKS boot enforcement and measurement verification would pass for the wrong image. When MRTD and RTMR values are pinned via `--update-config`, the recorded values are only trustworthy if the deployment was running the correct sek8s image at capture time.
 
 4. **Runtime attestation is enforced.** RTMR3/IMA verification is entirely server-side. Clients must trust that Chutes re-attests running VMs and revokes access when runtime measurements diverge.
 
@@ -208,7 +208,7 @@ Teep correctly returns `Skip` for factors where the sek8s architecture does not 
 - **`build_transparency_log`**: "chutes attestation does not include container image metadata; supply chain verification is validator-side only"
 - **`compose_binding`**: "chutes uses cosign image admission + IMA, not docker-compose; compose binding not applicable"
 - **`sigstore_verification`**: "chutes attestation does not include container image digests; cosign verification is validator-side only"
-- **`event_log_integrity`**: "chutes performs RTMR verification validator-side against a golden baseline; event log not exposed to clients"
+- **`event_log_integrity`**: "chutes performs RTMR verification validator-side against a reference baseline; event log not exposed to clients"
 
 Teep returns `Fail` for `measured_model_weights` with detail "no model weight hashes" because neither weight verification mechanism exposes verifiable data to clients.
 
@@ -243,14 +243,14 @@ See [model_weights.md](model_weights.md) for a detailed analysis of approaches i
 
 ### Long-term: Independent measurement reproduction
 
-Reproduce sek8s golden measurements independently by:
+Reproduce sek8s reference measurements independently by:
 
 1. Building sek8s from source (`chutesai/sek8s`)
 2. Computing MRTD using `tdx-measure` with the sek8s OVMF binary
 3. Computing RTMR0-2 for each deployment class using the documented VM parameters
 4. Comparing against observed values captured via `--update-config`
 
-This would eliminate residual trust assumption 3 (golden measurement correctness).
+This would eliminate residual trust assumption 3 (reference measurement correctness).
 
 ### Deployment Priority
 

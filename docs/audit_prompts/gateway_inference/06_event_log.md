@@ -69,7 +69,7 @@ You MUST define the check's security boundary for BOTH event logs:
 The audit MUST verify that:
 - model event log integrity (`event_log_integrity`) is a separate enforcement factor from gateway event log integrity (`gateway_event_log_integrity`),
 - both factors are in the default enforced set,
-- failure of either factor independently blocks request forwarding via the `Blocked()` gate,
+- failure of either factor independently blocks request forwarding via the `Blocked()` check,
 - a malformed gateway event log does not prevent model event log verification (or vice versa — they are independent checks).
 
 ### Cross-Reference to RTMR3 Extracted Values
@@ -106,9 +106,9 @@ After replay succeeds, the audit MUST verify (for both model and gateway event l
 
 Chutes/sek8s providers do **not** supply event logs. The `event_log_integrity` factor returns `Skip` and is in `ChutesDefaultAllowFail`. The Chutes gateway is unattested and produces no event log, so `gateway_event_log_integrity` does not apply.
 
-Sek8s validates RTMR values server-side during boot (LUKS gating), but teep has no independent event-log replay path for chutes providers. This means:
+Sek8s validates RTMR values server-side during boot (LUKS boot enforcement), but teep has no independent event-log replay path for chutes providers. This means:
 - There is no client-verifiable mapping from individual software components to RTMR values.
-- RTMR golden values from `chutes/policy.go` are trusted as opaque measurements.
+- RTMR reference values from `chutes/policy.go` are trusted as opaque measurements.
 - The audit should verify that the absence of event log data does not trigger a false pass for chutes providers — it must be `Skip`, not `Pass`.
 
 Primary reference: `internal/provider/chutes/policy.go` (`ChutesDefaultAllowFail`).
@@ -120,7 +120,7 @@ Provide:
 2. replay-algorithm correctness summary (covering both model and gateway),
 3. gateway event log double-parsing correctness assessment,
 4. explicit malformed-input behavior classification,
-5. security boundary statement distinguishing event-log replay (consistency) from measurement policy (golden-value),
+5. security boundary statement distinguishing event-log replay (consistency) from measurement policy (reference-value),
 6. enforcement status of both `event_log_integrity` and `gateway_event_log_integrity` factors,
 7. include at least one concrete positive control and one concrete negative/residual-risk observation,
 8. source citations for all claims.

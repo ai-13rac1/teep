@@ -1748,7 +1748,7 @@ func TestProvenanceTypeString(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 always-fail factors via BuildReport (quick sanity check)
+// Tier 3 always-fail factors via BuildReport (basic check)
 // ---------------------------------------------------------------------------
 
 func TestBuildReportTier3AlwaysFail(t *testing.T) {

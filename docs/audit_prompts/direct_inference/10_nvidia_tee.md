@@ -6,7 +6,7 @@ Audit NVIDIA evidence verification depth across both local evidence validation (
 
 The audit MUST verify both layers when present: local NVIDIA evidence verification (EAT/SPDM) performs direct cryptographic validation of GPU attestation tokens, while remote NRAS verification delegates validation to NVIDIA's attestation service and verifies the resulting JWT.
 
-The NVIDIA attestation provides a secondary layer of TEE assurance alongside the primary Intel TDX CPU attestation. The EAT (Entity Attestation Token) is an NVIDIA-defined JSON structure containing per-GPU evidence entries, each with an X.509 certificate chain and SPDM binary evidence blob. The NRAS (NVIDIA Remote Attestation Service) provides defense-in-depth by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) golden values.
+The NVIDIA attestation provides a secondary layer of TEE assurance alongside the primary Intel TDX CPU attestation. The EAT (Entity Attestation Token) is an NVIDIA-defined JSON structure containing per-GPU evidence entries, each with an X.509 certificate chain and SPDM binary evidence blob. The NRAS (NVIDIA Remote Attestation Service) provides defense-in-depth by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) values.
 
 ## Primary Files
 
@@ -124,7 +124,7 @@ Document this as a known gap with high residual risk.
 ### GPU Driver/Firmware Version Checks
 
 - Local EAT verification proves that GPU evidence is well-formed and signed by NVIDIA-issued device certificates,
-- NRAS verification goes further by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) golden values,
+- NRAS verification goes further by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) values,
 - the `x-nvidia-overall-att-result` claim in the NRAS JWT indicates whether measurements match the RIM,
 - **without NRAS verification**, firmware version currency cannot be established — document this as a residual risk when running in offline mode.
 
@@ -156,7 +156,7 @@ If offline mode exists, identify exactly which NVIDIA checks remain active and w
 
 - **Response size limits**: NRAS response is bounded by `io.LimitReader(resp.Body, 1<<20)` (1 MiB). Verify this limit is sufficient for legitimate responses but prevents memory exhaustion from malicious or misconfigured NRAS endpoints.
 - **All-or-nothing verification**: A single GPU failure in the EAT evidence list fails the entire NVIDIA verification. This is correct fail-secure behavior — verify there is no short-circuit path that could skip remaining GPUs after a success.
-- **Trust boundary**: Local EAT verification proves the evidence is well-formed and signed by NVIDIA device certificates. NRAS verification proves the firmware measurements match NVIDIA's golden values. Both are needed for complete assurance — document which layer provides what guarantee.
+- **Trust boundary**: Local EAT verification proves the evidence is well-formed and signed by NVIDIA device certificates. NRAS verification proves the firmware measurements match NVIDIA's Reference Integrity Manifest values. Both are needed for complete assurance — document which layer provides what guarantee.
 - **Input validation on binary parsing**: SPDM evidence parsing performs bounds checks before every buffer slice. Verify there are no integer overflow risks in offset calculations (e.g., `offset + measRecordLen` where `measRecordLen` is read from untrusted input).
 
 ## Section Deliverable

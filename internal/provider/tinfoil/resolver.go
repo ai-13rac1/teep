@@ -197,7 +197,7 @@ func (r *DirectResolver) ResolveMapping(ctx context.Context, model string) (Mode
 	return m, nil
 }
 
-// SelectDomain selects the best backend enclave domain from the mapping
+// SelectDomain selects a backend enclave domain from the mapping
 // using the prompt_cache_key for cache-aware routing. When promptCacheKey
 // is non-empty, it hashes the key with each domain and picks the lowest
 // lexicographic hash. This provides sticky routing so that requests with
@@ -305,7 +305,7 @@ func (r *DirectResolver) refresh(ctx context.Context) error {
 		}
 		// An empty repo asserts nothing, and SigstoreRepoForModel falls back
 		// to the RepoForModel naming convention. A non-empty but malformed
-		// repo is a broken or hostile response: drop the model with a
+		// repo is malformed, whether by error or by attack: drop the model with a
 		// warning, as for an invalid enclave domain above.
 		if pm.Repo != "" && !isValidSigstoreRepo(pm.Repo) {
 			slog.WarnContext(ctx, "tinfoil: proxy discovery: skipping model with malformed repo",

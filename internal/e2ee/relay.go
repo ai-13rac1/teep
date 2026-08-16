@@ -430,8 +430,8 @@ func decryptChatObject(fields map[string]json.RawMessage, session Decryptor, ctx
 			changed = true
 		}
 	}
-	// Each nested field group is gated by its own canonical encrypted leaf path rather
-	// than a shared proxy (audio.data). This ensures a future provider that encrypts
+	// Each nested field group is selected by its own canonical encrypted leaf path
+	// rather than by a shared stand-in (audio.data). A future provider that encrypts
 	// tool_calls but not audio, or function_call but not tool_calls, is handled correctly.
 	if session.IsResponseFieldEncrypted(EncFieldAudioData, endpoint) {
 		c, err := decryptAudioDataField(fields, session, ctx, endpoint)
@@ -469,9 +469,9 @@ var logprobLeafEncFields = []string{
 }
 
 // anyLogprobsLeafEncrypted reports whether any logprobs leaf field (content or
-// refusal token/bytes) requires encryption for the given endpoint. Used to gate
-// decryptChoiceLogprobs in both streaming and non-streaming paths so that
-// mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
+// refusal token/bytes) requires encryption for the given endpoint. Controls
+// whether decryptChoiceLogprobs runs in the streaming and non-streaming paths, so
+// that mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
 func anyLogprobsLeafEncrypted(session Decryptor, endpoint EndpointType) bool {
 	for _, path := range logprobLeafEncFields {
 		if session.IsResponseFieldEncrypted(path, endpoint) {
@@ -620,7 +620,7 @@ func DecryptSSEChunk(data string, session Decryptor, endpoint EndpointType) (str
 	if err != nil {
 		return "", err
 	}
-	// Gate on any encrypted logprobs leaf rather than only content[].token so that
+	// Check any encrypted logprobs leaf rather than only content[].token, so that
 	// mixed-policy cases (e.g. only refusal[].token encrypted) are handled correctly.
 	// NearCloud/NearDirect report "logprobs" container as false but encrypt leaves.
 	if anyLogprobsLeafEncrypted(session, endpoint) {
@@ -858,7 +858,7 @@ func decryptResponseChoices(choicesRaw json.RawMessage, session Decryptor, endpo
 		if err != nil {
 			return nil, err
 		}
-		// Gate on any encrypted logprobs leaf rather than only content[].token.
+		// Check any encrypted logprobs leaf rather than only content[].token.
 		// Providers can encrypt only a subset of logprobs leaves.
 		// Chat completions endpoint path: /v1/chat/completions or /api/v1/chat/completions
 		if anyLogprobsLeafEncrypted(session, endpoint) {

@@ -354,7 +354,7 @@ func newMockNearCloudProxyServer(t *testing.T, e2eeEnabled bool) *httptest.Serve
 
 // newMockNeardirectE2EEServer creates a proxy with a mock neardirect
 // PinnedHandler that uses real XChaCha20 E2EE crypto. The neardirect
-// provider is wired with all 5 endpoint paths and E2EE enabled.
+// provider is configured with all 5 endpoint paths and E2EE enabled.
 func newMockNeardirectE2EEServer(t *testing.T, e2eeEnabled bool) *httptest.Server {
 	t.Helper()
 

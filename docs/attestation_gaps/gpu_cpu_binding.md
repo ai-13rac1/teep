@@ -449,7 +449,7 @@ goal is for providers to **expose DCEA proofs in-band in their attestation API
 responses**, enabling direct client-side verification without trusting a
 third-party registry.
 
-The key insight is that Intel TDX Runtime Measurement Registers (RTMRs) share
+Intel TDX Runtime Measurement Registers (RTMRs) share
 a well-defined mapping with vTPM Platform Configuration Registers (PCRs).  If
 the GPU driver's SPDM device identity and measurements are extended into the
 vTPM's PCR chain, and the vTPM's AK is sealed to those PCR values, a remote

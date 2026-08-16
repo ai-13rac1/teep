@@ -36,9 +36,9 @@ Verify and report:
 - whether failure degrades confidentiality/integrity without blocking traffic,
 - how enforced factors are configured (hardcoded/config/env),
 - startup behavior for unknown/misspelled factor names (must reject vs silent ignore),
-- existence and usage of a pre-forwarding block gate (`Blocked()` or equivalent) on every forwarded request.
+- existence and usage of a pre-forwarding block check (`Blocked()` or equivalent) on every forwarded request.
 
-#### `Blocked()` Gate Implementation
+#### `Blocked()` Check Implementation
 
 Verify:
 - that `Blocked()` is invoked on every code path that forwards traffic (not just the happy path),
@@ -111,7 +111,7 @@ Audit each cache layer and produce this table:
 | Cache | Keys | TTL | Bounds/Eviction | Stale Behavior | Security-Critical Notes |
 |-------|------|-----|-----------------|----------------|-------------------------|
 | Attestation report cache | provider, model | ~minutes | ... | ... | Signing key MUST NOT be cached; must be fetched fresh for each E2EE session |
-| Negative cache | provider, model | ~seconds | ... | ... | Must prevent upstream hammering; must expire so recovery is possible |
+| Negative cache | provider, model | ~seconds | ... | ... | Must prevent repeated upstream requests; must expire so recovery is possible |
 | SPKI pin cache | gateway domain, spkiHash | ~hour | ... | ... | Must be populated only after successful attestation of BOTH gateway and model; eviction must force re-attestation |
 | Signing key cache | provider, model | ~minute | ... | ... | Shorter than attestation cache; holds REPORTDATA-verified signing key for E2EE |
 | PCS collateral cache | platform FMSPC | ~hours | ... | ... | TCB info and CRL freshness |

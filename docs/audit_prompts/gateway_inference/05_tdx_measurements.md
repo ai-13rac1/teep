@@ -2,7 +2,7 @@
 
 ## Scope
 
-Audit extraction, integrity checks, and policy enforcement for TDX quote measurement fields for BOTH the gateway CVM and the model backend CVM, including documented residual risk when golden baselines are unavailable.
+Audit extraction, integrity checks, and policy enforcement for TDX quote measurement fields for BOTH the gateway CVM and the model backend CVM, including documented residual risk when reference baselines are unavailable.
 
 In the gateway inference model, two separate CVMs produce TDX quotes with independent measurement registers. The audit MUST cover all measurement fields for both the gateway and the model backend, and verify whether separate measurement policies can be specified for each.
 
@@ -35,7 +35,7 @@ Understanding the security semantics of each register is critical for assessing 
 
 **MRSEAM** — Measurement of the TDX module (SEAM firmware). This 48-byte hash represents the identity and integrity of the Intel TDX module running in Secure Arbitration Mode. Intel signs and guarantees TDX module integrity; the MRSEAM value should correspond to a known Intel-released TDX module version. Without MRSEAM verification, an attacker who compromises the hypervisor could potentially load a modified TDX module that subverts TD isolation guarantees.
 
-**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is the root-of-trust anchor for the entire guest boot chain. Without MRTD verification, an attacker could substitute a different virtual firmware while preserving the correct compose hash and RTMR3 values.
+**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is the trust root for the entire guest boot chain. Without MRTD verification, an attacker could substitute a different virtual firmware while preserving the correct compose hash and RTMR3 values.
 
 **RTMR0** — Runtime firmware configuration measurement. Records the CVM's virtual hardware setup, including CPU count, memory size, device configuration, secure boot policy variables. Without RTMR0 verification, a malicious VMM could alter the virtual hardware configuration without detection.
 
@@ -49,11 +49,11 @@ Understanding the security semantics of each register is critical for assessing 
 
 For complete attestation of a dstack-based CVM — applicable to BOTH the gateway CVM and the model backend CVM — the verification process should:
 
-1. **Obtain golden values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version, for both the gateway and model backend deployments.
+1. **Obtain reference values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version, for both the gateway and model backend deployments.
 
 2. **Verify MRSEAM against Intel's published values**: MRSEAM should match a known Intel TDX module release.
 
-3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against golden values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image.
+3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against reference values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image.
 
 4. **Verify RTMR3 via event log replay**: RTMR3 contains runtime-specific measurements that cannot be pre-calculated. See Section 06 for event log replay details.
 
@@ -124,7 +124,7 @@ The `tee_hardware_config` / `gateway_tee_hardware_config` (RTMR0) and `tee_boot_
 >
 > **Measurement defaults** are in `internal/provider/chutes/policy.go` (`DefaultMeasurementPolicy()`). Values are pinned from observed Chutes deployments and cannot be independently reproduced without building sek8s from source.
 >
-> The audit for chutes MUST: (a) verify that MRTD/MRSEAM/RTMR0-2 allowlists are correctly populated from `internal/provider/chutes/policy.go`, (b) evaluate whether these allowlists provide sufficient assurance given the absence of compose binding, event log, and Sigstore/Rekor checks, (c) document the residual risk that golden values are observer-pinned (not independently derived). See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model.
+> The audit for chutes MUST: (a) verify that MRTD/MRSEAM/RTMR0-2 allowlists are correctly populated from `internal/provider/chutes/policy.go`, (b) evaluate whether these allowlists provide sufficient assurance given the absence of compose binding, event log, and Sigstore/Rekor checks, (c) document the residual risk that reference values are observer-pinned (not independently derived). See `docs/attestation_gaps/sek8s_integrity.md` for the full trust model.
 
 ## Required Checks
 
@@ -175,7 +175,7 @@ The audit MUST verify:
 ## Mandatory Residual-Risk Analysis
 
 You MUST explicitly evaluate the known baseline-publication gap for BOTH the gateway and model backend:
-- if provider golden values for MRSEAM/MRTD/RTMR0-2 are absent,
+- if provider reference values for MRSEAM/MRTD/RTMR0-2 are absent,
 - whether these fields become informational-only,
 - why this leaves system-level integrity gaps despite compose binding and RTMR3/event-log consistency checks.
 
@@ -184,7 +184,7 @@ You MUST quantify realistic attacker capability under this gap (hypervisor-level
 **The audit MUST recommend** that the inference provider (NearCloud / NEAR AI) publish:
 1. The specific dstack OS version and TDX module version used in their gateway and model backend deployments,
 2. Reproducible build instructions or source references for both CVM images,
-3. Pre-computed golden values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration, for both gateway and model backend,
+3. Pre-computed reference values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration, for both gateway and model backend,
 4. The expected MRSEAM value for the Intel TDX module version deployed on their hardware,
 5. A versioned manifest or API endpoint that maps deployment configurations to expected measurement values.
 
@@ -206,7 +206,7 @@ You MUST quantify realistic attacker capability under this gap (hypervisor-level
 ### General Security Audit Practices
 
 - **Trust boundary**: No measurement-based security decisions before quote signature verification completes.
-- **Fail-secure for empty policy**: When no golden values are configured, the report must clearly distinguish "not checked" from "checked and matched."
+- **Fail-secure for empty policy**: When no reference values are configured, the report must clearly distinguish "not checked" from "checked and matched."
 - **Configuration injection prevention**: If allowlists are configurable via external input, verify strict format validation.
 
 ## Section Deliverable
@@ -214,8 +214,8 @@ You MUST quantify realistic attacker capability under this gap (hypervisor-level
 Provide:
 1. findings-first list ordered by severity,
 2. per-field classification (extraction / structural / enforcement) covering BOTH gateway and model,
-3. residual-risk analysis for absent golden values (gateway and model independently),
-4. explicit recommendation for provider to publish golden values for both CVM types,
+3. residual-risk analysis for absent reference values (gateway and model independently),
+4. explicit recommendation for provider to publish reference values for both CVM types,
 5. measurement policy configuration assessment (including gateway vs model policy separation),
 6. include at least one concrete positive control and one concrete negative/residual-risk observation,
 7. source citations for all claims.

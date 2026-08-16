@@ -22,7 +22,7 @@ RTMR3 is the application-specific runtime measurement register. In dstack's impl
 
 RTMR3 is verified by replaying the event log: if the replayed RTMR3 matches the quoted RTMR3, the event log content is authentic, and the compose hash, key provider, and other details can be extracted and verified from the event log entries. The existing compose binding check (`MRConfigID`) partially overlaps with RTMR3 for compose hash verification.
 
-The `event_log_integrity` factor is one of the default enforced factors — failure of RTMR replay comparison MUST block request forwarding. The audit MUST verify that this enforcement is wired through the `Blocked()` code path (or equivalent) and not merely logged.
+The `event_log_integrity` factor is one of the default enforced factors — failure of RTMR replay comparison MUST block request forwarding. The audit MUST verify that this enforcement runs through the `Blocked()` code path (or equivalent) and not merely logged.
 
 ## Required Checks
 
@@ -60,7 +60,7 @@ You MUST define the check's security boundary:
 
 The audit MUST distinguish between two separate verification layers:
 1. **Event log replay (consistency check)**: verifies that the event log entries, when replayed, produce RTMR values matching the TDX-quoted RTMR values — this proves the event log has not been tampered with post-quote.
-2. **Measurement policy (golden-value check)**: verifies that the quoted RTMR/MRTD/MRSEAM values match a provider-published set of known-good values — this proves the actual software running is the expected software.
+2. **Measurement policy (reference-value check)**: verifies that the quoted RTMR/MRTD/MRSEAM values match a provider-published set of known-good values — this proves the actual software running is the expected software.
 
 If only layer (1) is implemented without layer (2), the residual risk is that any internally-consistent event log will be accepted, even if it represents a compromised software stack. This gap MUST be reported with severity and exploitability context.
 
@@ -100,7 +100,7 @@ Provide:
 1. findings-first list ordered by severity,
 2. replay-algorithm correctness summary,
 3. explicit malformed-input behavior classification,
-4. security boundary statement distinguishing event-log replay (consistency) from measurement policy (golden-value),
+4. security boundary statement distinguishing event-log replay (consistency) from measurement policy (reference-value),
 5. enforcement status of the `event_log_integrity` factor (enforced fail-closed vs advisory),
 6. include at least one concrete positive control and one concrete negative/residual-risk observation,
 7. source citations for all claims.
