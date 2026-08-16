@@ -1,3 +1,7 @@
 # Compiled binary
 /teep
 .DS_Store
+
+# make coverage / coverage-full output
+coverage.out
+coverage.html
