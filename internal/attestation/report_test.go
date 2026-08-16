@@ -548,14 +548,14 @@ func TestEvalResponseSchema(t *testing.T) {
 	}
 }
 
-func TestEvalResponseSchema_TinfoilAllowFail(t *testing.T) {
-	// FactorResponseSchema is in tinfoil allow_fail lists while V3 attestation
-	// schema compatibility settles.
-	if !slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema missing from TinfoilCloudDefaultAllowFail")
+func TestEvalResponseSchema_TinfoilEnforced(t *testing.T) {
+	// The Tinfoil parser reads the document Tinfoil serves and rejects a
+	// member it cannot account for, so response_schema is enforced.
+	if slices.Contains(TinfoilCloudDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema is allowed to fail in TinfoilCloudDefaultAllowFail")
 	}
-	if !slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
-		t.Error("FactorResponseSchema missing from TinfoilDirectDefaultAllowFail")
+	if slices.Contains(TinfoilDirectDefaultAllowFail, FactorResponseSchema) {
+		t.Error("FactorResponseSchema is allowed to fail in TinfoilDirectDefaultAllowFail")
 	}
 }
 

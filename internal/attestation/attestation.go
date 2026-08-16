@@ -176,12 +176,23 @@ type RawAttestation struct {
 	NVSwitchRawJSON []byte `json:"-"` // raw JSON bytes of the "nvswitch" field (tinfoil V3)
 	GPUNonce        string `json:"-"` // SPDM requester nonce for GPU evidence (tinfoil V3)
 
-	// Tinfoil V3 report_data hex fields (each 64 hex chars = 32 bytes).
-	TinfoilTLSKeyFP             string `json:"-"` // report_data.tls_key_fp
-	TinfoilHPKEKey              string `json:"-"` // report_data.hpke_key
-	TinfoilNonce                string `json:"-"` // report_data.nonce
-	TinfoilGPUEvidenceHash      string `json:"-"` // report_data.gpu_evidence_hash
-	TinfoilNVSwitchEvidenceHash string `json:"-"` // report_data.nvswitch_evidence_hash (optional)
+	// Tinfoil v3 crypto material (each 64 hex chars = 32 bytes).
+	TinfoilTLSKeyFP string `json:"-"` // crypto_material item "tls"
+	TinfoilHPKEKey  string `json:"-"` // crypto_material item "hpke"
+	TinfoilNonce    string `json:"-"` // challenge.nonce
+
+	// Tinfoil v3 endorsed sections. The two sections are hash-bound into the
+	// CPU quote's REPORT_DATA, so the hashes must be computed over these exact
+	// base64-decoded bytes. Re-serializing either section changes its hash and
+	// breaks the binding.
+	TinfoilCryptoMaterialBytes []byte `json:"-"`
+	TinfoilDeviceEvidenceBytes []byte `json:"-"`
+
+	// Tinfoil v3 values the enclave claims. Each is checked against a value
+	// teep recomputes; none is trusted on its own.
+	TinfoilEndorsedCryptoHash  string `json:"-"` // cpu_evidence.endorsed.crypto_material_hash
+	TinfoilEndorsedDeviceHash  string `json:"-"` // cpu_evidence.endorsed.device_evidence_hash
+	TinfoilChallengeReportData string `json:"-"` // challenge.report_data
 
 	// TinfoilRepo is the Sigstore GitHub repo for supply chain verification.
 	// Populated by the DirectAttester from the proxy discovery endpoint.

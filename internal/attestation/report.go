@@ -427,8 +427,8 @@ var ChutesDefaultAllowFail = []string{
 // tinfoil_v3_cloud. NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
 // reported but currently allowed to fail by default, due to the hashing
 // issue documented in docs/attestation_gaps/tinfoil_nvidia_json.md
-// response_schema is allowed to fail while Tinfoil V3 attestation schema
-// compatibility settles.
+// response_schema is enforced: the parser reads the document Tinfoil serves,
+// and a member teep cannot account for is a document it cannot verify.
 // tee_boot_config is enforced: hardware platform measurements (MRTD + RTMR0)
 // must match the Sigstore-attested tinfoilsh/hardware-measurements registry
 // for TDX enclaves.
@@ -443,19 +443,17 @@ var TinfoilCloudDefaultAllowFail = []string{
 	FactorCPUGPUChain,
 	FactorNVSwitchBinding,
 	FactorComponentRecognition,
-	FactorResponseSchema,
 }
 
 // TinfoilDirectDefaultAllowFail is the tinfoil_v3_direct default allow_fail
 // list. Direct inference attests per-model enclaves; NVSwitch binding is
 // reported but currently allowed to fail by default. response_schema is
-// allowed to fail while Tinfoil V3 attestation schema compatibility settles.
+// enforced, for the reason given on the cloud list.
 var TinfoilDirectDefaultAllowFail = []string{
 	FactorCPUIDRegistry,
 	FactorIntelPCSCollateral,
 	FactorNVSwitchBinding,
 	FactorComponentRecognition,
-	FactorResponseSchema,
 }
 
 // KnownFactors is the complete set of factor names produced by BuildReport.

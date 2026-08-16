@@ -225,20 +225,20 @@ func checkProviderStructure(r *result, p *providerInfo) {
 
 	switch p.archetype {
 	case archetypeDirect:
-		// Tinfoil uses v3Response/parseV3Response instead of the standard
-		// attestationResponse/ParseAttestationResponse names because its V3
+		// Tinfoil uses v3Document/parseV3Document instead of the standard
+		// attestationResponse/ParseAttestationResponse names because its v3
 		// attestation format is distinct from the dstack-based providers.
 		switch {
 		case hasStruct(p.files, "attestationResponse"):
 			checkResponseStruct(r, p, "attestationResponse")
-		case hasStruct(p.files, "v3Response"):
-			checkResponseStruct(r, p, "v3Response")
+		case hasStruct(p.files, "v3Document"):
+			checkResponseStruct(r, p, "v3Document")
 		default:
-			r.failf("attestationResponse (or v3Response) struct not found in %s", p.name)
+			r.failf("attestationResponse (or v3Document) struct not found in %s", p.name)
 		}
 		parseName := "ParseAttestationResponse"
-		if !hasFunc(p.files, parseName) && hasFunc(p.files, "parseV3Response") {
-			parseName = "parseV3Response"
+		if !hasFunc(p.files, parseName) && hasFunc(p.files, "parseV3Document") {
+			parseName = "parseV3Document"
 		}
 		fd := checkParseFunc(r, p, parseName)
 		checkParseFuncUsesJSONStrict(r, p, fd)
@@ -532,12 +532,12 @@ func collectRawMessageViolations(fset *token.FileSet, st *ast.StructType, struct
 }
 
 // At least one test file uses external package.
-// Providers with unexported parse functions (e.g. parseV3Response) need
+// Providers with unexported parse functions (e.g. parseV3Document) need
 // internal test access, so the external package requirement is skipped.
 func checkExternalTestPackage(r *result, p *providerInfo) {
 	// If the provider uses an unexported parse function, it needs internal
 	// test access and cannot use external test packages for parse tests.
-	if hasFunc(p.files, "parseV3Response") && !hasFunc(p.files, "ParseAttestationResponse") {
+	if hasFunc(p.files, "parseV3Document") && !hasFunc(p.files, "ParseAttestationResponse") {
 		r.skipf("external test package not required (%s uses unexported parse function)", p.name)
 		return
 	}

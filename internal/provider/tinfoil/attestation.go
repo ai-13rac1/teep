@@ -6,202 +6,487 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/13rac1/teep/internal/attestation"
 	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
-// maxCPUReportSize is the upper bound on the decoded cpu.report field (10 MiB).
-const maxCPUReportSize = 10 << 20
+// Size limits on an untrusted attestation response.
+const (
+	// maxBodySize is the maximum attestation response body size (4 MiB).
+	maxBodySize = 4 << 20
 
-// maxBodySize is the maximum V3 response body size (4 MiB).
-const maxBodySize = 4 << 20
+	// maxCPUReportSize is the upper bound on the decoded CPU quote (10 MiB).
+	maxCPUReportSize = 10 << 20
 
-// hexFieldLen is the required length of hex-encoded 32-byte fields (64 chars).
+	// maxCollateralEntries bounds the collateral array. An enclave serves six
+	// entries; the limit leaves room for new ones without admitting an
+	// unbounded array.
+	maxCollateralEntries = 32
+
+	// maxSectionItems bounds the item count in either endorsed section. The
+	// largest shape is eight GPUs plus NVSwitch evidence.
+	maxSectionItems = 32
+)
+
+// hexFieldLen is the length of a hex-encoded 32-byte field.
 const hexFieldLen = 64
 
-// v3Response is the top-level JSON structure of a V3 attestation response.
-// gpu and nvswitch are kept as json.RawMessage to preserve raw bytes for hashing.
-type v3Response struct {
-	Format     string          `json:"format"`
-	ReportData v3ReportData    `json:"report_data"`
-	CPU        v3CPU           `json:"cpu"`
-	GPU        json.RawMessage `json:"gpu"`
-	// NVSwitch is present only on NVSwitch topologies. omitempty marks it
-	// optional so jsonstrict does not report it missing, which would fail
-	// response_schema on every single-GPU enclave.
-	NVSwitch json.RawMessage `json:"nvswitch,omitempty"`
+// reportDataLen is the length of a hex-encoded 64-byte REPORT_DATA value.
+const reportDataLen = 128
 
-	Certificate string `json:"certificate"` // PEM certificate
-	Signature   string `json:"signature"`   // base64 ECDSA DER
+// Format URIs of the v3 attestation document and its members. These come from
+// the format registry in the tinfoil-go verifier/envelope package, which is the
+// definition both the enclave and the verifier follow.
+const (
+	// FormatURI identifies the v3 attestation document.
+	FormatURI = "https://tinfoil.sh/predicate/attestation/v3"
 
-	// Body is a legacy V2 field — its presence causes rejection. A V3
-	// response never carries it, so omitempty marks it optional and
-	// jsonstrict does not report it missing.
-	Body *json.RawMessage `json:"body,omitempty"`
+	// ReportDataV1Algorithm identifies the REPORT_DATA derivation and is
+	// written into the hash as a domain separation label.
+	ReportDataV1Algorithm = "https://tinfoil.sh/report-data/v1"
+
+	cryptoMaterialV1Format = "https://tinfoil.sh/crypto-material/v1"
+	deviceEvidenceV1Format = "https://tinfoil.sh/device-evidence/v1"
+
+	sevSNPReportV1Format = "https://tinfoil.sh/format/sev-snp-report/v1"
+	tdxQuoteV1Format     = "https://tinfoil.sh/format/tdx-quote/v1"
+
+	// NvidiaGPUEvidenceV1Format is the item format of one GPU's evidence.
+	NvidiaGPUEvidenceV1Format = "https://tinfoil.sh/format/nvidia-gpu-evidence/v1"
+
+	keySPKIFPSHA256V1Format = "https://tinfoil.sh/key/spki-fp-sha256/v1"
+	keyX25519HPKEV1Format   = "https://tinfoil.sh/key/x25519-hpke/v1"
+)
+
+// Item and collateral identifiers.
+const (
+	cryptoMaterialIDTLS  = "tls"
+	cryptoMaterialIDHPKE = "hpke"
+
+	roleEndorsement     = "endorsement"
+	roleReferenceValues = "reference-values"
+)
+
+// supersededMembers are top-level members of the attestation document teep
+// removed. The replacement document carries none of them, so any one of them
+// identifies an enclave that still serves the superseded document.
+var supersededMembers = []string{"report_data", "certificate", "signature", "cpu"}
+
+// v3Document is the wire shape of a v3 attestation document.
+//
+// The two endorsed sections travel base64-encoded. The enclave serializes each
+// section once and hashes those exact bytes into the CPU quote's REPORT_DATA,
+// so a verifier recovers them with a plain decode and never re-serializes.
+type v3Document struct {
+	Format         string         `json:"format"`
+	Challenge      v3Challenge    `json:"challenge"`
+	CPUEvidence    v3CPUEvidence  `json:"cpu_evidence"`
+	CryptoMaterial string         `json:"crypto_material"`
+	DeviceEvidence string         `json:"device_evidence"`
+	Collateral     []v3Collateral `json:"collateral"`
 }
 
-// v3ReportData holds the parsed report_data fields.
-type v3ReportData struct {
-	TLSKeyFP             string `json:"tls_key_fp"`
-	HPKEKey              string `json:"hpke_key"`
-	Nonce                string `json:"nonce"`
-	GPUEvidenceHash      string `json:"gpu_evidence_hash"`
-	NVSwitchEvidenceHash string `json:"nvswitch_evidence_hash"`
+// v3Challenge binds the document to the nonce the client chose.
+type v3Challenge struct {
+	Nonce               string `json:"nonce"`
+	ReportData          string `json:"report_data"`
+	ReportDataAlgorithm string `json:"report_data_algorithm"`
 }
 
-// v3CPU holds the CPU attestation report.
-type v3CPU struct {
-	Platform string `json:"platform"` // "tdx" or "sev-snp"
-	Report   string `json:"report"`   // base64-encoded
+// v3CPUEvidence is the hardware quote and the endorsed-section hashes it binds.
+type v3CPUEvidence struct {
+	Format       string     `json:"format"`
+	ReportBase64 string     `json:"report_base64"`
+	Endorsed     v3Endorsed `json:"endorsed"`
 }
 
-// v3GPUEvidences is used only for parsing the gpu.evidences array when needed
-// (e.g., NVSwitch normalization). Not used for hashing — raw bytes are used instead.
-type v3GPUEvidences struct {
-	Evidences []v3GPUEvidence `json:"evidences"`
+// v3Endorsed holds the hashes of the two endorsed sections.
+type v3Endorsed struct {
+	CryptoMaterialHash string `json:"crypto_material_hash"`
+	DeviceEvidenceHash string `json:"device_evidence_hash"`
 }
 
-// v3GPUEvidence is a single GPU evidence entry.
-type v3GPUEvidence struct {
-	Arch        string `json:"arch"`
-	Certificate string `json:"certificate"`
-	Evidence    string `json:"evidence"`
-	Nonce       string `json:"nonce"`
+// v3Collateral is one self-describing collateral record. Collateral is
+// unendorsed transport: an entry proves nothing until its own signature chain
+// is verified, so teep bounds and structurally validates the array and reads
+// no entry data.
+type v3Collateral struct {
+	ID       string          `json:"id"`
+	Role     string          `json:"role"`
+	Format   string          `json:"format"`
+	Subjects []string        `json:"subjects,omitempty"`
+	Data     json.RawMessage `json:"data"`
 }
 
-// parseV3Response parses a V3 attestation JSON document into a RawAttestation.
-// It validates the format, rejects V2 documents, decodes the CPU report,
-// and extracts report_data fields.
-func parseV3Response(body []byte) (*attestation.RawAttestation, *v3Response, error) {
-	var resp v3Response
-	unknownFields, missingFields, err := jsonstrict.UnmarshalWarn(body, &resp, "tinfoil V3")
+// v3CryptoMaterialSection is the endorsed crypto_material section.
+type v3CryptoMaterialSection struct {
+	Format string                 `json:"format"`
+	Items  []v3CryptoMaterialItem `json:"items"`
+}
+
+// v3CryptoMaterialItem is one endorsed key. The item format URI determines how
+// Data is read.
+type v3CryptoMaterialItem struct {
+	ID     string `json:"id"`
+	Format string `json:"format"`
+	Data   string `json:"data"`
+}
+
+// v3DeviceEvidenceSection is the endorsed device_evidence section. An enclave
+// with no attestable device serves an empty item list; the section is always
+// present.
+type v3DeviceEvidenceSection struct {
+	Format string                 `json:"format"`
+	Items  []v3DeviceEvidenceItem `json:"items"`
+}
+
+// v3DeviceEvidenceItem is one device's evidence.
+type v3DeviceEvidenceItem struct {
+	ID       string          `json:"id"`
+	Kind     string          `json:"kind"`
+	Vendor   string          `json:"vendor"`
+	Format   string          `json:"format"`
+	Evidence json.RawMessage `json:"evidence"`
+}
+
+// parseV3Document parses a v3 attestation document into a RawAttestation.
+//
+// The steps are: reject a superseded or drifted schema, check the document and
+// algorithm identity, decode the two endorsed sections, structurally validate
+// the collateral array, read the TLS and HPKE keys, and decode the CPU quote.
+//
+// Parsing authenticates nothing. Every value it returns is a claim until
+// VerifyReportData proves the hardware bound it.
+func parseV3Document(body []byte) (*attestation.RawAttestation, error) {
+	var doc v3Document
+	unknown, missing, err := jsonstrict.UnmarshalWarn(body, &doc, "tinfoil v3")
 	if err != nil {
-		return nil, nil, fmt.Errorf("tinfoil: unmarshal V3 response: %w", err)
+		return nil, fmt.Errorf("tinfoil: unmarshal v3 document: %w", err)
+	}
+	if err := rejectSupersededDocument(unknown); err != nil {
+		return nil, err
+	}
+	if err := rejectSchemaDrift(unknown, missing); err != nil {
+		return nil, err
+	}
+	if err := checkDocumentIdentity(&doc); err != nil {
+		return nil, err
 	}
 
-	// Reject legacy V2 format (has "body" field).
-	if resp.Body != nil {
-		return nil, nil, errors.New("tinfoil: response contains 'body' field — this is a V2 response, not V3")
-	}
-
-	// Validate format URI.
-	if resp.Format != FormatURI {
-		return nil, nil, fmt.Errorf("tinfoil: unexpected format %q, want %q", resp.Format, FormatURI)
-	}
-
-	// Validate report_data hex fields.
-	if err := validateHexField("tls_key_fp", resp.ReportData.TLSKeyFP); err != nil {
-		return nil, nil, err
-	}
-	if err := validateHexField("hpke_key", resp.ReportData.HPKEKey); err != nil {
-		return nil, nil, err
-	}
-	if err := validateHexField("nonce", resp.ReportData.Nonce); err != nil {
-		return nil, nil, err
-	}
-	// GPU evidence is required per spec. When absent, we still parse the
-	// response so that BuildReport can produce factor-level failures, but
-	// we emit a loud warning. Missing GPU evidence means cpu_gpu_chain and
-	// all nvidia factors will fail closed.
-	if resp.ReportData.GPUEvidenceHash == "" || len(resp.GPU) == 0 {
-		slog.Warn("tinfoil V3 response missing required GPU evidence",
-			"has_gpu_field", len(resp.GPU) > 0,
-			"has_gpu_evidence_hash", resp.ReportData.GPUEvidenceHash != "",
-		)
-	}
-	if resp.ReportData.GPUEvidenceHash != "" {
-		if err := validateHexField("gpu_evidence_hash", resp.ReportData.GPUEvidenceHash); err != nil {
-			return nil, nil, err
-		}
-	}
-	if resp.ReportData.NVSwitchEvidenceHash != "" {
-		if err := validateHexField("nvswitch_evidence_hash", resp.ReportData.NVSwitchEvidenceHash); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	// Decode and validate CPU report.
-	cpuReportBytes, err := base64.StdEncoding.DecodeString(resp.CPU.Report)
+	cryptoBytes, deviceBytes, err := decodeEndorsedSections(&doc)
 	if err != nil {
-		return nil, nil, fmt.Errorf("tinfoil: base64-decode cpu.report: %w", err)
+		return nil, err
 	}
-	if len(cpuReportBytes) > maxCPUReportSize {
-		return nil, nil, fmt.Errorf("tinfoil: cpu.report decoded size %d exceeds limit %d", len(cpuReportBytes), maxCPUReportSize)
+	if err := checkCollateral(doc.Collateral); err != nil {
+		return nil, err
+	}
+
+	crypto, err := parseCryptoMaterial(cryptoBytes)
+	if err != nil {
+		return nil, err
+	}
+	tlsKeyFP, hpkeKey, err := endorsedKeys(crypto)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkDeviceEvidence(deviceBytes); err != nil {
+		return nil, err
 	}
 
 	raw := &attestation.RawAttestation{
 		BackendFormat:  attestation.FormatTinfoil,
 		NonceSource:    "client",
-		Nonce:          resp.ReportData.Nonce,
-		SigningKey:     resp.ReportData.HPKEKey,
+		Nonce:          doc.Challenge.Nonce,
+		SigningKey:     hpkeKey,
 		SigningAlgo:    "x25519-hpke",
-		TLSFingerprint: resp.ReportData.TLSKeyFP,
-		UnknownFields:  unknownFields,
-		MissingFields:  missingFields,
+		TLSFingerprint: tlsKeyFP,
+		UnknownFields:  unknown,
+		MissingFields:  missing,
 		RawBody:        body,
 
-		// Tinfoil-specific fields.
-		GPURawJSON:                  resp.GPU,
-		NVSwitchRawJSON:             resp.NVSwitch,
-		TinfoilTLSKeyFP:             resp.ReportData.TLSKeyFP,
-		TinfoilHPKEKey:              resp.ReportData.HPKEKey,
-		TinfoilNonce:                resp.ReportData.Nonce,
-		TinfoilGPUEvidenceHash:      resp.ReportData.GPUEvidenceHash,
-		TinfoilNVSwitchEvidenceHash: resp.ReportData.NVSwitchEvidenceHash,
+		TinfoilTLSKeyFP:            tlsKeyFP,
+		TinfoilHPKEKey:             hpkeKey,
+		TinfoilNonce:               doc.Challenge.Nonce,
+		TinfoilCryptoMaterialBytes: cryptoBytes,
+		TinfoilDeviceEvidenceBytes: deviceBytes,
+		TinfoilEndorsedCryptoHash:  doc.CPUEvidence.Endorsed.CryptoMaterialHash,
+		TinfoilEndorsedDeviceHash:  doc.CPUEvidence.Endorsed.DeviceEvidenceHash,
+		TinfoilChallengeReportData: doc.Challenge.ReportData,
 	}
-
-	// Parse GPU evidence for independent per-GPU SPDM verification.
-	if len(resp.GPU) > 0 {
-		var gpuEvs v3GPUEvidences
-		if err := json.Unmarshal(resp.GPU, &gpuEvs); err != nil {
-			return nil, nil, fmt.Errorf("parse GPU evidences: %w", err)
-		}
-		if len(gpuEvs.Evidences) > 0 {
-			// Validate all evidence entries share the same SPDM nonce.
-			nonce := gpuEvs.Evidences[0].Nonce
-			for i := 1; i < len(gpuEvs.Evidences); i++ {
-				if gpuEvs.Evidences[i].Nonce != nonce {
-					return nil, nil, fmt.Errorf("GPU evidence nonce mismatch: gpu[0]=%s, gpu[%d]=%s",
-						truncate(nonce, 16), i, truncate(gpuEvs.Evidences[i].Nonce, 16))
-				}
-			}
-			evidence := make([]attestation.GPUEvidence, len(gpuEvs.Evidences))
-			for i, e := range gpuEvs.Evidences {
-				evidence[i] = attestation.GPUEvidence{
-					Arch:        e.Arch,
-					Certificate: e.Certificate,
-					Evidence:    e.Evidence,
-				}
-			}
-			raw.GPUEvidence = evidence
-			raw.GPUNonce = nonce
-		}
+	if err := decodeCPUQuote(&doc, raw); err != nil {
+		return nil, err
 	}
-
-	// Dispatch CPU platform.
-	switch resp.CPU.Platform {
-	case PlatformTDX:
-		raw.TEEHardware = HardwareIntelTDX
-		raw.IntelQuote = hex.EncodeToString(cpuReportBytes)
-	case PlatformSEVSNP:
-		raw.TEEHardware = HardwareAMDSEV
-		raw.SEVReportBytes = cpuReportBytes
-	default:
-		return nil, nil, fmt.Errorf("tinfoil: unknown cpu.platform %q", resp.CPU.Platform)
-	}
-
-	return raw, &resp, nil
+	return raw, nil
 }
 
-// validateHexField checks that s is exactly 64 hex characters (32 bytes).
-func validateHexField(name, s string) error {
-	if len(s) != hexFieldLen {
-		return fmt.Errorf("tinfoil: report_data.%s must be %d hex chars, got %d", name, hexFieldLen, len(s))
+// rejectSupersededDocument reports an enclave that still serves the attestation
+// document teep removed. Both documents carry the same format URI, so without
+// this check the operator reads a list of unexpected and absent members and has
+// to work out what it means.
+func rejectSupersededDocument(unknown []string) error {
+	var found []string
+	for _, m := range supersededMembers {
+		if slices.Contains(unknown, m) {
+			found = append(found, m)
+		}
 	}
-	if _, err := hex.DecodeString(s); err != nil {
-		return fmt.Errorf("tinfoil: report_data.%s invalid hex: %w", name, err)
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tinfoil: enclave serves the superseded attestation document (members %s); "+
+		"it has not been migrated to the endorsed-section format that teep verifies",
+		strings.Join(found, ", "))
+}
+
+// rejectSchemaDrift fails on any unexpected or absent member. The caller owns
+// this policy: a document teep cannot fully account for is not a document it
+// can verify.
+func rejectSchemaDrift(unknown, missing []string) error {
+	if len(unknown) == 0 && len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tinfoil: v3 document schema mismatch: unexpected members %v, absent members %v",
+		unknown, missing)
+}
+
+// checkDocumentIdentity checks the format URIs and the fixed-length hex fields.
+//
+// The format URI no longer separates the two documents that Tinfoil serves, so
+// report_data_algorithm is what identifies the derivation teep implements.
+func checkDocumentIdentity(doc *v3Document) error {
+	if doc.Format != FormatURI {
+		return fmt.Errorf("tinfoil: unexpected document format %q, want %q", doc.Format, FormatURI)
+	}
+	if doc.Challenge.ReportDataAlgorithm != ReportDataV1Algorithm {
+		return fmt.Errorf("tinfoil: unsupported report_data_algorithm %q, want %q",
+			doc.Challenge.ReportDataAlgorithm, ReportDataV1Algorithm)
+	}
+	if err := checkLowerHex("challenge.nonce", doc.Challenge.Nonce, hexFieldLen); err != nil {
+		return err
+	}
+	if err := checkLowerHex("challenge.report_data", doc.Challenge.ReportData, reportDataLen); err != nil {
+		return err
+	}
+	if err := checkLowerHex("cpu_evidence.endorsed.crypto_material_hash",
+		doc.CPUEvidence.Endorsed.CryptoMaterialHash, hexFieldLen); err != nil {
+		return err
+	}
+	if err := checkLowerHex("cpu_evidence.endorsed.device_evidence_hash",
+		doc.CPUEvidence.Endorsed.DeviceEvidenceHash, hexFieldLen); err != nil {
+		return err
+	}
+	if doc.CPUEvidence.Format == "" || doc.CPUEvidence.ReportBase64 == "" {
+		return errors.New("tinfoil: cpu_evidence is incomplete")
 	}
 	return nil
+}
+
+// decodeEndorsedSections returns the exact bytes the enclave hashed.
+func decodeEndorsedSections(doc *v3Document) (cryptoBytes, deviceBytes []byte, err error) {
+	if doc.CryptoMaterial == "" {
+		return nil, nil, errors.New("tinfoil: crypto_material section is absent")
+	}
+	if doc.DeviceEvidence == "" {
+		return nil, nil, errors.New("tinfoil: device_evidence section is absent")
+	}
+	cryptoBytes, err = decodeCanonicalBase64("crypto_material", doc.CryptoMaterial)
+	if err != nil {
+		return nil, nil, err
+	}
+	deviceBytes, err = decodeCanonicalBase64("device_evidence", doc.DeviceEvidence)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cryptoBytes, deviceBytes, nil
+}
+
+// checkCollateral validates the structure of the collateral array. teep reads
+// no entry data, so this bounds the array and rejects a shape it cannot
+// account for.
+func checkCollateral(entries []v3Collateral) error {
+	if len(entries) > maxCollateralEntries {
+		return fmt.Errorf("tinfoil: collateral has %d entries, limit is %d",
+			len(entries), maxCollateralEntries)
+	}
+	seen := make(map[string]bool, len(entries))
+	for i, e := range entries {
+		if e.ID == "" || e.Format == "" {
+			return fmt.Errorf("tinfoil: collateral entry %d is incomplete", i)
+		}
+		if seen[e.ID] {
+			return fmt.Errorf("tinfoil: duplicate collateral entry id %q", e.ID)
+		}
+		seen[e.ID] = true
+		if e.Role != roleEndorsement && e.Role != roleReferenceValues {
+			return fmt.Errorf("tinfoil: collateral entry %q has unknown role %q", e.ID, e.Role)
+		}
+	}
+	return nil
+}
+
+// parseCryptoMaterial parses and validates the endorsed crypto_material section.
+func parseCryptoMaterial(sectionBytes []byte) (*v3CryptoMaterialSection, error) {
+	var section v3CryptoMaterialSection
+	unknown, missing, err := jsonstrict.UnmarshalWarn(sectionBytes, &section, "tinfoil crypto_material")
+	if err != nil {
+		return nil, fmt.Errorf("tinfoil: unmarshal crypto_material: %w", err)
+	}
+	if len(unknown) > 0 || len(missing) > 0 {
+		return nil, fmt.Errorf("tinfoil: crypto_material schema mismatch: unexpected %v, absent %v",
+			unknown, missing)
+	}
+	if section.Format != cryptoMaterialV1Format {
+		return nil, fmt.Errorf("tinfoil: unsupported crypto_material format %q, want %q",
+			section.Format, cryptoMaterialV1Format)
+	}
+	if len(section.Items) > maxSectionItems {
+		return nil, fmt.Errorf("tinfoil: crypto_material has %d items, limit is %d",
+			len(section.Items), maxSectionItems)
+	}
+	seen := make(map[string]bool, len(section.Items))
+	for _, item := range section.Items {
+		if item.ID == "" || item.Format == "" {
+			return nil, errors.New("tinfoil: crypto_material item is incomplete")
+		}
+		if seen[item.ID] {
+			return nil, fmt.Errorf("tinfoil: duplicate crypto_material item id %q", item.ID)
+		}
+		seen[item.ID] = true
+	}
+	return &section, nil
+}
+
+// endorsedKeys returns the TLS SPKI fingerprint and the HPKE public key.
+//
+// Both are required. Without the fingerprint teep cannot bind the TLS channel
+// to the enclave, and without the HPKE key it cannot encrypt to it.
+func endorsedKeys(section *v3CryptoMaterialSection) (tlsKeyFP, hpkeKey string, err error) {
+	tlsKeyFP, err = endorsedKey(section, cryptoMaterialIDTLS, keySPKIFPSHA256V1Format)
+	if err != nil {
+		return "", "", err
+	}
+	hpkeKey, err = endorsedKey(section, cryptoMaterialIDHPKE, keyX25519HPKEV1Format)
+	if err != nil {
+		return "", "", err
+	}
+	return tlsKeyFP, hpkeKey, nil
+}
+
+// endorsedKey returns the 32-byte hex value of one crypto_material item,
+// requiring the item to carry the format the caller expects.
+func endorsedKey(section *v3CryptoMaterialSection, id, wantFormat string) (string, error) {
+	for _, item := range section.Items {
+		if item.ID != id {
+			continue
+		}
+		if item.Format != wantFormat {
+			return "", fmt.Errorf("tinfoil: crypto_material item %q has format %q, want %q",
+				id, item.Format, wantFormat)
+		}
+		if err := checkLowerHex("crypto_material item "+id, item.Data, hexFieldLen); err != nil {
+			return "", err
+		}
+		return item.Data, nil
+	}
+	return "", fmt.Errorf("tinfoil: crypto_material has no %q item", id)
+}
+
+// checkDeviceEvidence parses the endorsed device_evidence section and rejects
+// any device evidence teep does not yet read.
+//
+// The section is hash-bound into REPORT_DATA either way, so an enclave with
+// devices is authenticated. teep must not report GPU evidence it has not
+// verified, so it fails closed until it reads the items.
+func checkDeviceEvidence(sectionBytes []byte) error {
+	var section v3DeviceEvidenceSection
+	unknown, missing, err := jsonstrict.UnmarshalWarn(sectionBytes, &section, "tinfoil device_evidence")
+	if err != nil {
+		return fmt.Errorf("tinfoil: unmarshal device_evidence: %w", err)
+	}
+	if len(unknown) > 0 || len(missing) > 0 {
+		return fmt.Errorf("tinfoil: device_evidence schema mismatch: unexpected %v, absent %v",
+			unknown, missing)
+	}
+	if section.Format != deviceEvidenceV1Format {
+		return fmt.Errorf("tinfoil: unsupported device_evidence format %q, want %q",
+			section.Format, deviceEvidenceV1Format)
+	}
+	if len(section.Items) > maxSectionItems {
+		return fmt.Errorf("tinfoil: device_evidence has %d items, limit is %d",
+			len(section.Items), maxSectionItems)
+	}
+	if len(section.Items) == 0 {
+		return nil
+	}
+	formats := make([]string, 0, len(section.Items))
+	for _, item := range section.Items {
+		formats = append(formats, item.Format)
+	}
+	slices.Sort(formats)
+	return fmt.Errorf("tinfoil: enclave reports %d device evidence items (formats %s) that teep does not read yet",
+		len(section.Items), strings.Join(slices.Compact(formats), ", "))
+}
+
+// decodeCPUQuote decodes the CPU quote and selects the TEE hardware from the
+// evidence format URI.
+func decodeCPUQuote(doc *v3Document, raw *attestation.RawAttestation) error {
+	reportBytes, err := decodeCanonicalBase64("cpu_evidence.report_base64", doc.CPUEvidence.ReportBase64)
+	if err != nil {
+		return err
+	}
+	if len(reportBytes) > maxCPUReportSize {
+		return fmt.Errorf("tinfoil: cpu quote is %d bytes, limit is %d", len(reportBytes), maxCPUReportSize)
+	}
+	switch doc.CPUEvidence.Format {
+	case tdxQuoteV1Format:
+		raw.TEEHardware = HardwareIntelTDX
+		raw.IntelQuote = hex.EncodeToString(reportBytes)
+	case sevSNPReportV1Format:
+		raw.TEEHardware = HardwareAMDSEV
+		raw.SEVReportBytes = reportBytes
+	default:
+		return fmt.Errorf("tinfoil: unknown cpu_evidence format %q", doc.CPUEvidence.Format)
+	}
+	return nil
+}
+
+// lowerHexRE matches a lowercase hex string. Uppercase is rejected so one byte
+// string has exactly one accepted spelling.
+var lowerHexRE = regexp.MustCompile(`^[0-9a-f]*$`)
+
+// checkLowerHex checks that a field is lowercase hex of an exact character
+// length. Callers keep the hex string, so the decoded bytes are discarded.
+func checkLowerHex(name, value string, wantLen int) error {
+	if len(value) != wantLen {
+		return fmt.Errorf("tinfoil: %s must be %d hex chars, got %d", name, wantLen, len(value))
+	}
+	if !lowerHexRE.MatchString(value) {
+		return fmt.Errorf("tinfoil: %s is not lowercase hex", name)
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return fmt.Errorf("tinfoil: %s is not hex: %w", name, err)
+	}
+	return nil
+}
+
+// decodeCanonicalBase64 decodes a standard-base64 field and rejects
+// non-canonical spellings.
+//
+// Strict rejects non-zero padding bits but still skips carriage returns and
+// newlines, so the round-trip comparison is what leaves exactly one accepted
+// spelling per byte string. An endorsed section is hashed by its bytes, so a
+// second spelling of the same section would be a second hash.
+func decodeCanonicalBase64(name, value string) ([]byte, error) {
+	b, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("tinfoil: decoding %s: %w", name, err)
+	}
+	if base64.StdEncoding.EncodeToString(b) != value {
+		return nil, fmt.Errorf("tinfoil: %s is not canonical base64", name)
+	}
+	return b, nil
 }
