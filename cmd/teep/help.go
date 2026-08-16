@@ -147,7 +147,7 @@ var factorRegistry = []factorInfo{
 			"This cryptographically binds the ECDH key exchange key to the " +
 			"attested enclave, preventing a man-in-the-middle from " +
 			"substituting the key while leaving the TDX quote intact. " +
-			"Without this binding, E2EE is security theater.",
+			"Without this binding, the client encrypts to the attacker.",
 	},
 	{
 		Name:    attestation.FactorIntelPCSCollateral,

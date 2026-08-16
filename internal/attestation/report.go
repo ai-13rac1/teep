@@ -221,8 +221,8 @@ func (r *VerificationReport) AllowedFailedFactors() []FactorResult {
 }
 
 // ReportDataBindingPassed returns true if the tee_reportdata_binding factor
-// passed. Without this, a MITM can substitute the enclave public key and
-// E2EE becomes security theater. E2EE must never be activated unless this
+// passed. Without this, a MITM can substitute the enclave public key, so the
+// client encrypts to the attacker. E2EE must never be activated unless this
 // returns true.
 func (r *VerificationReport) ReportDataBindingPassed() bool {
 	want := r.E2EEBindingFactor
