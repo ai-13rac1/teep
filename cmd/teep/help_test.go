@@ -2,20 +2,43 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
 )
 
+// Every allowlistable factor must be documented, in report order. The registry
+// may hold more: a factor kept out of KnownFactors so no allow_fail list can
+// reach it still blocks requests, so an operator must be able to look it up.
 func TestFactorRegistryMatchesKnownFactors(t *testing.T) {
-	if len(factorRegistry) != len(attestation.KnownFactors) {
-		t.Errorf("factor registry has %d entries, KnownFactors has %d", len(factorRegistry), len(attestation.KnownFactors))
-	}
-	for i, f := range factorRegistry {
-		if i < len(attestation.KnownFactors) && f.Name != attestation.KnownFactors[i] {
-			t.Errorf("factor[%d]: registry=%q, KnownFactors=%q", i, f.Name, attestation.KnownFactors[i])
+	documented := make(map[string]bool, len(factorRegistry))
+	var known []string
+	for _, f := range factorRegistry {
+		documented[f.Name] = true
+		if slices.Contains(attestation.KnownFactors, f.Name) {
+			known = append(known, f.Name)
 		}
+	}
+	for _, name := range attestation.KnownFactors {
+		if !documented[name] {
+			t.Errorf("KnownFactors has %q with no factorRegistry entry; teep help factors cannot explain it", name)
+		}
+	}
+	for i, name := range known {
+		if i < len(attestation.KnownFactors) && name != attestation.KnownFactors[i] {
+			t.Errorf("factor[%d]: registry=%q, KnownFactors=%q", i, name, attestation.KnownFactors[i])
+		}
+	}
+}
+
+// The factor that no allow_fail list can reach is the one an operator is most
+// likely to look up, because nothing in config explains it.
+func TestFactorRegistryDocumentsEvidenceVerified(t *testing.T) {
+	if _, ok := findFactorByName(attestation.FactorEvidenceVerified); !ok {
+		t.Errorf("teep help factors cannot explain %q, which blocks requests and cannot be allow_fail'd",
+			attestation.FactorEvidenceVerified)
 	}
 }
 

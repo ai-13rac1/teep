@@ -244,6 +244,12 @@ type Provider struct {
 	// skipping TLS binding. Tinfoil sets this; E2EE-only providers do not.
 	UsesTLSBinding bool
 
+	// E2EEKeyBoundByGateway declares that the gateway attestation, not the
+	// model endpoint's, binds the key clients encrypt to. The proxy gates
+	// E2EE on that factor instead of the core one.
+	// SEE: attestation.ReportInput.E2EEKeyBoundByGateway.
+	E2EEKeyBoundByGateway bool
+
 	// SupplyChainPolicy defines the allowed container image repos for this
 	// provider. Never nil on a constructed Provider: set a real policy, or
 	// attestation.NoSupplyChainPolicy() for a provider with no supply chain

@@ -117,8 +117,19 @@ func TestFetchAttestation_Success(t *testing.T) {
 	if raw.BackendFormat != attestation.FormatTinfoil {
 		t.Errorf("BackendFormat = %q, want %q", raw.BackendFormat, attestation.FormatTinfoil)
 	}
-	if raw.TEEHardware != HardwareAMDSEV {
-		t.Errorf("TEEHardware = %q, want %q", raw.TEEHardware, HardwareAMDSEV)
+	// The cloud attester reports the router as a gateway, so the quote must
+	// leave the core fields entirely.
+	if len(raw.GatewaySEVReportBytes) == 0 {
+		t.Error("GatewaySEVReportBytes is empty; the router quote was not moved to the gateway fields")
+	}
+	if len(raw.SEVReportBytes) != 0 {
+		t.Error("SEVReportBytes is set; the router quote must not sit in the core fields")
+	}
+	if raw.TEEHardware != "" {
+		t.Errorf("TEEHardware = %q; the model endpoint's platform is unknown", raw.TEEHardware)
+	}
+	if raw.GatewayNonceHex != raw.TinfoilNonce {
+		t.Error("GatewayNonceHex does not carry the nonce the quote binds")
 	}
 	if subtle.ConstantTimeCompare([]byte(raw.Nonce), []byte(nonce.Hex())) != 1 {
 		t.Error("nonce mismatch")
@@ -180,6 +191,36 @@ func TestFetchAttestation_SupersededDocument(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "superseded") {
 		t.Errorf("error = %v, want it to name the superseded document", err)
+	}
+}
+
+// A TDX router would need a gateway TDX path that teep does not have. Routing
+// it into GatewayIntelQuote would hand it to nearcloud's REPORTDATA verifier,
+// so the cloud attester rejects it instead.
+func TestFetchAttestation_RejectsTDXRouter(t *testing.T) {
+	fpHex, key, certDER := testKeyAndCert(t)
+	nonce := attestation.NewNonce()
+
+	b := newDocBuilder()
+	b.nonce = nonce
+	b.cpuFormat = tdxQuoteV1Format
+	fp, err := hex.DecodeString(fpHex)
+	if err != nil {
+		t.Fatalf("decode fingerprint: %v", err)
+	}
+	copy(b.tlsFP[:], fp)
+	body, _ := b.build(t)
+
+	ts := serveDocument(t, body, &tls.Certificate{Certificate: [][]byte{certDER}, PrivateKey: key}, nil)
+	attester := NewAttester(ts.URL, "test-key", true)
+	attester.SetClient(ts.Client())
+
+	_, err = attester.FetchAttestation(context.Background(), "model", nonce)
+	if err == nil {
+		t.Fatal("expected a TDX router to be rejected")
+	}
+	if !strings.Contains(err.Error(), "TDX") {
+		t.Errorf("error = %v, want it to name the TDX quote", err)
 	}
 }
 

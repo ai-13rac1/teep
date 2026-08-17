@@ -459,16 +459,13 @@ func decodeCPUQuote(doc *v3Document, raw *attestation.RawAttestation) error {
 var lowerHexRE = regexp.MustCompile(`^[0-9a-f]*$`)
 
 // checkLowerHex checks that a field is lowercase hex of an exact character
-// length. Callers keep the hex string, so the decoded bytes are discarded.
+// length. Callers keep the hex string, so it is never decoded here.
 func checkLowerHex(name, value string, wantLen int) error {
 	if len(value) != wantLen {
 		return fmt.Errorf("tinfoil: %s must be %d hex chars, got %d", name, wantLen, len(value))
 	}
 	if !lowerHexRE.MatchString(value) {
 		return fmt.Errorf("tinfoil: %s is not lowercase hex", name)
-	}
-	if _, err := hex.DecodeString(value); err != nil {
-		return fmt.Errorf("tinfoil: %s is not hex: %w", name, err)
 	}
 	return nil
 }

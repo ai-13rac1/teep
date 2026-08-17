@@ -60,17 +60,22 @@ const (
 
 // Factor name constants.
 const (
-	FactorNonceMatch           = "nonce_match"
-	FactorTEEQuotePresent      = "tee_quote_present"
-	FactorTEEQuoteStructure    = "tee_quote_structure"
-	FactorTEECertChain         = "tee_cert_chain"
-	FactorTEEQuoteSignature    = "tee_quote_signature"
-	FactorTEEDebugDisabled     = "tee_debug_disabled"
-	FactorTEEMeasurement       = "tee_measurement"
-	FactorTEEHardwareConfig    = "tee_hardware_config"
-	FactorTEEBootConfig        = "tee_boot_config"
-	FactorSigningKeyPresent    = "signing_key_present"
-	FactorResponseSchema       = "response_schema"
+	FactorNonceMatch        = "nonce_match"
+	FactorTEEQuotePresent   = "tee_quote_present"
+	FactorTEEQuoteStructure = "tee_quote_structure"
+	FactorTEECertChain      = "tee_cert_chain"
+	FactorTEEQuoteSignature = "tee_quote_signature"
+	FactorTEEDebugDisabled  = "tee_debug_disabled"
+	FactorTEEMeasurement    = "tee_measurement"
+	FactorTEEHardwareConfig = "tee_hardware_config"
+	FactorTEEBootConfig     = "tee_boot_config"
+	FactorSigningKeyPresent = "signing_key_present"
+	FactorResponseSchema    = "response_schema"
+
+	// FactorEvidenceVerified fails when teep fetched attestation evidence and
+	// never ran a verifier over it. It is not in KnownFactors, so it cannot be
+	// placed in an allow_fail list. SEE: unverifiedEvidence.
+	FactorEvidenceVerified     = "evidence_verified"
 	FactorTEEReportData        = "tee_reportdata_binding"
 	FactorIntelPCSCollateral   = "intel_pcs_collateral"
 	FactorTEETCBCurrent        = "tee_tcb_current"
@@ -108,6 +113,8 @@ const (
 	FactorGWComposeBinding     = "gateway_compose_binding"
 	FactorGWCPUIDRegistry      = "gateway_cpu_id_registry"
 	FactorGWEventLogIntegrity  = "gateway_event_log_integrity"
+	FactorGWTCBCurrent         = "gateway_tee_tcb_current"
+	FactorGWTCBNotRevoked      = "gateway_tee_tcb_not_revoked"
 )
 
 // FactorResult records the outcome of one verification factor.
@@ -145,6 +152,16 @@ type VerificationReport struct {
 	// fingerprint. Internal to the proxy; not part of the public report
 	// display or API response.
 	TLSKeyFP string `json:"-"`
+
+	// E2EEBindingFactor names the factor whose REPORTDATA binding covers the
+	// key clients encrypt to. Empty means FactorTEEReportData.
+	//
+	// DANGER: a gateway provider binds that key in the gateway REPORTDATA, so
+	// the core factor fails and E2EE must not read it. Selecting the tier by
+	// "core evidence absent" instead would let a gateway binding authorise a
+	// model endpoint's key for a provider that attests both.
+	// SEE: ReportInput.E2EEKeyBoundByGateway.
+	E2EEBindingFactor string `json:"-"`
 }
 
 // Blocked returns true if any enforced factor has failed. When Blocked is true,
@@ -208,8 +225,12 @@ func (r *VerificationReport) AllowedFailedFactors() []FactorResult {
 // E2EE becomes security theater. E2EE must never be activated unless this
 // returns true.
 func (r *VerificationReport) ReportDataBindingPassed() bool {
+	want := r.E2EEBindingFactor
+	if want == "" {
+		want = FactorTEEReportData
+	}
 	for _, f := range r.Factors {
-		if f.Name == FactorTEEReportData {
+		if f.Name == want {
 			return f.Status == Pass
 		}
 	}
@@ -304,7 +325,7 @@ var DefaultAllowFail = []string{
 	FactorMeasuredWeights,
 	FactorComponentRecognition,
 	FactorCPUIDRegistry,
-	// Gateway factors (nearcloud only).
+	// Gateway factors.
 	FactorGWQuotePresent,
 	FactorGWQuoteStructure,
 	FactorGWHardwareConfig,
@@ -324,7 +345,7 @@ var NearcloudDefaultAllowFail = []string{
 	FactorComponentRecognition,
 	FactorCPUIDRegistry,
 	FactorResponseSchema,
-	// Gateway factors (nearcloud only).
+	// Gateway factors.
 	FactorGWHardwareConfig,
 	FactorGWBootConfig,
 	FactorGWReportData,
@@ -416,6 +437,15 @@ var ChutesDefaultAllowFail = []string{
 
 // TinfoilCloudDefaultAllowFail is the tinfoil_v3_cloud default allow_fail
 // list.
+//
+// DANGER: this list accepts a provider that proves nothing about the endpoint
+// that runs the model. Every core TEE factor below fails because Tinfoil's
+// router exposes no backend evidence, and each one is listed here so the
+// provider stays usable. The router itself is verified, in Tier 4. Removing an
+// entry blocks tinfoil_v3_cloud entirely; that is the honest default and it is
+// held back only because the alternative is no service.
+// SEE: docs/attestation_gaps/tinfoil_cloud_integrity.md
+//
 // Tinfoil runs its own TEE stack (TDX or SEV-SNP) with Sigstore supply chain
 // verification instead of compose-based binding.
 //
@@ -424,7 +454,8 @@ var ChutesDefaultAllowFail = []string{
 // Proof of Cloud. intel_pcs_collateral is allowed because SEV-SNP uses AMD
 // KDS instead of Intel PCS. SEV-SNP certificate-chain and quote-signature
 // checks require hitting kdsintf.amd.com, which is often down or flaky for
-// tinfoil_v3_cloud. NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
+// tinfoil_v3_cloud; the gateway pair carries that fetch now that the router
+// reports there, so both pairs are listed. NVIDIA GPU and CPU-GPU/NVSwitch binding factors are
 // reported but currently allowed to fail by default, due to the hashing
 // issue documented in docs/attestation_gaps/tinfoil_nvidia_json.md
 // response_schema is enforced: the parser reads the document Tinfoil serves,
@@ -435,14 +466,34 @@ var ChutesDefaultAllowFail = []string{
 var TinfoilCloudDefaultAllowFail = []string{
 	FactorCPUIDRegistry,
 	FactorIntelPCSCollateral,
-	FactorTEECertChain,
-	FactorTEEQuoteSignature,
 	FactorNvidiaPayloadPresent,
 	FactorNvidiaSignature,
 	FactorNvidiaClaims,
 	FactorCPUGPUChain,
 	FactorNVSwitchBinding,
 	FactorComponentRecognition,
+
+	// DANGER: these two run the AMD KDS fetch for the router. The core pair
+	// below covered it while the router reported in the core tier; moving the
+	// router to the gateway tier made the fetch enforced and a KDS outage
+	// blocking. SEE: TestTinfoilCloud_KDSOutageDoesNotBlock.
+	FactorGWCertChain,
+	FactorGWQuoteSignature,
+
+	// No backend evidence. The router is the only attested principal, so every
+	// factor that describes the endpoint running the model fails.
+	FactorTEEQuotePresent,
+	FactorTEEQuoteStructure,
+	FactorTEECertChain,
+	FactorTEEQuoteSignature,
+	FactorTEEDebugDisabled,
+	FactorTEEMeasurement,
+	FactorTEEHardwareConfig,
+	FactorTEEBootConfig,
+	FactorTEEReportData,
+	FactorTEETCBCurrent,
+	FactorTEETCBNotRevoked,
+	FactorMeasuredWeights,
 }
 
 // TinfoilDirectDefaultAllowFail is the tinfoil_v3_direct default allow_fail
@@ -470,12 +521,12 @@ var KnownFactors = []string{
 	FactorMeasuredWeights, FactorBuildTransparency, FactorComponentRecognition,
 	FactorProviderSigner, FactorComponentSignature, FactorCPUIDRegistry,
 	FactorComposeBinding, FactorSigstoreVerify, FactorSigstoreCode, FactorEventLogIntegrity,
-	// Gateway factors (nearcloud only).
+	// Gateway factors.
 	FactorGWNonceMatch, FactorGWQuotePresent, FactorGWQuoteStructure,
 	FactorGWCertChain, FactorGWQuoteSignature, FactorGWDebugDisabled,
 	FactorGWMeasurement, FactorGWHardwareConfig, FactorGWBootConfig,
 	FactorGWReportData, FactorGWComposeBinding, FactorGWCPUIDRegistry,
-	FactorGWEventLogIntegrity,
+	FactorGWEventLogIntegrity, FactorGWTCBCurrent, FactorGWTCBNotRevoked,
 }
 
 // OnlineFactors lists factors whose evaluation requires network access to
@@ -504,6 +555,16 @@ var OnlineFactors = []string{
 	FactorSigstoreVerify,
 	FactorSigstoreCode,
 	FactorGWCPUIDRegistry,
+
+	// The gateway measurement is compared against Sigstore reference values,
+	// and the gateway certificate chain and signature need the AMD KDS, so all
+	// three are unavailable offline. FactorSigstoreCode above covers the same
+	// fetch for the core tier.
+	FactorGWMeasurement,
+	FactorGWCertChain,
+	FactorGWQuoteSignature,
+	FactorGWTCBCurrent,
+	FactorGWTCBNotRevoked,
 }
 
 // WithOfflineAllowFail returns a new allow_fail list that unions the given
@@ -678,8 +739,11 @@ type ReportInput struct {
 	Sigstore   []SigstoreResult
 	Rekor      []RekorProvenance
 
-	// Gateway fields — only populated for nearcloud provider.
+	// Gateway fields — populated by providers that attest an API gateway in
+	// front of the model endpoint. The gateway is a separate principal: its
+	// evidence proves what the intermediary is, never what ran the model.
 	GatewayTDX      *TDXVerifyResult
+	GatewaySEV      *SEVVerifyResult
 	GatewayPoC      *PoCResult
 	GatewayNonceHex string // echoed request_nonce from gateway response
 	GatewayNonce    Nonce  // nonce we sent to the gateway
@@ -710,6 +774,13 @@ type ReportInput struct {
 	// channel binding. When true, evalTLSKeyBinding fails closed if
 	// TLSFingerprint is empty (instead of skipping for E2EE providers).
 	ProviderUsesTLSBinding bool
+
+	// E2EEKeyBoundByGateway declares that the gateway REPORTDATA covers the
+	// key clients encrypt to, so ReportDataBindingPassed reads the gateway
+	// factor. Set it only for a provider whose E2EE key comes from the
+	// gateway document: tinfoil_v3_cloud takes its HPKE key from the router's
+	// hash-bound crypto_material.
+	E2EEKeyBoundByGateway bool
 }
 
 // ---------------------------------------------------------------------------
@@ -741,7 +812,7 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		inapplicable = DefaultInapplicableFactors()
 	}
 
-	evaluators := buildEvaluators(in.GatewayTDX != nil)
+	evaluators := buildEvaluators(in.GatewayTDX != nil || in.GatewaySEV != nil)
 	var factors []FactorResult
 	for _, eval := range evaluators {
 		for _, f := range eval(in) {
@@ -756,6 +827,18 @@ func BuildReport(in *ReportInput) *VerificationReport {
 			factors[i].Status = NotApplicable
 			factors[i].Detail = reason
 		}
+	}
+
+	// Appended after both the allow_fail pass and the inapplicable override, so
+	// neither can reach it. FactorEvidenceVerified is also absent from
+	// KnownFactors, which makes config validation reject an attempt to list it.
+	if unverified := unverifiedEvidence(in); len(unverified) > 0 {
+		slog.Error("attestation evidence supplied without a verification result",
+			"provider", in.Provider, "evidence", unverified)
+		factors = append(factors, FactorResult{
+			Tier: TierCore, Name: FactorEvidenceVerified, Status: Fail, Enforced: true,
+			Detail: "evidence fetched but never verified: " + strings.Join(unverified, ", "),
+		})
 	}
 
 	// Promote Skip → Fail for enforced factors.
@@ -808,11 +891,62 @@ func BuildReport(in *ReportInput) *VerificationReport {
 		NotApplicableCount: notApplicable,
 		Metadata:           buildMetadata(in),
 		TLSKeyFP:           tlsKeyFP,
+		E2EEBindingFactor:  e2eeBindingFactor(in),
 	}
 }
 
-// buildEvaluators returns the ordered list of factor evaluators. Gateway
-// evaluators are appended only when includeGateway is true.
+// e2eeBindingFactor names the factor that authorises E2EE for this provider.
+func e2eeBindingFactor(in *ReportInput) string {
+	if in.E2EEKeyBoundByGateway {
+		return FactorGWReportData
+	}
+	return FactorTEEReportData
+}
+
+// unverifiedEvidence names raw attestation evidence the caller supplied
+// without a matching verification result.
+//
+// DANGER: a missing gateway result removes the whole gateway tier. The tier is
+// built only when a result is present, so a verifier that is never run leaves
+// no factor at all — the report is shorter and every remaining factor passes.
+// Core evidence is not checked here: evalTEEParseDependent already fails closed
+// on a nil core result. A provider that excused every core factor could still
+// hide an unverified core quote behind allow_fail — no provider does today, and
+// covering it means teaching every test that pairs a raw quote with no verifier.
+// TODO: cover core evidence once the report tests supply realistic pairs.
+//
+// teep verify and teep serve assemble reports through separate code paths, and
+// this catches a verifier wired into one and not the other.
+// SEE: verifyGatewaySEV and verifyGatewayTDX in internal/proxy and internal/verify.
+func unverifiedEvidence(in *ReportInput) []string {
+	if in.Raw == nil {
+		return nil
+	}
+	var missing []string
+	if in.Raw.GatewayIntelQuote != "" && in.GatewayTDX == nil {
+		missing = append(missing, "gateway_intel_quote")
+	}
+	if len(in.Raw.GatewaySEVReportBytes) > 0 && in.GatewaySEV == nil {
+		missing = append(missing, "gateway_sev_report")
+	}
+	return missing
+}
+
+// SupplyChainSEVResult returns the SEV result that describes the enclave the
+// attestation document came from.
+//
+// A gateway provider carries its report in the gateway fields, so the core
+// result is nil and the signed reference values describe the gateway. Both
+// report paths must choose the same way: teep verify and teep serve assemble
+// reports through separate code, and a difference here makes the two disagree
+// about the same document.
+func SupplyChainSEVResult(core, gateway *SEVVerifyResult) *SEVVerifyResult {
+	if core != nil {
+		return core
+	}
+	return gateway
+}
+
 func buildEvaluators(includeGateway bool) []evaluatorFunc {
 	evals := []evaluatorFunc{
 		// Tier 1: Core Attestation
@@ -854,15 +988,17 @@ func buildEvaluators(includeGateway bool) []evaluatorFunc {
 	if includeGateway {
 		evals = append(evals,
 			evalGatewayNonceMatch,
-			evalGatewayTDXQuotePresent,
-			evalGatewayTDXParseDependent,
-			evalGatewayTDXMeasurement,
-			evalGatewayTDXHardwareConfig,
-			evalGatewayTDXBootConfig,
-			evalGatewayTDXReportDataBinding,
+			evalGatewayQuotePresent,
+			evalGatewayParseDependent,
+			evalGatewayMeasurement,
+			evalGatewayHardwareConfig,
+			evalGatewayBootConfig,
+			evalGatewayReportDataBinding,
 			evalGatewayComposeBinding,
 			evalGatewayCPUIDRegistry,
 			evalGatewayEventLogIntegrity,
+			evalGatewayTCBCurrent,
+			evalGatewayTCBNotRevoked,
 		)
 	}
 	return evals
@@ -1008,9 +1144,17 @@ func tdxQuoteStructure(in *ReportInput) FactorResult {
 	return FactorResult{Tier: TierCore, Name: FactorTEEQuoteStructure, Status: Pass, Detail: detail}
 }
 
+// hasCoreQuote reports whether the provider supplied evidence about the
+// endpoint that runs the model. A gateway-only provider supplies none, so a
+// core factor that would otherwise be satisfied by gateway-derived supply
+// chain results must fail instead: the result describes the intermediary.
+func hasCoreQuote(in *ReportInput) bool {
+	return in.TDX != nil || in.SEV != nil
+}
+
 func evalTEEMeasurement(in *ReportInput) []FactorResult {
 	// Tinfoil supply chain: code measurements verified via Sigstore predicate.
-	if in.TinfoilSC != nil {
+	if in.TinfoilSC != nil && hasCoreQuote(in) {
 		if in.TinfoilSC.CodeMatch {
 			return factor(TierCore, FactorTEEMeasurement, Pass, in.TinfoilSC.CodeMatchDetail)
 		}
@@ -1328,7 +1472,7 @@ func evalSEVTCBNotRevoked(in *ReportInput) []FactorResult {
 			fmt.Sprintf("SEV-SNP TCB validation failed: %v", in.SEV.TCBErr))
 	}
 	return factor(TierBinding, FactorTEETCBNotRevoked, Pass,
-		"SEV-SNP TCB validated against minimum thresholds")
+		"SEV-SNP TCB at or above minimum thresholds; AMD CRL not checked")
 }
 func evalNvidiaPayloadPresent(in *ReportInput) []FactorResult {
 	if in.Raw.NvidiaPayload != "" {
@@ -1624,7 +1768,7 @@ func evalMeasuredModelWeights(in *ReportInput) []FactorResult {
 	// Tinfoil: dm-verity root hash is part of the Sigstore-verified code
 	// measurement. If Sigstore + code measurements pass, model weights are
 	// transitively authenticated via the dm-verity chain.
-	if in.TinfoilSC != nil && in.TinfoilSC.SigstoreVerified && in.TinfoilSC.CodeMatch {
+	if in.TinfoilSC != nil && in.TinfoilSC.SigstoreVerified && in.TinfoilSC.CodeMatch && hasCoreQuote(in) {
 		return factor(TierSupplyChain, FactorMeasuredWeights, Pass,
 			"model weights transitively authenticated via Sigstore + dm-verity code measurements")
 	}
@@ -2490,7 +2634,8 @@ func evalEventLogIntegrity(in *ReportInput) []FactorResult {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 4: Gateway Attestation evaluators (nearcloud only)
+// Tier 4: Gateway Attestation evaluators — TDX gateways (nearcloud), and the
+// platform dispatch that routes a SEV-SNP gateway to the evaluators below
 // ---------------------------------------------------------------------------
 
 func evalGatewayNonceMatch(in *ReportInput) []FactorResult {
@@ -2503,7 +2648,11 @@ func evalGatewayNonceMatch(in *ReportInput) []FactorResult {
 		return factor(TierGateway, FactorGWNonceMatch, Fail, fmt.Sprintf("gateway nonce mismatch: got %q, want %q", truncHex(in.GatewayNonceHex), truncHex(in.GatewayNonce.Hex())))
 	}
 }
-func evalGatewayTDXQuotePresent(in *ReportInput) []FactorResult {
+func evalGatewayQuotePresent(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return factor(TierGateway, FactorGWQuotePresent, Pass,
+			fmt.Sprintf("gateway SEV-SNP report present (%d bytes)", len(in.Raw.GatewaySEVReportBytes)))
+	}
 	if in.GatewayTDX == nil {
 		return factor(TierGateway, FactorGWQuotePresent, Fail, "gateway TDX quote not available")
 	}
@@ -2512,7 +2661,10 @@ func evalGatewayTDXQuotePresent(in *ReportInput) []FactorResult {
 }
 
 // Precondition: in.GatewayTDX != nil (guaranteed by buildEvaluators).
-func evalGatewayTDXParseDependent(in *ReportInput) []FactorResult {
+func evalGatewayParseDependent(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return evalGatewaySEVParseDependent(in)
+	}
 	if in.GatewayTDX.ParseErr != nil {
 		return []FactorResult{
 			{Tier: TierGateway, Name: FactorGWQuoteStructure, Status: Fail, Detail: fmt.Sprintf("gateway TDX quote parse failed: %v", in.GatewayTDX.ParseErr)},
@@ -2564,9 +2716,12 @@ func gatewayTDXQuoteStructure(in *ReportInput) FactorResult {
 	return FactorResult{Tier: TierGateway, Name: FactorGWQuoteStructure, Status: Pass, Detail: detail}
 }
 
-// evalGatewayTDXMeasurement checks gateway MRSEAM and MRTD against the
+// evalGatewayMeasurement checks gateway MRSEAM and MRTD against the
 // gateway measurement policy allowlists. Skips when no policy is configured.
-func evalGatewayTDXMeasurement(in *ReportInput) []FactorResult {
+func evalGatewayMeasurement(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return evalGatewaySEVMeasurement(in)
+	}
 	if in.GatewayTDX == nil || in.GatewayTDX.ParseErr != nil {
 		return factor(TierGateway, FactorGWMeasurement, Skip, "no parseable gateway TDX quote; cannot check MRSEAM/MRTD")
 	}
@@ -2599,9 +2754,12 @@ func evalGatewayTDXMeasurement(in *ReportInput) []FactorResult {
 	return factor(TierGateway, FactorGWMeasurement, Pass, matched+" policy matched")
 }
 
-// evalGatewayTDXHardwareConfig checks gateway RTMR0 against the gateway
+// evalGatewayHardwareConfig checks gateway RTMR0 against the gateway
 // measurement policy allowlists. Skips when no RTMR0 policy is configured.
-func evalGatewayTDXHardwareConfig(in *ReportInput) []FactorResult {
+func evalGatewayHardwareConfig(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return evalGatewaySEVHardwareConfig(in)
+	}
 	if in.GatewayTDX == nil || in.GatewayTDX.ParseErr != nil {
 		return factor(TierGateway, FactorGWHardwareConfig, Skip, "no parseable gateway TDX quote; cannot check RTMR0")
 	}
@@ -2617,9 +2775,20 @@ func evalGatewayTDXHardwareConfig(in *ReportInput) []FactorResult {
 	return factor(TierGateway, FactorGWHardwareConfig, Pass, "gateway RTMR0 policy matched")
 }
 
-// evalGatewayTDXBootConfig checks gateway RTMR1 and RTMR2 against the
+// evalGatewayBootConfig checks gateway RTMR1 and RTMR2 against the
 // gateway measurement policy allowlists. Skips when neither is configured.
-func evalGatewayTDXBootConfig(in *ReportInput) []FactorResult {
+func evalGatewayBootConfig(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		// The launch measurement covers boot config only once the report
+		// parses. Passing ahead of that check asserts coverage by a field that
+		// was never read.
+		if in.GatewaySEV.ParseErr != nil {
+			return factor(TierGateway, FactorGWBootConfig, Fail,
+				"no parseable gateway report; boot config not checked")
+		}
+		return factor(TierGateway, FactorGWBootConfig, Pass,
+			"gateway SEV-SNP boot config covered by the launch measurement")
+	}
 	if in.GatewayTDX == nil || in.GatewayTDX.ParseErr != nil {
 		return factor(TierGateway, FactorGWBootConfig, Skip, "no parseable gateway TDX quote; cannot check RTMR1/RTMR2")
 	}
@@ -2639,7 +2808,10 @@ func evalGatewayTDXBootConfig(in *ReportInput) []FactorResult {
 	}
 	return factor(TierGateway, FactorGWBootConfig, Pass, "gateway RTMR1/RTMR2 policy matched")
 }
-func evalGatewayTDXReportDataBinding(in *ReportInput) []FactorResult {
+func evalGatewayReportDataBinding(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return evalGatewaySEVReportDataBinding(in)
+	}
 	switch {
 	case in.GatewayTDX.ParseErr != nil:
 		return factor(TierGateway, FactorGWReportData, Fail,
@@ -2656,6 +2828,10 @@ func evalGatewayTDXReportDataBinding(in *ReportInput) []FactorResult {
 	}
 }
 func evalGatewayComposeBinding(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return factor(TierGateway, FactorGWComposeBinding, NotApplicable,
+			"compose binding is a dstack TDX concept; the gateway is SEV-SNP")
+	}
 	switch {
 	case in.GatewayCompose == nil || !in.GatewayCompose.Checked:
 		return factor(TierGateway, FactorGWComposeBinding, Skip, "no gateway app_compose in attestation response")
@@ -2666,6 +2842,10 @@ func evalGatewayComposeBinding(in *ReportInput) []FactorResult {
 	}
 }
 func evalGatewayCPUIDRegistry(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return factor(TierGateway, FactorGWCPUIDRegistry, NotApplicable,
+			"Proof of Cloud queries an Intel TDX quote; the gateway is SEV-SNP")
+	}
 	if in.GatewayPoC != nil {
 		switch {
 		case in.GatewayPoC.Registered:
@@ -2688,6 +2868,10 @@ func evalGatewayCPUIDRegistry(in *ReportInput) []FactorResult {
 		"gateway CPU ID registry check not available")
 }
 func evalGatewayEventLogIntegrity(in *ReportInput) []FactorResult {
+	if in.GatewaySEV != nil {
+		return factor(TierGateway, FactorGWEventLogIntegrity, NotApplicable,
+			"SEV-SNP exposes no TDX event log")
+	}
 	if len(in.GatewayEventLog) == 0 {
 		return factor(TierGateway, FactorGWEventLogIntegrity, Skip, "no gateway event log entries in attestation response")
 	}
@@ -3203,4 +3387,163 @@ func buildMetadata(in *ReportInput) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// evalGatewayTCBCurrent and evalGatewayTCBNotRevoked check the gateway's
+// firmware and microcode patch levels.
+//
+// DANGER: without these, moving a report from the core fields to the gateway
+// fields drops TCB enforcement entirely — SEVVerifyResult.TCBErr would be
+// computed and never read, and a gateway running below the minimum patch level
+// would produce an all-pass tier. The gateway holds request plaintext.
+func evalGatewayTCBCurrent(in *ReportInput) []FactorResult {
+	if in.GatewaySEV == nil || in.GatewaySEV.ParseErr != nil {
+		if in.GatewayTDX != nil {
+			return factor(TierGateway, FactorGWTCBCurrent, NotApplicable,
+				"TCB minimums for a TDX gateway are checked by the Intel PCS collateral")
+		}
+		return factor(TierGateway, FactorGWTCBCurrent, Fail, "no parseable gateway report; TCB not extracted")
+	}
+	if in.GatewaySEV.TCBErr != nil {
+		return factor(TierGateway, FactorGWTCBCurrent, Fail,
+			fmt.Sprintf("gateway SEV-SNP TCB below minimum: %v", in.GatewaySEV.TCBErr))
+	}
+	tcb := in.GatewaySEV.CurrentTCB
+	return factor(TierGateway, FactorGWTCBCurrent, Pass,
+		fmt.Sprintf("gateway SEV-SNP TCB meets minimums (bl=0x%02x tee=0x%02x snp=0x%02x ucode=0x%02x)",
+			tcb.BlSpl, tcb.TeeSpl, tcb.SnpSpl, tcb.UcodeSpl))
+}
+
+func evalGatewayTCBNotRevoked(in *ReportInput) []FactorResult {
+	if in.GatewaySEV == nil || in.GatewaySEV.ParseErr != nil {
+		if in.GatewayTDX != nil {
+			return factor(TierGateway, FactorGWTCBNotRevoked, NotApplicable,
+				"TDX revocation is checked by the Intel PCS collateral")
+		}
+		return factor(TierGateway, FactorGWTCBNotRevoked, Fail, "no parseable gateway report")
+	}
+	if in.GatewaySEV.TCBErr != nil {
+		return factor(TierGateway, FactorGWTCBNotRevoked, Fail,
+			fmt.Sprintf("gateway SEV-SNP TCB validation failed: %v", in.GatewaySEV.TCBErr))
+	}
+	return factor(TierGateway, FactorGWTCBNotRevoked, Pass,
+		"gateway SEV-SNP TCB at or above minimum thresholds; AMD CRL not checked")
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4: Gateway Attestation evaluators for a SEV-SNP gateway
+//
+// A SEV-SNP gateway proves what the intermediary is. It says nothing about the
+// endpoint that ran the model, so the core tier stays empty and fails closed
+// unless the provider also supplies backend evidence.
+// ---------------------------------------------------------------------------
+
+func evalGatewaySEVParseDependent(in *ReportInput) []FactorResult {
+	if in.GatewaySEV.ParseErr != nil {
+		return []FactorResult{
+			{Tier: TierGateway, Name: FactorGWQuoteStructure, Status: Fail, Detail: fmt.Sprintf("gateway SEV-SNP report parse failed: %v", in.GatewaySEV.ParseErr)},
+			{Tier: TierGateway, Name: FactorGWCertChain, Status: Skip, Detail: "gateway report parse failed; cert chain not verified"},
+			{Tier: TierGateway, Name: FactorGWQuoteSignature, Status: Skip, Detail: "gateway report parse failed; signature not verified"},
+			{Tier: TierGateway, Name: FactorGWDebugDisabled, Status: Skip, Detail: "gateway report parse failed; debug flag not checked"},
+		}
+	}
+
+	results := []FactorResult{{
+		Tier: TierGateway, Name: FactorGWQuoteStructure, Status: Pass,
+		Detail: fmt.Sprintf("valid gateway SEV-SNP report, measurement: %s...",
+			prefixHex(hex.EncodeToString(in.GatewaySEV.Measurement))),
+	}}
+
+	switch {
+	case in.GatewaySEV.CertChainErr != nil:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWCertChain, Status: Fail,
+			Detail: fmt.Sprintf("gateway VCEK cert chain verification failed: %v", in.GatewaySEV.CertChainErr)})
+	case in.GatewaySEV.OnlineVerified:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWCertChain, Status: Pass,
+			Detail: "gateway certificate chain valid (AMD root CA)"})
+	default:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWCertChain, Status: Skip,
+			Detail: "offline mode; gateway VCEK cert chain not verified (requires AMD KDS)"})
+	}
+
+	switch {
+	case in.GatewaySEV.SignatureErr != nil:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWQuoteSignature, Status: Fail,
+			Detail: fmt.Sprintf("gateway report signature invalid: %v", in.GatewaySEV.SignatureErr)})
+	case in.GatewaySEV.OnlineVerified:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWQuoteSignature, Status: Pass,
+			Detail: "gateway SEV-SNP report signature verified"})
+	default:
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWQuoteSignature, Status: Skip,
+			Detail: "offline mode; gateway report signature not verified (requires AMD KDS)"})
+	}
+
+	if in.GatewaySEV.DebugEnabled {
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWDebugDisabled, Status: Fail,
+			Detail: "gateway guest policy debug bit is set — debug guest"})
+	} else {
+		results = append(results, FactorResult{Tier: TierGateway, Name: FactorGWDebugDisabled, Status: Pass,
+			Detail: "gateway debug bit is 0 (production guest)"})
+	}
+	return results
+}
+
+// evalGatewaySEVMeasurement reports the gateway launch measurement against the
+// signed reference values. For Tinfoil the comparison is the Sigstore code
+// predicate, which describes the router image and no backend image.
+func evalGatewaySEVMeasurement(in *ReportInput) []FactorResult {
+	if in.GatewaySEV == nil || in.GatewaySEV.ParseErr != nil {
+		return factor(TierGateway, FactorGWMeasurement, Fail, "no parseable gateway report; measurement not checked")
+	}
+	// An operator allowlist is a stricter pin than the signed reference, so a
+	// matching Sigstore predicate does not excuse it.
+	// SYNC: evalSEVMeasurement — MRTDAllow holds the SEV launch measurement on
+	// both tiers.
+	if in.GatewayPolicy.HasMRTDPolicy() {
+		measHex := hex.EncodeToString(in.GatewaySEV.Measurement)
+		if !containsAllowlist(in.GatewayPolicy.MRTDAllow, measHex) {
+			return factor(TierGateway, FactorGWMeasurement, Fail,
+				fmt.Sprintf("gateway SEV-SNP launch measurement not in policy allowlist: %s...", prefixHex(measHex)))
+		}
+	}
+	if in.TinfoilSC == nil {
+		if in.GatewayPolicy.HasMRTDPolicy() {
+			return factor(TierGateway, FactorGWMeasurement, Pass, "gateway SEV-SNP launch measurement policy matched")
+		}
+		return factor(TierGateway, FactorGWMeasurement, Fail, "no signed reference values for the gateway measurement")
+	}
+	if in.TinfoilSC.CodeMatch {
+		return factor(TierGateway, FactorGWMeasurement, Pass, in.TinfoilSC.CodeMatchDetail)
+	}
+	if in.TinfoilSC.CodeMatchErr != nil {
+		return factor(TierGateway, FactorGWMeasurement, Fail,
+			fmt.Sprintf("gateway measurement mismatch: %v", in.TinfoilSC.CodeMatchErr))
+	}
+	return factor(TierGateway, FactorGWMeasurement, Fail, "gateway measurement not compared")
+}
+
+func evalGatewaySEVHardwareConfig(in *ReportInput) []FactorResult {
+	if in.GatewaySEV == nil || in.GatewaySEV.ParseErr != nil {
+		return factor(TierGateway, FactorGWHardwareConfig, Fail, "no parseable gateway report; guest policy not checked")
+	}
+	if in.GatewaySEV.PolicyErr != nil {
+		return factor(TierGateway, FactorGWHardwareConfig, Fail,
+			fmt.Sprintf("gateway SEV-SNP guest policy validation failed: %v", in.GatewaySEV.PolicyErr))
+	}
+	return factor(TierGateway, FactorGWHardwareConfig, Pass,
+		fmt.Sprintf("gateway SEV-SNP guest policy valid (policy=0x%016x)", in.GatewaySEV.GuestPolicy))
+}
+
+func evalGatewaySEVReportDataBinding(in *ReportInput) []FactorResult {
+	if in.GatewaySEV == nil || in.GatewaySEV.ParseErr != nil {
+		return factor(TierGateway, FactorGWReportData, Fail, "no parseable gateway report; REPORTDATA binding not verified")
+	}
+	if in.GatewaySEV.ReportDataBindingErr != nil {
+		return factor(TierGateway, FactorGWReportData, Fail,
+			fmt.Sprintf("gateway REPORTDATA binding failed: %v", in.GatewaySEV.ReportDataBindingErr))
+	}
+	if in.GatewaySEV.ReportDataBindingDetail != "" {
+		return factor(TierGateway, FactorGWReportData, Pass, in.GatewaySEV.ReportDataBindingDetail)
+	}
+	return factor(TierGateway, FactorGWReportData, Fail, "no REPORTDATA verifier configured for the gateway")
 }

@@ -171,10 +171,11 @@ type RawAttestation struct {
 	ChuteID    string `json:"-"` // resolved chute UUID (may differ from model name)
 
 	// Tinfoil-specific fields — populated by the tinfoil provider's Attester.
-	SEVReportBytes  []byte `json:"-"` // raw binary SEV-SNP report (tinfoil sev-snp platform)
-	GPURawJSON      []byte `json:"-"` // raw JSON bytes of the "gpu" field (tinfoil V3)
-	NVSwitchRawJSON []byte `json:"-"` // raw JSON bytes of the "nvswitch" field (tinfoil V3)
-	GPUNonce        string `json:"-"` // SPDM requester nonce for GPU evidence (tinfoil V3)
+	SEVReportBytes []byte `json:"-"` // raw binary SEV-SNP report (tinfoil sev-snp platform)
+	// TODO: GPUNonce has had no writer since the v3 rewrite, so
+	// GPUVerificationNonce always falls through to the top-level nonce. The
+	// deferred work that reads device_evidence items will populate it again.
+	GPUNonce string `json:"-"` // SPDM requester nonce for GPU evidence
 
 	// Tinfoil v3 crypto material (each 64 hex chars = 32 bytes).
 	TinfoilTLSKeyFP string `json:"-"` // crypto_material item "tls"
@@ -202,6 +203,7 @@ type RawAttestation struct {
 	// Gateway fields — populated by providers with TEE-attested API gateways.
 	// Empty for providers without a gateway (e.g. Venice, NEAR AI direct).
 	GatewayIntelQuote     string          `json:"-"`
+	GatewaySEVReportBytes []byte          `json:"-"` // raw SEV-SNP report from an attested gateway
 	GatewayNonceHex       string          `json:"-"`
 	GatewayAppCompose     string          `json:"-"`
 	GatewayEventLog       []EventLogEntry `json:"-"`

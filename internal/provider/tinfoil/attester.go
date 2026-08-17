@@ -38,9 +38,47 @@ func NewAttester(baseURL, apiKey string, offline ...bool) *Attester {
 // SetClient replaces the HTTP client used for attestation fetches.
 func (a *Attester) SetClient(c *http.Client) { a.client = c }
 
-// FetchAttestation fetches a V3 attestation document from the static base URL.
+// FetchAttestation fetches a v3 attestation document from the static base URL.
+//
+// The document comes from the Tinfoil router, which is not the endpoint that
+// runs the model: the router terminates the client TLS session, decrypts the
+// request, chooses a backend, and opens a second connection to it. Its quote
+// is therefore gateway evidence, and teep reports it as such.
 func (a *Attester) FetchAttestation(ctx context.Context, _ string, nonce attestation.Nonce) (*attestation.RawAttestation, error) {
-	return fetchAndVerifyAttestation(ctx, a.client, a.baseURL, a.apiKey, nonce)
+	raw, err := fetchAndVerifyAttestation(ctx, a.client, a.baseURL, a.apiKey, nonce)
+	if err != nil {
+		return nil, err
+	}
+	if err := asGatewayEvidence(raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// asGatewayEvidence moves the router's quote out of the core attestation
+// fields and into the gateway fields.
+//
+// The core fields mean "the TEE that will process this request". Leaving the
+// router there reports an intermediary as though it were the model endpoint,
+// which overstates what the document proves. Emptying them makes the core
+// factors fail closed, which is the true state: the router carries no evidence
+// about the backend.
+func asGatewayEvidence(raw *attestation.RawAttestation) error {
+	if raw.IntelQuote != "" {
+		return errors.New("tinfoil: the router served a TDX quote; teep reports the router as a SEV-SNP gateway and has no TDX gateway path for it")
+	}
+	raw.GatewaySEVReportBytes = raw.SEVReportBytes
+	raw.SEVReportBytes = nil
+
+	// TEEHardware names the hardware of the endpoint the report describes. The
+	// report header prints it, so leaving it set states the model endpoint's
+	// platform is known while the core tier says no evidence exists.
+	raw.TEEHardware = ""
+
+	// The router echoes the client nonce in the document it signs, so the
+	// gateway nonce factor compares the same value the quote binds.
+	raw.GatewayNonceHex = raw.TinfoilNonce
+	return nil
 }
 
 // DirectAttester fetches attestation from per-model inference enclaves,

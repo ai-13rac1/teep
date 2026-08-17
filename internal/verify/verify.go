@@ -99,6 +99,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 
 	tdxResult := verifyTDX(ctx, raw, nonce, opts.ProviderName, verifier)
 	sevResult := verifySEV(ctx, raw, nonce, opts.ProviderName, sevVerifier)
+	gatewaySEVResult := verifyGatewaySEV(ctx, raw, nonce, opts.ProviderName, sevVerifier)
 	nv := opts.NVIDIAVerifier
 	if nv == nil {
 		nv = attestation.DefaultNVIDIAVerifier()
@@ -152,7 +153,8 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	mergedPolicy := config.MergedMeasurementPolicy(opts.ProviderName, cfg, mDefaults)
 	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(opts.ProviderName, cfg, gwDefaults)
 
-	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, client)
+	scSEV := attestation.SupplyChainSEVResult(sevResult, gatewaySEVResult)
+	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, scSEV, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, client)
 
 	report = attestation.BuildReport(&attestation.ReportInput{
 		Provider:               opts.ProviderName,
@@ -175,6 +177,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		Sigstore:               sigstoreResults,
 		Rekor:                  rekorResults,
 		GatewayTDX:             gatewayTDX,
+		GatewaySEV:             gatewaySEVResult,
 		GatewayPoC:             gatewayPoCResult,
 		GatewayNonceHex:        raw.GatewayNonceHex,
 		GatewayNonce:           nonce,
@@ -184,6 +187,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		E2EETest:               e2eeResult,
 		Inapplicable:           inapplicableFactors(opts.ProviderName),
 		ProviderUsesTLSBinding: providerUsesTLSBinding(opts.ProviderName),
+		E2EEKeyBoundByGateway:  providerE2EEKeyBoundByGateway(opts.ProviderName),
 	})
 
 	return report, nil

@@ -175,19 +175,22 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 	logReportScore(t, report)
 	assertNoEnforcedFailures(t, report)
 
-	// Tinfoil fixture is SEV-SNP with AMD KDS responses captured.
-	// verify.Run uses online SEV verifier; replay client serves KDS certs.
+	// The cloud fixture attests the Tinfoil router, which is a gateway and not
+	// the endpoint that runs the model, so the SEV-SNP evidence is asserted on
+	// the gateway factors. The core factors describe a backend that Tinfoil
+	// exposes no evidence about, and they fail by default.
+	// SEE: docs/attestation_gaps/tinfoil_cloud_integrity.md
 	assertMustPass(t, report, []string{
 		"nonce_match",
-		"tee_quote_present",
-		"tee_quote_structure",
-		"tee_cert_chain",
-		"tee_quote_signature",
-		"tee_debug_disabled",
-		"tee_reportdata_binding",
-		"tee_hardware_config",
-		"tee_tcb_current",
-		"tee_tcb_not_revoked",
+		"gateway_nonce_match",
+		"gateway_tee_quote_present",
+		"gateway_tee_quote_structure",
+		"gateway_tee_cert_chain",
+		"gateway_tee_quote_signature",
+		"gateway_tee_debug_disabled",
+		"gateway_tee_reportdata_binding",
+		"gateway_tee_hardware_config",
+		"gateway_tee_measurement",
 		"signing_key_present",
 		"e2ee_capable",
 		"tls_key_binding",

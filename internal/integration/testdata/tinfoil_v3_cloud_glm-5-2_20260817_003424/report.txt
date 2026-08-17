@@ -1,5 +1,5 @@
-Attestation Report: tinfoil_v3_cloud / llama3-3-70b
-═══════════════════════════════════════════════════
+Attestation Report: tinfoil_v3_cloud / glm-5-2
+══════════════════════════════════════════════
 
   Nonce source:  client
 
@@ -27,7 +27,7 @@ Tier 2: Binding & Crypto
   — nvidia_nonce_client_bound         Tinfoil binds GPU nonce freshness via REPORTDATA hash chain, not direct SPDM nonce
   — nvidia_nras_verified              NRAS is an EAT-JWT cloud service; Tinfoil uses direct SPDM verification
   ✓ e2ee_capable                      X25519 HPKE public key valid (32 bytes); EHBP E2EE key exchange possible  [ENFORCED]
-  ✓ e2ee_usable                       EHBP X25519: 11 chunks decrypted  [ENFORCED]
+  ✓ e2ee_usable                       EHBP X25519: 70 chunks decrypted  [ENFORCED]
 
 Tier 3: Supply Chain & Channel Integrity
   ✓ tls_key_binding                   TLS certificate SPKI bound to attestation (198c3340b8b007ef...)  [ENFORCED]

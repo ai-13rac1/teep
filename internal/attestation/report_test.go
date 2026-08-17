@@ -1970,6 +1970,27 @@ func TestReportDataBindingPassed(t *testing.T) {
 			t.Error("expected false when factor absent")
 		}
 	})
+
+	// A gateway provider binds the E2EE key in the gateway REPORTDATA, so the
+	// core factor never passes and reading it keeps E2EE off forever.
+	gatewayOnly := []FactorResult{
+		{Name: FactorTEEReportData, Status: Fail},
+		{Name: FactorGWReportData, Status: Pass},
+	}
+	t.Run("gateway declared", func(t *testing.T) {
+		r := &VerificationReport{Factors: gatewayOnly, E2EEBindingFactor: FactorGWReportData}
+		if !r.ReportDataBindingPassed() {
+			t.Error("gateway binding passed but the gate is closed; the provider would serve nothing")
+		}
+	})
+	// Undeclared, the gateway factor must not authorise E2EE: a provider that
+	// attests both would accept a gateway binding for the model endpoint's key.
+	t.Run("gateway undeclared", func(t *testing.T) {
+		r := &VerificationReport{Factors: gatewayOnly}
+		if r.ReportDataBindingPassed() {
+			t.Error("a gateway binding authorised E2EE for a provider that did not declare it")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -2599,8 +2620,8 @@ func TestBuildReportGatewayFactorCount(t *testing.T) {
 	// gateway_tee_debug_disabled, gateway_tee_measurement, gateway_tee_hardware_config,
 	// gateway_tee_boot_config, gateway_tee_reportdata_binding,
 	// gateway_compose_binding, gateway_cpu_id_registry, gateway_event_log_integrity
-	if len(report.Factors) != 48 {
-		t.Errorf("factor count with gateway: got %d, want 48", len(report.Factors))
+	if len(report.Factors) != 50 {
+		t.Errorf("factor count with gateway: got %d, want 50", len(report.Factors))
 		for _, f := range report.Factors {
 			t.Logf("  [%s] %s: %s", f.Status, f.Name, f.Detail)
 		}
@@ -3440,12 +3461,12 @@ func TestCheckComponentRepoPolicy_AllPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXMeasurement
+// evalGatewayMeasurement
 // ---------------------------------------------------------------------------
 
 func TestEvalGatewayTDXMeasurement_NilGatewayTDX(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3457,7 +3478,7 @@ func TestEvalGatewayTDXMeasurement_NoPolicy(t *testing.T) {
 		GatewayTDX: &TDXVerifyResult{},
 		// No GatewayPolicy configured → both HasMRTDPolicy and HasMRSeamPolicy are false
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3471,7 +3492,7 @@ func TestEvalGatewayTDXMeasurement_MRTDFail(t *testing.T) {
 			MRTDAllow: map[string]struct{}{"ccdd": {}},
 		},
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3487,7 +3508,7 @@ func TestEvalGatewayTDXMeasurement_MRTDPass(t *testing.T) {
 			MRTDAllow: map[string]struct{}{mrtdHex: {}},
 		},
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3501,7 +3522,7 @@ func TestEvalGatewayTDXMeasurement_MRSeamFail(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{"ffff": {}},
 		},
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3518,7 +3539,7 @@ func TestEvalGatewayTDXMeasurement_BothMatch(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3533,7 +3554,7 @@ func TestEvalGatewayTDXMeasurement_MRSeamOnlyPass(t *testing.T) {
 			MRSeamAllow: map[string]struct{}{hex.EncodeToString(mrseam): {}},
 		},
 	}
-	results := evalGatewayTDXMeasurement(in)
+	results := evalGatewayMeasurement(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3543,12 +3564,12 @@ func TestEvalGatewayTDXMeasurement_MRSeamOnlyPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXHardwareConfig
+// evalGatewayHardwareConfig
 // ---------------------------------------------------------------------------
 
 func TestEvalGatewayTDXHardwareConfig_NilGatewayTDX(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
-	results := evalGatewayTDXHardwareConfig(in)
+	results := evalGatewayHardwareConfig(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3556,7 +3577,7 @@ func TestEvalGatewayTDXHardwareConfig_NilGatewayTDX(t *testing.T) {
 
 func TestEvalGatewayTDXHardwareConfig_NoRTMR0Policy(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: &TDXVerifyResult{}}
-	results := evalGatewayTDXHardwareConfig(in)
+	results := evalGatewayHardwareConfig(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3570,7 +3591,7 @@ func TestEvalGatewayTDXHardwareConfig_RTMR0Fail(t *testing.T) {
 			RTMRAllow: [4]map[string]struct{}{{("wronghex"): {}}},
 		},
 	}
-	results := evalGatewayTDXHardwareConfig(in)
+	results := evalGatewayHardwareConfig(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3586,19 +3607,19 @@ func TestEvalGatewayTDXHardwareConfig_RTMR0Pass(t *testing.T) {
 			RTMRAllow: [4]map[string]struct{}{{rtmr0Hex: {}}},
 		},
 	}
-	results := evalGatewayTDXHardwareConfig(in)
+	results := evalGatewayHardwareConfig(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXBootConfig
+// evalGatewayBootConfig
 // ---------------------------------------------------------------------------
 
 func TestEvalGatewayTDXBootConfig_NilGatewayTDX(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: nil}
-	results := evalGatewayTDXBootConfig(in)
+	results := evalGatewayBootConfig(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3606,7 +3627,7 @@ func TestEvalGatewayTDXBootConfig_NilGatewayTDX(t *testing.T) {
 
 func TestEvalGatewayTDXBootConfig_NoPolicy(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}, GatewayTDX: &TDXVerifyResult{}}
-	results := evalGatewayTDXBootConfig(in)
+	results := evalGatewayBootConfig(in)
 	if results[0].Status != Skip {
 		t.Errorf("status = %v, want Skip", results[0].Status)
 	}
@@ -3623,7 +3644,7 @@ func TestEvalGatewayTDXBootConfig_RTMR1Fail(t *testing.T) {
 			},
 		},
 	}
-	results := evalGatewayTDXBootConfig(in)
+	results := evalGatewayBootConfig(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3644,7 +3665,7 @@ func TestEvalGatewayTDXBootConfig_Pass(t *testing.T) {
 			},
 		},
 	}
-	results := evalGatewayTDXBootConfig(in)
+	results := evalGatewayBootConfig(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3664,14 +3685,14 @@ func TestEvalGatewayTDXBootConfig_PassRTMR2Only(t *testing.T) {
 			},
 		},
 	}
-	results := evalGatewayTDXBootConfig(in)
+	results := evalGatewayBootConfig(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// evalGatewayTDXReportDataBinding
+// evalGatewayReportDataBinding
 // ---------------------------------------------------------------------------
 
 func TestEvalGatewayTDXReportDataBinding_ParseErr(t *testing.T) {
@@ -3679,7 +3700,7 @@ func TestEvalGatewayTDXReportDataBinding_ParseErr(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{ParseErr: errors.New("bad quote")},
 	}
-	results := evalGatewayTDXReportDataBinding(in)
+	results := evalGatewayReportDataBinding(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3690,7 +3711,7 @@ func TestEvalGatewayTDXReportDataBinding_BindingErr(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{ReportDataBindingErr: errors.New("nonce mismatch")},
 	}
-	results := evalGatewayTDXReportDataBinding(in)
+	results := evalGatewayReportDataBinding(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3701,7 +3722,7 @@ func TestEvalGatewayTDXReportDataBinding_Pass(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{ReportDataBindingDetail: "binding verified"},
 	}
-	results := evalGatewayTDXReportDataBinding(in)
+	results := evalGatewayReportDataBinding(in)
 	if results[0].Status != Pass {
 		t.Errorf("status = %v, want Pass", results[0].Status)
 	}
@@ -3712,7 +3733,7 @@ func TestEvalGatewayTDXReportDataBinding_NoDetail(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{}, // no ParseErr, no BindingErr, no Detail
 	}
-	results := evalGatewayTDXReportDataBinding(in)
+	results := evalGatewayReportDataBinding(in)
 	if results[0].Status != Fail {
 		t.Errorf("status = %v, want Fail", results[0].Status)
 	}
@@ -3854,12 +3875,12 @@ func TestEvalGatewayEventLogIntegrity_AllMatch(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// evalGatewayTDXQuotePresent
+// evalGatewayQuotePresent
 // --------------------------------------------------------------------------
 
 func TestEvalGatewayTDXQuotePresent_Nil(t *testing.T) {
 	in := &ReportInput{Raw: &RawAttestation{}}
-	assertSingleFactor(t, evalGatewayTDXQuotePresent(in), Fail)
+	assertSingleFactor(t, evalGatewayQuotePresent(in), Fail)
 }
 
 func TestEvalGatewayTDXQuotePresent_Pass(t *testing.T) {
@@ -3867,11 +3888,11 @@ func TestEvalGatewayTDXQuotePresent_Pass(t *testing.T) {
 		Raw:        &RawAttestation{GatewayIntelQuote: "deadbeef"},
 		GatewayTDX: &TDXVerifyResult{},
 	}
-	assertSingleFactor(t, evalGatewayTDXQuotePresent(in), Pass)
+	assertSingleFactor(t, evalGatewayQuotePresent(in), Pass)
 }
 
 // --------------------------------------------------------------------------
-// evalGatewayTDXParseDependent
+// evalGatewayParseDependent
 // --------------------------------------------------------------------------
 
 func TestEvalGatewayTDXParseDependent_ParseErr(t *testing.T) {
@@ -3879,7 +3900,7 @@ func TestEvalGatewayTDXParseDependent_ParseErr(t *testing.T) {
 		Raw:        &RawAttestation{},
 		GatewayTDX: &TDXVerifyResult{ParseErr: errors.New("bad quote")},
 	}
-	results := evalGatewayTDXParseDependent(in)
+	results := evalGatewayParseDependent(in)
 	if len(results) != 4 {
 		t.Fatalf("expected 4 results, got %d", len(results))
 	}
@@ -3902,7 +3923,7 @@ func TestEvalGatewayTDXParseDependent_Errors(t *testing.T) {
 			DebugEnabled: true,
 		},
 	}
-	results := evalGatewayTDXParseDependent(in)
+	results := evalGatewayParseDependent(in)
 	if len(results) != 4 {
 		t.Fatalf("expected 4 results, got %d", len(results))
 	}
@@ -4534,12 +4555,34 @@ func TestEvalCPUGPUChain_Tinfoil(t *testing.T) {
 	})
 }
 
+// assertNotPass fails the test if any returned factor passed.
+func assertNotPass(t *testing.T, results []FactorResult) {
+	t.Helper()
+	if len(results) == 0 {
+		t.Fatal("no factor returned")
+	}
+	for _, f := range results {
+		if f.Status == Pass {
+			t.Errorf("factor %s passed without core evidence: %s", f.Name, f.Detail)
+		}
+	}
+}
+
+// withCoreQuote adds a parsed core report. A provider that attests the endpoint
+// running the model always has one, and the core factors that describe the
+// model require it: without it the same supply chain result describes only a
+// gateway. SEE: hasCoreQuote.
+func withCoreQuote(in *ReportInput) *ReportInput {
+	in.SEV = &SEVVerifyResult{Measurement: make([]byte, 48)}
+	return in
+}
+
 func TestEvalMeasuredModelWeights_Tinfoil(t *testing.T) {
 	t.Run("pass_sigstore_and_code", func(t *testing.T) {
-		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+		in := withCoreQuote(buildTinfoilInput(&TinfoilSupplyChainResult{
 			SigstoreVerified: true,
 			CodeMatch:        true,
-		})
+		}))
 		f := assertSingleFactor(t, evalMeasuredModelWeights(in), Pass)
 		if !strings.Contains(f.Detail, "dm-verity") {
 			t.Errorf("detail %q should mention dm-verity", f.Detail)
@@ -4564,10 +4607,10 @@ func TestEvalMeasuredModelWeights_Tinfoil(t *testing.T) {
 
 func TestEvalTEEMeasurement_Tinfoil(t *testing.T) {
 	t.Run("code_match_pass", func(t *testing.T) {
-		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+		in := withCoreQuote(buildTinfoilInput(&TinfoilSupplyChainResult{
 			CodeMatch:       true,
 			CodeMatchDetail: "TDX code measurements match",
-		})
+		}))
 		f := assertSingleFactor(t, evalTEEMeasurement(in), Pass)
 		if !strings.Contains(f.Detail, "TDX code measurements match") {
 			t.Errorf("detail %q should mention code match", f.Detail)
@@ -4575,13 +4618,34 @@ func TestEvalTEEMeasurement_Tinfoil(t *testing.T) {
 	})
 
 	t.Run("code_match_error", func(t *testing.T) {
-		in := buildTinfoilInput(&TinfoilSupplyChainResult{
+		in := withCoreQuote(buildTinfoilInput(&TinfoilSupplyChainResult{
 			CodeMatchErr: errors.New("RTMR2 mismatch"),
-		})
+		}))
 		f := assertSingleFactor(t, evalTEEMeasurement(in), Fail)
 		if !strings.Contains(f.Detail, "RTMR2 mismatch") {
 			t.Errorf("detail %q should mention RTMR2 mismatch", f.Detail)
 		}
+	})
+}
+
+// A gateway-only provider supplies supply chain results that describe the
+// intermediary. Core factors assert something about the endpoint that ran the
+// model, so they must fail rather than borrow the gateway's evidence.
+func TestCoreFactorsFailWithoutCoreQuote(t *testing.T) {
+	sc := &TinfoilSupplyChainResult{
+		SigstoreVerified: true,
+		CodeMatch:        true,
+		CodeMatchDetail:  "code measurements match",
+	}
+
+	// The property under test is that neither factor passes. A skipped factor
+	// becomes a failure when it is enforced, so Skip is an acceptable outcome
+	// here and Pass is not.
+	t.Run("tee_measurement", func(t *testing.T) {
+		assertNotPass(t, evalTEEMeasurement(buildTinfoilInput(sc)))
+	})
+	t.Run("measured_model_weights", func(t *testing.T) {
+		assertNotPass(t, evalMeasuredModelWeights(buildTinfoilInput(sc)))
 	})
 }
 
@@ -4640,4 +4704,177 @@ func TestEvalTEEBootConfig_Tinfoil(t *testing.T) {
 			t.Errorf("detail %q should mention SEV-SNP", f.Detail)
 		}
 	})
+}
+
+// Gateway evidence with no verification result must fail closed and must not be
+// exceptable. teep verify and teep serve build reports through separate paths,
+// so a verifier wired into one and not the other would otherwise produce a
+// shorter report in which every remaining factor passes.
+func TestBuildReport_GatewayEvidenceNeverVerified(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.GatewaySEVReportBytes = []byte("router-quote-bytes")
+
+	// Listing the factor in allow_fail must not help: it is appended after the
+	// allow_fail pass and is absent from KnownFactors, so config validation
+	// rejects the attempt in the first place.
+	report := BuildReport(&ReportInput{
+		Provider:  "tinfoil_v3_cloud",
+		Model:     "test-model",
+		Raw:       raw,
+		Nonce:     nonce,
+		AllowFail: append(append([]string{}, DefaultAllowFail...), FactorEvidenceVerified),
+	})
+
+	var found *FactorResult
+	for i := range report.Factors {
+		if report.Factors[i].Name == FactorEvidenceVerified {
+			found = &report.Factors[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no evidence_verified factor; unverified gateway evidence went unreported")
+	}
+	if found.Status != Fail {
+		t.Errorf("status = %v, want Fail", found.Status)
+	}
+	if !found.Enforced {
+		t.Error("factor is not enforced; allow_fail must not reach it")
+	}
+	if !strings.Contains(found.Detail, "gateway_sev_report") {
+		t.Errorf("detail %q should name the unverified evidence", found.Detail)
+	}
+	if !report.Blocked() {
+		t.Error("report is not blocked; traffic would proceed on an unverified quote")
+	}
+}
+
+// The same input with a verification result present must not raise it.
+func TestBuildReport_GatewayEvidenceVerified(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.GatewaySEVReportBytes = []byte("router-quote-bytes")
+
+	report := BuildReport(&ReportInput{
+		Provider:   "tinfoil_v3_cloud",
+		Model:      "test-model",
+		Raw:        raw,
+		Nonce:      nonce,
+		AllowFail:  DefaultAllowFail,
+		GatewaySEV: &SEVVerifyResult{Measurement: make([]byte, 48)},
+	})
+
+	for _, f := range report.Factors {
+		if f.Name == FactorEvidenceVerified {
+			t.Fatalf("evidence_verified raised despite a verification result: %s", f.Detail)
+		}
+	}
+}
+
+// A gateway report that did not parse holds no launch measurement, so the
+// boot config factor must not report coverage by it. The sibling gateway SEV
+// evaluators all fail closed here.
+func TestBuildReport_GatewaySEVBootConfigUnparseable(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.GatewaySEVReportBytes = []byte("truncated")
+
+	report := BuildReport(&ReportInput{
+		Provider:   "tinfoil_v3_cloud",
+		Model:      "test-model",
+		Raw:        raw,
+		Nonce:      nonce,
+		AllowFail:  DefaultAllowFail,
+		GatewaySEV: &SEVVerifyResult{ParseErr: errors.New("short report")},
+	})
+
+	f := findFactor(t, report, FactorGWBootConfig)
+	if f.Status != Fail {
+		t.Errorf("%s = %v (%q), want Fail on an unparseable gateway report",
+			FactorGWBootConfig, f.Status, f.Detail)
+	}
+}
+
+// An operator gateway allowlist pins the router image. A Sigstore predicate
+// that matches a different image must not satisfy the pin.
+func TestBuildReport_GatewaySEVMeasurementHonoursPolicy(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.GatewaySEVReportBytes = []byte("router-quote-bytes")
+
+	report := BuildReport(&ReportInput{
+		Provider:   "tinfoil_v3_cloud",
+		Model:      "test-model",
+		Raw:        raw,
+		Nonce:      nonce,
+		AllowFail:  DefaultAllowFail,
+		GatewaySEV: &SEVVerifyResult{Measurement: make([]byte, 48)},
+		GatewayPolicy: MeasurementPolicy{
+			MRTDAllow: map[string]struct{}{strings.Repeat("ab", 48): {}},
+		},
+		TinfoilSC: &TinfoilSupplyChainResult{CodeMatch: true, CodeMatchDetail: "signed reference matched"},
+	})
+
+	f := findFactor(t, report, FactorGWMeasurement)
+	if f.Status != Fail {
+		t.Errorf("%s = %v (%q), want Fail: measurement is outside the operator allowlist",
+			FactorGWMeasurement, f.Status, f.Detail)
+	}
+}
+
+// AMD KDS is often unreachable. Verifying the router's certificate chain and
+// report signature needs it, and on a gateway provider those are the gateway
+// factors, not the core ones — the core pair fails for want of backend
+// evidence and never reaches the network. Enforcing the gateway pair makes a
+// KDS outage block the provider outright.
+func TestTinfoilCloud_KDSOutageDoesNotBlock(t *testing.T) {
+	nonce := NewNonce()
+	raw := buildMinimalRaw(nonce, validSigningKey(t))
+	raw.IntelQuote = ""
+	raw.GatewaySEVReportBytes = []byte("router-quote-bytes")
+	raw.GatewayNonceHex = nonce.Hex()
+
+	kdsDown := errors.New("Get \"https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain\": dial tcp: i/o timeout")
+	report := BuildReport(&ReportInput{
+		Provider:  "tinfoil_v3_cloud",
+		Model:     "test-model",
+		Raw:       raw,
+		Nonce:     nonce,
+		AllowFail: TinfoilCloudDefaultAllowFail,
+		GatewaySEV: &SEVVerifyResult{
+			Measurement:  make([]byte, 48),
+			CertChainErr: kdsDown,
+			SignatureErr: kdsDown,
+		},
+		Inapplicable: DefaultInapplicableFactors(),
+	})
+
+	for _, name := range []string{FactorGWCertChain, FactorGWQuoteSignature} {
+		f := findFactor(t, report, name)
+		if f.Status != Fail {
+			t.Fatalf("precondition: %s = %v, want Fail with KDS unreachable", name, f.Status)
+		}
+		if f.Enforced {
+			t.Errorf("%s is enforced; an AMD KDS outage blocks tinfoil_v3_cloud", name)
+		}
+	}
+	// The synthetic input leaves other factors failing for want of a Tinfoil
+	// supply chain result, so this asserts the KDS pair specifically rather
+	// than report.Blocked().
+	for _, f := range report.Factors {
+		if f.Status != Fail || !f.Enforced {
+			continue
+		}
+		if f.Name == FactorGWCertChain || f.Name == FactorGWQuoteSignature {
+			t.Errorf("%s blocks the provider on a KDS outage: %s", f.Name, f.Detail)
+		}
+	}
+}
+
+// FactorEvidenceVerified must stay out of KnownFactors so an operator cannot
+// place it in an allow_fail list: config validation rejects unknown names.
+func TestEvidenceVerifiedIsNotAllowlistable(t *testing.T) {
+	if slices.Contains(KnownFactors, FactorEvidenceVerified) {
+		t.Error("FactorEvidenceVerified is in KnownFactors; allow_fail would accept it")
+	}
 }

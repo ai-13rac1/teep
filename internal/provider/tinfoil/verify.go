@@ -88,7 +88,7 @@ func checkEndorsedSection(name string, sectionBytes []byte, endorsedHex string) 
 	computedHex := hex.EncodeToString(computed[:])
 	if subtle.ConstantTimeCompare([]byte(computedHex), []byte(endorsedHex)) != 1 {
 		return nil, fmt.Errorf("%s hash %s does not match cpu_evidence.endorsed %s",
-			computedHex, name, endorsedHex)
+			name, computedHex, endorsedHex)
 	}
 	return computed[:], nil
 }

@@ -75,6 +75,29 @@ func verifySEV(ctx context.Context, raw *attestation.RawAttestation, nonce attes
 	return sevResult
 }
 
+// verifyGatewaySEV verifies a SEV-SNP gateway report for providers that attest
+// an intermediary rather than the model endpoint (tinfoil_v3_cloud). The
+// REPORTDATA verifier is the provider's own, because the gateway report binds
+// the provider's own crypto material.
+func verifyGatewaySEV(ctx context.Context, raw *attestation.RawAttestation, nonce attestation.Nonce, providerName string, verifier attestation.SEVVerifier) *attestation.SEVVerifyResult {
+	if len(raw.GatewaySEVReportBytes) == 0 {
+		return nil
+	}
+	slog.Debug("gateway SEV-SNP verification starting", "report_len", len(raw.GatewaySEVReportBytes))
+	result := verifier(ctx, raw.GatewaySEVReportBytes)
+	if rdVerifier := newReportDataVerifier(providerName); rdVerifier != nil && result.ParseErr == nil {
+		detail, err := rdVerifier.VerifyReportData(result.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.Debug("no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			result.ReportDataBindingErr = err
+			result.ReportDataBindingDetail = detail
+		}
+	}
+	slog.Debug("gateway SEV-SNP verification complete")
+	return result
+}
+
 // verifyNVIDIA runs NVIDIA EAT and NRAS verification.
 // Returns nil for either if not applicable.
 func verifyNVIDIA(
