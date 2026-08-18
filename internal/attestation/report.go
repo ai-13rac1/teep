@@ -449,7 +449,11 @@ var ChutesDefaultAllowFail = []string{
 // Tinfoil runs its own TEE stack (TDX or SEV-SNP) with Sigstore supply chain
 // verification instead of compose-based binding.
 //
-// REPORTDATA binding and Sigstore code verification are enforced.
+// The gateway REPORTDATA binding and Sigstore code verification are enforced.
+// The core tee_reportdata_binding is allow_fail below, because the router
+// carries no backend evidence; gateway_tee_reportdata_binding is what proves
+// the HPKE key clients encrypt to, and what authorises E2EE for this provider.
+// SEE: ReportInput.E2EEKeyBoundByGateway.
 // cpu_id_registry is allowed to fail because Tinfoil does not participate in
 // Proof of Cloud. intel_pcs_collateral is allowed because SEV-SNP uses AMD
 // KDS instead of Intel PCS. SEV-SNP certificate-chain and quote-signature
@@ -460,9 +464,6 @@ var ChutesDefaultAllowFail = []string{
 // issue documented in docs/attestation_gaps/tinfoil_nvidia_json.md
 // response_schema is enforced: the parser reads the document Tinfoil serves,
 // and a member teep cannot account for is a document it cannot verify.
-// tee_boot_config is enforced: hardware platform measurements (MRTD + RTMR0)
-// must match the Sigstore-attested tinfoilsh/hardware-measurements registry
-// for TDX enclaves.
 var TinfoilCloudDefaultAllowFail = []string{
 	FactorCPUIDRegistry,
 	FactorIntelPCSCollateral,
@@ -499,7 +500,11 @@ var TinfoilCloudDefaultAllowFail = []string{
 // TinfoilDirectDefaultAllowFail is the tinfoil_v3_direct default allow_fail
 // list. Direct inference attests per-model enclaves; NVSwitch binding is
 // reported but currently allowed to fail by default. response_schema is
-// enforced, for the reason given on the cloud list.
+// enforced, for the reason given on the cloud list. tee_boot_config is
+// enforced here and not on the cloud list: a per-model enclave exposes the
+// hardware platform measurements (MRTD + RTMR0 for TDX) that must match the
+// Sigstore-attested tinfoilsh/hardware-measurements registry, and the cloud
+// router exposes none.
 var TinfoilDirectDefaultAllowFail = []string{
 	FactorCPUIDRegistry,
 	FactorIntelPCSCollateral,

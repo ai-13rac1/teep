@@ -334,10 +334,23 @@ Teep verifies these automatically via the `sigstore_code_verified` factor:
 4. Verify the DSSE bundle signature and extract the code measurement
 5. Compare against the live enclave's SEV-SNP MEASUREMENT register
 
-No manual allowlist configuration is needed for Tinfoil — the Sigstore chain
-provides the canonical measurement values. If the Sigstore-published hash
-does not match the running enclave, `tee_measurement` and
-`sigstore_code_verified` both fail.
+If the Sigstore-published hash does not match the running enclave,
+`tee_measurement` and `sigstore_code_verified` both fail.
+
+Teep needs no allowlist to perform this comparison, but the Sigstore chain is
+not a substitute for one. Steps 1-3 run against `github-proxy.tinfoil.sh`, so
+the provider chooses which release teep compares against. Signature
+verification uses Sigstore's own trust root and cannot be forged, and the
+Fulcio identity check accepts any tag of the correct repo by design — so a
+provider can direct teep at any release it ever published, including an old
+one, and every supply chain factor passes because the enclave genuinely runs
+the code teep was pointed at. Teep performs no floor, pin, or
+newer-than-last-seen check.
+
+Set `gateway_mrtd_allow` (or `mrtd_allow` for a direct provider) to pin the
+launch measurements you accept. The pin is checked before the signed
+reference, so a matching Sigstore predicate cannot satisfy it. Expect to
+update the value whenever Tinfoil ships a new release.
 
 ### MR_SEAM Equivalent
 
@@ -347,9 +360,11 @@ and is verified by the `tee_tcb_current` factor against hardcoded minimums.
 
 ### Per-Provider Configuration
 
-No per-provider measurement policy is needed for Tinfoil. The verification
+Teep ships no per-provider measurement policy for Tinfoil: the verification
 factors use Sigstore for code measurements and hardcoded TCB minimums for
-platform version checks.
+platform version checks. Configure `gateway_mrtd_allow` if you want the
+release teep accepts pinned rather than provider-selected, as described under
+Code Measurement Verification above.
 
 ## Related Documentation
 
