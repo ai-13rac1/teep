@@ -172,10 +172,6 @@ type RawAttestation struct {
 
 	// Tinfoil-specific fields — populated by the tinfoil provider's Attester.
 	SEVReportBytes []byte `json:"-"` // raw binary SEV-SNP report (tinfoil sev-snp platform)
-	// TODO: GPUNonce has had no writer since the v3 rewrite, so
-	// GPUVerificationNonce always falls through to the top-level nonce. The
-	// deferred work that reads device_evidence items will populate it again.
-	GPUNonce string `json:"-"` // SPDM requester nonce for GPU evidence
 
 	// Tinfoil v3 crypto material (each 64 hex chars = 32 bytes).
 	TinfoilTLSKeyFP string `json:"-"` // crypto_material item "tls"
@@ -221,16 +217,6 @@ type RawAttestation struct {
 	// RawBody is the unmodified HTTP response body from the provider.
 	// Used by --capture to write the original JSON as-is.
 	RawBody []byte `json:"-"`
-}
-
-// GPUVerificationNonce returns the nonce to use for GPU evidence verification.
-// When GPUNonce is present (Tinfoil V3 SPDM requester nonce), it takes
-// precedence over the top-level Nonce field.
-func (r *RawAttestation) GPUVerificationNonce() string {
-	if r.GPUNonce != "" {
-		return r.GPUNonce
-	}
-	return r.Nonce
 }
 
 // cacheKey identifies a provider/model pair for cache lookups.

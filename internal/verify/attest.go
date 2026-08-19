@@ -115,7 +115,7 @@ func verifyNVIDIA(
 		eat = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, nonce)
 		slog.DebugContext(ctx, "NVIDIA verification complete", "elapsed", time.Since(nvidiaStart))
 	} else if len(raw.GPUEvidence) > 0 {
-		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
+		serverNonce, err := attestation.ParseNonce(raw.Nonce)
 		if err != nil {
 			slog.Error("parse server nonce for GPU verification", "err", err)
 			eat = &attestation.NvidiaVerifyResult{

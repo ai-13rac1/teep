@@ -1175,7 +1175,7 @@ func verifyNVIDIA(
 	}
 	if len(raw.GPUEvidence) > 0 {
 		slog.DebugContext(ctx, "NVIDIA GPU direct verification starting", "provider", provName, "gpus", len(raw.GPUEvidence))
-		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
+		serverNonce, err := attestation.ParseNonce(raw.Nonce)
 		if err != nil {
 			return &attestation.NvidiaVerifyResult{
 				SignatureErr: fmt.Errorf("parse server nonce: %w", err),

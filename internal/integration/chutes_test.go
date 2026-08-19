@@ -76,7 +76,7 @@ func TestIntegration_Chutes_Fixture(t *testing.T) {
 		nvidiaResult = attestation.VerifyNVIDIAPayload(ctx, raw.NvidiaPayload, env.nonce)
 		t.Logf("NVIDIA EAT: format=%s sig_err=%v claims_err=%v", nvidiaResult.Format, nvidiaResult.SignatureErr, nvidiaResult.ClaimsErr)
 	} else if len(raw.GPUEvidence) > 0 {
-		serverNonce, parseErr := attestation.ParseNonce(raw.GPUVerificationNonce())
+		serverNonce, parseErr := attestation.ParseNonce(raw.Nonce)
 		if parseErr != nil {
 			t.Fatalf("parse GPU verification nonce: %v", parseErr)
 		}

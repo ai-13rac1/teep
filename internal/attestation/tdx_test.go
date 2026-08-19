@@ -344,21 +344,3 @@ func TestExtractPCKExtensions_UnsupportedType(t *testing.T) {
 		t.Fatal("expected error for unsupported type")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// GPUVerificationNonce
-// ---------------------------------------------------------------------------
-
-func TestGPUVerificationNonce_GPUNonce(t *testing.T) {
-	raw := &RawAttestation{GPUNonce: "gpu-nonce", Nonce: "top-nonce"}
-	if got := raw.GPUVerificationNonce(); got != "gpu-nonce" {
-		t.Errorf("GPUVerificationNonce = %q, want gpu-nonce", got)
-	}
-}
-
-func TestGPUVerificationNonce_FallbackToNonce(t *testing.T) {
-	raw := &RawAttestation{GPUNonce: "", Nonce: "top-nonce"}
-	if got := raw.GPUVerificationNonce(); got != "top-nonce" {
-		t.Errorf("GPUVerificationNonce = %q, want top-nonce", got)
-	}
-}
