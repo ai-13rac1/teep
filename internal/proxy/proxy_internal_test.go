@@ -193,6 +193,54 @@ func TestTruncTo(t *testing.T) {
 // unwrapEHBPResponse
 // --------------------------------------------------------------------------
 
+// An EHBP upstream encrypts error responses too, and the non-200 path does not
+// run the success path's decryption. Relaying those bytes verbatim shows the
+// client ciphertext instead of the reason the request failed.
+func TestEHBPErrorBody(t *testing.T) {
+	const nonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	session, err := e2ee.NewEHBPSession(testX25519PubKey(t))
+	if err != nil {
+		t.Fatalf("NewEHBPSession: %v", err)
+	}
+	defer session.Zero()
+
+	newResp := func(nonceHex string) *http.Response {
+		r := &http.Response{
+			Header: http.Header{},
+			Body:   io.NopCloser(bytes.NewReader([]byte("ciphertext-bytes"))),
+		}
+		if nonceHex != "" {
+			r.Header.Set("Ehbp-Response-Nonce", nonceHex)
+		}
+		return r
+	}
+
+	t.Run("no session passes through", func(t *testing.T) {
+		body, ok := ehbpErrorBody(newResp(""), nil)
+		if !ok || body == nil {
+			t.Fatal("a body that was never encrypted must relay unchanged")
+		}
+	})
+	// Without the nonce there is no way to decrypt, so the bytes must not be
+	// relayed: they are ciphertext and would reach the client as mojibake.
+	t.Run("session but no nonce is withheld", func(t *testing.T) {
+		if _, ok := ehbpErrorBody(newResp(""), session); ok {
+			t.Error("ciphertext relayed with no response nonce to decrypt it")
+		}
+	})
+	t.Run("session but short nonce is withheld", func(t *testing.T) {
+		if _, ok := ehbpErrorBody(newResp("abcd"), session); ok {
+			t.Error("ciphertext relayed with an invalid response nonce")
+		}
+	})
+	t.Run("session and nonce decrypts", func(t *testing.T) {
+		body, ok := ehbpErrorBody(newResp(nonce), session)
+		if !ok || body == nil {
+			t.Error("a decryptable error body must be relayed as plaintext")
+		}
+	})
+}
+
 func TestUnwrapEHBPResponse_MissingNonce(t *testing.T) {
 	s := &Server{}
 	resp := &http.Response{Header: http.Header{}}
@@ -1156,6 +1204,59 @@ func TestAttestAndCache_E2EEActive(t *testing.T) {
 // --------------------------------------------------------------------------
 // buildDashboardData — blocked factors path
 // --------------------------------------------------------------------------
+
+// The tier bar draws passed/failed/warned as widths out of Total. A skip
+// counts toward Total, so leaving it out of all three drew the remainder as
+// background and a tier teep could not check looked fully covered.
+func TestBuildDashboardData_SkipsCountAsWarned(t *testing.T) {
+	s := &Server{
+		cfg:             &config.Config{ListenAddr: "127.0.0.1:8337"},
+		cache:           attestation.NewCache(time.Minute),
+		negCache:        attestation.NewNegativeCache(time.Minute),
+		signingKeyCache: attestation.NewSigningKeyCache(time.Minute),
+		spkiCache:       attestation.NewSPKICache(),
+		providers:       map[string]*provider.Provider{"test": {Name: "test"}},
+		stats:           stats{startTime: time.Now(), models: make(map[string]*modelStats)},
+	}
+
+	tier := attestation.TierCore
+	s.cache.Put("test", "model", &attestation.VerificationReport{
+		Provider: "test",
+		Model:    "model",
+		Factors: []attestation.FactorResult{
+			{Name: "tee_quote_present", Tier: tier, Status: attestation.Pass},
+			{Name: "tee_measurement", Tier: tier, Status: attestation.Skip},
+			{Name: "tee_boot_config", Tier: tier, Status: attestation.Skip},
+			{Name: "tee_reportdata_binding", Tier: tier, Status: attestation.Fail},
+			// N/A stays out of the denominator entirely.
+			{Name: "compose_binding", Tier: tier, Status: attestation.NotApplicable},
+		},
+	})
+
+	data := s.buildDashboardData()
+	if len(data.Attestations) == 0 {
+		t.Fatal("expected attestations in dashboard data")
+	}
+	var got *dashTier
+	for i := range data.Attestations[0].Tiers {
+		if data.Attestations[0].Tiers[i].Name == tier {
+			got = &data.Attestations[0].Tiers[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("no %q tier in dashboard data", tier)
+	}
+	if got.Total != 4 {
+		t.Errorf("Total = %d, want 4 (the N/A factor is not scored)", got.Total)
+	}
+	if sum := got.Passed + got.Failed + got.Warned; sum != got.Total {
+		t.Errorf("passed+failed+warned = %d, want %d: the bar leaves %d factors uncoloured",
+			sum, got.Total, got.Total-sum)
+	}
+	if got.Warned != 3 {
+		t.Errorf("Warned = %d, want 3 (two skips and one allowed failure)", got.Warned)
+	}
+}
 
 func TestBuildDashboardData_BlockedFactors(t *testing.T) {
 	s := &Server{

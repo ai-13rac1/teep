@@ -73,7 +73,7 @@ type dashTier struct {
 	Name   string `json:"name"`
 	Passed int    `json:"passed"`
 	Failed int    `json:"failed"` // enforced failures (red)
-	Warned int    `json:"warned"` // allowed failures (yellow)
+	Warned int    `json:"warned"` // allowed failures and skips (yellow)
 	Total  int    `json:"total"`  // excludes N/A factors (not part of the score)
 }
 
@@ -336,6 +336,12 @@ func (s *Server) buildDashboardData() dashboardData {
 			case f.Status == attestation.Fail && f.Enforced:
 				tiers[idx].Failed++
 			case f.Status == attestation.Fail:
+				tiers[idx].Warned++
+			case f.Status == attestation.Skip:
+				// A skip applies and did not run, so it is a gap in coverage,
+				// not neutral space. Counting it keeps the bar summing to
+				// Total; leaving it out drew the remainder as background and
+				// read as though the tier were fully covered.
 				tiers[idx].Warned++
 			}
 		}

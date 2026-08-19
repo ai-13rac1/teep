@@ -1890,7 +1890,14 @@ func (s *Server) relayWithRetry(
 			if !ri.headerSent {
 				result.status = fmt.Sprintf("upstream_%d", resp.StatusCode)
 				w.WriteHeader(resp.StatusCode)
-				_, _ = io.Copy(w, io.LimitReader(resp.Body, 10<<20))
+				if body, ok := ehbpErrorBody(resp, ehbp); ok {
+					_, _ = io.Copy(w, io.LimitReader(body, 10<<20))
+				} else {
+					slog.WarnContext(ctx, "upstream error body could not be decrypted",
+						"provider", prov.Name, "model", upstreamModel, "status", resp.StatusCode)
+					fmt.Fprintf(w, "upstream returned HTTP %d; its error body was E2EE-encrypted and could not be decrypted\n",
+						resp.StatusCode)
+				}
 			}
 			cleanupAttempt()
 			return result
@@ -2729,6 +2736,35 @@ func relayResponse(ctx context.Context, w http.ResponseWriter, body io.Reader,
 	}
 }
 
+// ehbpNonceHexLen is the hex length of an EHBP response nonce (32 bytes).
+const ehbpNonceHexLen = 64
+
+// ehbpErrorBody returns the upstream body as plaintext, and reports whether it
+// is safe to relay. Without an EHBP session the body was never encrypted and
+// passes through.
+//
+// EHBP encrypts the whole response stream, error responses included, and the
+// success path is the only one that decrypts. Field-level Decryptor providers
+// need none of this: their error bodies are ordinary JSON.
+//
+// DANGER: relaying the body when this returns false sends the client
+// ciphertext instead of the upstream error text, and nothing fails loudly —
+// the response just arrives unreadable. SEE: TestEHBPErrorBody.
+func ehbpErrorBody(resp *http.Response, ehbp *e2ee.EHBPSession) (io.Reader, bool) {
+	if ehbp == nil {
+		return resp.Body, true
+	}
+	nonceHex := resp.Header.Get("Ehbp-Response-Nonce")
+	if len(nonceHex) != ehbpNonceHexLen {
+		return nil, false
+	}
+	plain, err := ehbp.DecryptResponse(resp.Body, nonceHex)
+	if err != nil {
+		return nil, false
+	}
+	return plain, true
+}
+
 // unwrapEHBPResponse decrypts an EHBP-encrypted response body in place,
 // replacing resp.Body with a plaintext reader. Returns a status string and
 // false on failure; the caller must clean up and return. On success returns
@@ -2751,7 +2787,7 @@ func (s *Server) unwrapEHBPResponse(
 		}
 		return "ehbp_missing_nonce", false
 	}
-	if len(nonceHex) != 64 {
+	if len(nonceHex) != ehbpNonceHexLen {
 		slog.ErrorContext(ctx, "EHBP response nonce wrong length",
 			"provider", provName, "model", upstreamModel, "len", len(nonceHex))
 		if !ri.headerSent {
