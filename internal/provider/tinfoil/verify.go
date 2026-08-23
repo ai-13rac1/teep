@@ -5,32 +5,37 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/13rac1/teep/internal/attestation"
 )
 
-// ReportDataVerifier validates the Tinfoil V3 REPORTDATA binding scheme:
+// ReportDataVerifier validates the Tinfoil v3 REPORT_DATA binding:
 //
-//	REPORTDATA[0:32] = SHA-256(tls_key_fp || hpke_key || nonce || gpu_evidence_hash || nvswitch_evidence_hash)
-//	REPORTDATA[32:64] = all zeros
+//	crypto_material_hash = SHA-256(crypto_material section bytes)
+//	device_evidence_hash = SHA-256(device_evidence section bytes)
+//	REPORT_DATA[0:32]    = SHA-256(algorithm URI || nonce || crypto_material_hash || device_evidence_hash)
+//	REPORT_DATA[32:64]   = zeros
 //
-// Where each field is the 32-byte decoded hex value, and nvswitch_evidence_hash
-// contributes zero bytes (empty) if NVSwitch is absent.
+// The algorithm URI is written first as a domain separation label. The three
+// inputs that follow are 32 bytes each.
+//
+// The hardware signs REPORT_DATA. A match therefore authenticates the TLS
+// fingerprint, the HPKE key, the client nonce, and the device evidence
+// together, as one enclave's claim at one moment.
 type ReportDataVerifier struct{}
 
-// VerifyReportData checks that reportData matches the Tinfoil V3 binding.
+// VerifyReportData checks that reportData matches the Tinfoil v3 binding.
+//
+// The nonce parameter is the authority for freshness. The value the enclave
+// echoes is checked against it and never substituted for it.
 func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation.RawAttestation, nonce attestation.Nonce) (string, error) {
-	// Verify REPORTDATA[32:64] is all zeros.
 	var zeros [32]byte
 	if subtle.ConstantTimeCompare(reportData[32:], zeros[:]) != 1 {
 		return "", fmt.Errorf("REPORTDATA[32:64] is not all zeros: %s", hex.EncodeToString(reportData[32:]))
 	}
 
-	// Verify nonce matches (constant-time, decoded bytes per spec).
 	responseNonce, err := hex.DecodeString(raw.Nonce)
 	if err != nil {
 		return "", fmt.Errorf("decode response nonce hex: %w", err)
@@ -40,184 +45,66 @@ func (ReportDataVerifier) VerifyReportData(reportData [64]byte, raw *attestation
 			attestation.NoncePrefix(raw.Nonce))
 	}
 
-	// GPU evidence is required per spec. When absent, REPORTDATA verification
-	// still succeeds (the hash matches what the server computed) but gpu_bound
-	// will be false, causing gpu-related factors to fail closed in BuildReport.
-	hasGPU := raw.TinfoilGPUEvidenceHash != "" && len(raw.GPURawJSON) > 0
-	nvswitchExpected := false
-	nvswitchHashVerified := false
-	if hasGPU {
-		if err := verifyGPUEvidenceHash(raw); err != nil {
-			return "", fmt.Errorf("GPU evidence hash verification: %w", err)
-		}
-		var nsErr error
-		nvswitchExpected, nsErr = isNVSwitchExpected(raw.GPURawJSON)
-		if nsErr != nil {
-			return "", fmt.Errorf("NVSwitch normalization: %w", nsErr)
-		}
-		if nvswitchExpected {
-			// Check NVSwitch evidence hash against raw JSON bytes. If this
-			// fails (e.g. due to server-side JSON re-encoding), we still
-			// proceed to verify the REPORTDATA hash using the reported
-			// nvswitch_evidence_hash. This authenticates the TLS SPKI,
-			// HPKE key, nonce, and GPU evidence hash via the hardware-signed
-			// REPORTDATA, even when the NVSwitch hash binding is broken.
-			// The nvswitch_binding factor will still fail closed.
-			if err := verifyNVSwitchEvidenceHash(raw); err != nil {
-				slog.Warn("NVSwitch evidence hash mismatch — proceeding with REPORTDATA verification using reported hash",
-					"err", err)
-			} else {
-				nvswitchHashVerified = true
-			}
-		}
-	}
-
-	// Build the preimage using the reported hashes from report_data.
-	// These are the values the server bound into REPORTDATA, so the
-	// preimage should match what the hardware signed.
-	preimage, err := buildReportDataPreimage(raw)
+	cryptoHash, err := checkEndorsedSection("crypto_material",
+		raw.TinfoilCryptoMaterialBytes, raw.TinfoilEndorsedCryptoHash)
 	if err != nil {
-		return "", fmt.Errorf("build REPORTDATA preimage: %w", err)
+		return "", err
+	}
+	deviceHash, err := checkEndorsedSection("device_evidence",
+		raw.TinfoilDeviceEvidenceBytes, raw.TinfoilEndorsedDeviceHash)
+	if err != nil {
+		return "", err
 	}
 
-	expected := sha256.Sum256(preimage)
-	if subtle.ConstantTimeCompare(expected[:], reportData[:32]) != 1 {
-		return "", fmt.Errorf("REPORTDATA[0:32] = %s, expected SHA-256(preimage) = %s",
-			hex.EncodeToString(reportData[:32]), hex.EncodeToString(expected[:]))
+	expected := computeReportData(nonce[:], cryptoHash, deviceHash)
+	if subtle.ConstantTimeCompare(expected[:], reportData[:]) != 1 {
+		return "", fmt.Errorf("REPORTDATA = %s, expected %s",
+			hex.EncodeToString(reportData[:]), hex.EncodeToString(expected[:]))
 	}
 
-	detail := "v3: reportdata_hash verified, nonce_bound=true"
-	if hasGPU {
-		detail += ", gpu_bound=true"
-		if nvswitchExpected {
-			if nvswitchHashVerified {
-				detail += ", nvswitch_bound=true"
-			} else {
-				detail += ", nvswitch_bound=false"
-			}
-		}
-	} else {
-		detail += ", gpu_bound=false"
+	// challenge.report_data is the enclave's own statement of what it asked the
+	// hardware to sign. The quote above already settled the question, so a
+	// mismatch here means the document contradicts itself.
+	expectedHex := hex.EncodeToString(expected[:])
+	if subtle.ConstantTimeCompare([]byte(expectedHex), []byte(raw.TinfoilChallengeReportData)) != 1 {
+		return "", fmt.Errorf("challenge.report_data %s does not match the verified REPORTDATA %s",
+			raw.TinfoilChallengeReportData, expectedHex)
 	}
-	return detail, nil
+
+	return "v3: reportdata_hash verified, nonce_bound=true, gpu_bound=false", nil
 }
 
-// buildReportDataPreimage constructs the hash preimage for REPORTDATA[0:32].
-// The preimage is: tls_key_fp || hpke_key || nonce [|| gpu_hash [|| nvswitch_hash]]
-// GPU and NVSwitch hashes are included when present in the attestation response.
-// The preimage must match what the server computed to verify REPORTDATA binding.
-func buildReportDataPreimage(raw *attestation.RawAttestation) ([]byte, error) {
-	tlsKeyFP, err := hex.DecodeString(raw.TinfoilTLSKeyFP)
-	if err != nil {
-		return nil, fmt.Errorf("decode tls_key_fp: %w", err)
+// checkEndorsedSection recomputes the hash of one endorsed section and checks
+// it against the hash the enclave bound into REPORT_DATA. It returns the
+// recomputed hash, which is the value the caller must use.
+//
+// The hash covers the exact base64-decoded section bytes. Re-serializing the
+// section produces different bytes and therefore a different hash.
+func checkEndorsedSection(name string, sectionBytes []byte, endorsedHex string) ([]byte, error) {
+	if len(sectionBytes) == 0 {
+		return nil, fmt.Errorf("%s section bytes are absent", name)
 	}
-	hpkeKey, err := hex.DecodeString(raw.TinfoilHPKEKey)
-	if err != nil {
-		return nil, fmt.Errorf("decode hpke_key: %w", err)
-	}
-	nonceBytes, err := hex.DecodeString(raw.TinfoilNonce)
-	if err != nil {
-		return nil, fmt.Errorf("decode nonce: %w", err)
-	}
-
-	const fieldSize = 32
-	preimage := make([]byte, 0, 5*fieldSize)
-	preimage = append(preimage, tlsKeyFP...)
-	preimage = append(preimage, hpkeKey...)
-	preimage = append(preimage, nonceBytes...)
-
-	if raw.TinfoilGPUEvidenceHash != "" {
-		gpuHash, err := hex.DecodeString(raw.TinfoilGPUEvidenceHash)
-		if err != nil {
-			return nil, fmt.Errorf("decode gpu_evidence_hash: %w", err)
-		}
-		preimage = append(preimage, gpuHash...)
-	}
-	if raw.TinfoilNVSwitchEvidenceHash != "" {
-		nvswitchHash, err := hex.DecodeString(raw.TinfoilNVSwitchEvidenceHash)
-		if err != nil {
-			return nil, fmt.Errorf("decode nvswitch_evidence_hash: %w", err)
-		}
-		preimage = append(preimage, nvswitchHash...)
-	}
-
-	return preimage, nil
-}
-
-// verifyGPUEvidenceHash checks that report_data.gpu_evidence_hash matches
-// SHA-256 of the raw GPU JSON bytes.
-func verifyGPUEvidenceHash(raw *attestation.RawAttestation) error {
-	if len(raw.GPURawJSON) == 0 {
-		return errors.New("gpu field is empty")
-	}
-
-	computed := sha256.Sum256(raw.GPURawJSON)
+	computed := sha256.Sum256(sectionBytes)
 	computedHex := hex.EncodeToString(computed[:])
-
-	if subtle.ConstantTimeCompare([]byte(computedHex), []byte(raw.TinfoilGPUEvidenceHash)) != 1 {
-		return fmt.Errorf("gpu_evidence_hash mismatch: computed %s, reported %s",
-			computedHex, raw.TinfoilGPUEvidenceHash)
+	if subtle.ConstantTimeCompare([]byte(computedHex), []byte(endorsedHex)) != 1 {
+		return nil, fmt.Errorf("%s hash %s does not match cpu_evidence.endorsed %s",
+			name, computedHex, endorsedHex)
 	}
-	return nil
+	return computed[:], nil
 }
 
-// verifyNVSwitchEvidenceHash checks that report_data.nvswitch_evidence_hash
-// matches SHA-256 of the raw NVSwitch JSON bytes.
-func verifyNVSwitchEvidenceHash(raw *attestation.RawAttestation) error {
-	if len(raw.NVSwitchRawJSON) == 0 {
-		return errors.New("nvswitch field is empty but nvswitch_expected=true")
-	}
-	if raw.TinfoilNVSwitchEvidenceHash == "" {
-		return errors.New("nvswitch_evidence_hash is empty but nvswitch_expected=true")
-	}
+// computeReportData derives the 64-byte REPORT_DATA. The inputs must be 32
+// bytes each; the caller has already checked every one.
+func computeReportData(nonce, cryptoMaterialHash, deviceEvidenceHash []byte) [64]byte {
+	h := sha256.New()
+	h.Write([]byte(ReportDataV1Algorithm))
+	h.Write(nonce)
+	h.Write(cryptoMaterialHash)
+	h.Write(deviceEvidenceHash)
 
-	computed := sha256.Sum256(raw.NVSwitchRawJSON)
-	computedHex := hex.EncodeToString(computed[:])
-
-	if subtle.ConstantTimeCompare([]byte(computedHex), []byte(raw.TinfoilNVSwitchEvidenceHash)) != 1 {
-		return fmt.Errorf("nvswitch_evidence_hash mismatch: computed %s, reported %s",
-			computedHex, raw.TinfoilNVSwitchEvidenceHash)
-	}
-	return nil
-}
-
-// isNVSwitchExpected determines whether NVSwitch evidence is expected based on
-// the GPU evidence array. The normalization algorithm:
-//  1. Parse GPU JSON, require "evidences" array
-//  2. gpu_count = len(evidences)
-//  3. Inspect arch values
-//  4. If gpu_count == 8 AND any arch is unrecognized: fail closed
-//  5. If gpu_count == 8 AND at least one arch is HOPPER: nvswitch_expected = true
-//  6. Otherwise: nvswitch_expected = false
-//  7. Malformed gpu evidences: fail closed
-func isNVSwitchExpected(gpuRawJSON []byte) (bool, error) {
-	if len(gpuRawJSON) == 0 {
-		return false, errors.New("gpu field is empty")
-	}
-
-	var gpu v3GPUEvidences
-	if err := json.Unmarshal(gpuRawJSON, &gpu); err != nil {
-		return false, fmt.Errorf("malformed gpu evidences: %w", err)
-	}
-
-	gpuCount := len(gpu.Evidences)
-	if gpuCount != 8 {
-		return false, nil
-	}
-
-	hasHopper := false
-	for _, e := range gpu.Evidences {
-		switch e.Arch {
-		case ArchHopper:
-			hasHopper = true
-		case ArchBlackwell:
-			// known, continue
-		default:
-			return false, fmt.Errorf("8-GPU config with unrecognized arch %q: fail closed", e.Arch)
-		}
-	}
-
-	return hasHopper, nil
+	var out [64]byte
+	copy(out[:32], h.Sum(nil))
+	return out
 }
 
 // TDX policy constants for Tinfoil.

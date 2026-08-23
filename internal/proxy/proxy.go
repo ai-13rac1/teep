@@ -255,8 +255,7 @@ func (e requestNormalizationError) Unwrap() error {
 }
 
 func normalizationStatusCode(err error) int {
-	var normalizeErr requestNormalizationError
-	if errors.As(err, &normalizeErr) {
+	if normalizeErr, ok := errors.AsType[requestNormalizationError](err); ok {
 		return normalizeErr.statusCode
 	}
 	return http.StatusInternalServerError
@@ -832,6 +831,9 @@ func fromConfig(
 		p.ResponsesPath = "/v1/responses"
 		p.SpeechPath = "/v1/audio/speech"
 		p.UsesTLSBinding = true
+		// The router is the gateway, and its REPORTDATA binds the HPKE key
+		// clients encrypt to. SEE: tinfoil.asGatewayEvidence.
+		p.E2EEKeyBoundByGateway = true
 		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
@@ -975,11 +977,14 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 
 	tdxResult, tdxDur := s.verifyTDX(ctx, raw, nonce, prov)
 	sevResult, sevDur := s.verifySEV(ctx, raw, nonce, prov)
+	gatewaySEVResult := s.verifyGatewaySEV(ctx, raw, nonce, prov)
+	gatewayTDXResult, gatewayComposeResult, gatewayPoCResult := s.verifyGatewayTDX(ctx, raw, nonce, prov)
 	nvidiaResult, nvidiaDur := verifyNVIDIA(ctx, raw, nonce, prov.Name)
 	nrasResult, nrasDur := s.verifyNVIDIAOnline(ctx, raw, prov.Name)
 	pocResult, pocDur := s.verifyPoC(ctx, raw, prov.Name)
 	sc, composeDur := s.verifySupplyChain(ctx, raw, tdxResult, prov.SupplyChainPolicy)
-	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, sevResult, prov, upstreamModel)
+	scSEV := attestation.SupplyChainSEVResult(sevResult, gatewaySEVResult)
+	tinfoilSC, tinfoilSCDur := s.verifyTinfoilSupplyChain(ctx, raw, tdxResult, scSEV, prov, upstreamModel)
 
 	totalDur := time.Since(totalStart)
 	slog.InfoContext(ctx, "verification complete",
@@ -1012,6 +1017,12 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		DigestToRepo:           sc.DigestToRepo,
 		TDX:                    tdxResult,
 		SEV:                    sevResult,
+		GatewaySEV:             gatewaySEVResult,
+		GatewayTDX:             gatewayTDXResult,
+		GatewayCompose:         gatewayComposeResult,
+		GatewayPoC:             gatewayPoCResult,
+		GatewayNonceHex:        raw.GatewayNonceHex,
+		GatewayNonce:           nonce,
 		Nvidia:                 nvidiaResult,
 		NvidiaNRAS:             nrasResult,
 		PoC:                    pocResult,
@@ -1022,6 +1033,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		E2EEConfigured:         prov.E2EE,
 		Inapplicable:           inapplicableForProvider(prov.Name),
 		ProviderUsesTLSBinding: prov.UsesTLSBinding,
+		E2EEKeyBoundByGateway:  prov.E2EEKeyBoundByGateway,
 	})
 	return report, raw
 }
@@ -1080,6 +1092,71 @@ func (s *Server) verifySEV(
 	return result, dur
 }
 
+// verifyGatewaySEV verifies a SEV-SNP report from an attested gateway.
+//
+// A gateway provider carries its quote in the gateway fields, so verifySEV
+// above finds nothing to do. Without this the report would omit Tier 4
+// entirely and the provider would forward traffic having verified no quote.
+func (s *Server) verifyGatewaySEV(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	nonce attestation.Nonce,
+	prov *provider.Provider,
+) *attestation.SEVVerifyResult {
+	if len(raw.GatewaySEVReportBytes) == 0 {
+		return nil
+	}
+	slog.DebugContext(ctx, "gateway SEV-SNP verification starting", "provider", prov.Name)
+	result := s.sevVerifier(ctx, raw.GatewaySEVReportBytes)
+	if prov.ReportDataVerifier != nil && result.ParseErr == nil {
+		detail, err := prov.ReportDataVerifier.VerifyReportData(result.ReportData, raw, nonce)
+		if errors.Is(err, multi.ErrNoVerifier) {
+			slog.DebugContext(ctx, "no REPORTDATA verifier for backend format", "format", raw.BackendFormat)
+		} else {
+			result.ReportDataBindingErr = err
+			result.ReportDataBindingDetail = detail
+		}
+	}
+	slog.DebugContext(ctx, "gateway SEV-SNP verification complete", "provider", prov.Name)
+	return result
+}
+
+// verifyGatewayTDX runs gateway TDX verification, REPORTDATA binding, compose
+// binding, and Proof of Cloud for providers that populate GatewayIntelQuote.
+//
+// SYNC: verify.verifyNearcloudGateway does the same for teep verify. Without
+// this the proxy supplies gateway evidence it never verified, and
+// unverifiedEvidence blocks the provider outright.
+func (s *Server) verifyGatewayTDX(
+	ctx context.Context,
+	raw *attestation.RawAttestation,
+	nonce attestation.Nonce,
+	prov *provider.Provider,
+) (*attestation.TDXVerifyResult, *attestation.ComposeBindingResult, *attestation.PoCResult) {
+	if raw.GatewayIntelQuote == "" {
+		return nil, nil, nil
+	}
+	slog.DebugContext(ctx, "gateway TDX verification starting", "provider", prov.Name)
+	tdx := s.verifyQuote(ctx, raw.GatewayIntelQuote)
+	if tdx.ParseErr == nil {
+		detail, err := nearcloud.GatewayReportDataVerifier{}.VerifyReportData(tdx.ReportData, raw, nonce)
+		tdx.ReportDataBindingErr = err
+		tdx.ReportDataBindingDetail = detail
+	}
+	var compose *attestation.ComposeBindingResult
+	if raw.GatewayAppCompose != "" && tdx.ParseErr == nil {
+		compose = &attestation.ComposeBindingResult{Checked: true}
+		compose.Err = attestation.VerifyComposeBinding(raw.GatewayAppCompose, tdx.MRConfigID)
+	}
+	var poc *attestation.PoCResult
+	if !s.cfg.Offline {
+		poc = attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, s.attestClient).
+			CheckQuote(ctx, raw.GatewayIntelQuote)
+	}
+	slog.DebugContext(ctx, "gateway TDX verification complete", "provider", prov.Name)
+	return tdx, compose, poc
+}
+
 // verifyNVIDIA runs offline NVIDIA payload or GPU direct verification.
 func verifyNVIDIA(
 	ctx context.Context,
@@ -1097,7 +1174,7 @@ func verifyNVIDIA(
 	}
 	if len(raw.GPUEvidence) > 0 {
 		slog.DebugContext(ctx, "NVIDIA GPU direct verification starting", "provider", provName, "gpus", len(raw.GPUEvidence))
-		serverNonce, err := attestation.ParseNonce(raw.GPUVerificationNonce())
+		serverNonce, err := attestation.ParseNonce(raw.Nonce)
 		if err != nil {
 			return &attestation.NvidiaVerifyResult{
 				SignatureErr: fmt.Errorf("parse server nonce: %w", err),
@@ -1812,7 +1889,14 @@ func (s *Server) relayWithRetry(
 			if !ri.headerSent {
 				result.status = fmt.Sprintf("upstream_%d", resp.StatusCode)
 				w.WriteHeader(resp.StatusCode)
-				_, _ = io.Copy(w, io.LimitReader(resp.Body, 10<<20))
+				if body, ok := ehbpErrorBody(resp, ehbp); ok {
+					_, _ = io.Copy(w, io.LimitReader(body, 10<<20))
+				} else {
+					slog.WarnContext(ctx, "upstream error body could not be decrypted",
+						"provider", prov.Name, "model", upstreamModel, "status", resp.StatusCode)
+					fmt.Fprintf(w, "upstream returned HTTP %d; its error body was E2EE-encrypted and could not be decrypted\n",
+						resp.StatusCode)
+				}
 			}
 			cleanupAttempt()
 			return result
@@ -2651,6 +2735,35 @@ func relayResponse(ctx context.Context, w http.ResponseWriter, body io.Reader,
 	}
 }
 
+// ehbpNonceHexLen is the hex length of an EHBP response nonce (32 bytes).
+const ehbpNonceHexLen = 64
+
+// ehbpErrorBody returns the upstream body as plaintext, and reports whether it
+// is safe to relay. Without an EHBP session the body was never encrypted and
+// passes through.
+//
+// EHBP encrypts the whole response stream, error responses included, and the
+// success path is the only one that decrypts. Field-level Decryptor providers
+// need none of this: their error bodies are ordinary JSON.
+//
+// DANGER: relaying the body when this returns false sends the client
+// ciphertext instead of the upstream error text, and nothing fails loudly —
+// the response just arrives unreadable. SEE: TestEHBPErrorBody.
+func ehbpErrorBody(resp *http.Response, ehbp *e2ee.EHBPSession) (io.Reader, bool) {
+	if ehbp == nil {
+		return resp.Body, true
+	}
+	nonceHex := resp.Header.Get("Ehbp-Response-Nonce")
+	if len(nonceHex) != ehbpNonceHexLen {
+		return nil, false
+	}
+	plain, err := ehbp.DecryptResponse(resp.Body, nonceHex)
+	if err != nil {
+		return nil, false
+	}
+	return plain, true
+}
+
 // unwrapEHBPResponse decrypts an EHBP-encrypted response body in place,
 // replacing resp.Body with a plaintext reader. Returns a status string and
 // false on failure; the caller must clean up and return. On success returns
@@ -2673,7 +2786,7 @@ func (s *Server) unwrapEHBPResponse(
 		}
 		return "ehbp_missing_nonce", false
 	}
-	if len(nonceHex) != 64 {
+	if len(nonceHex) != ehbpNonceHexLen {
 		slog.ErrorContext(ctx, "EHBP response nonce wrong length",
 			"provider", provName, "model", upstreamModel, "len", len(nonceHex))
 		if !ri.headerSent {

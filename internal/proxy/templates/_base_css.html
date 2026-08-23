@@ -104,7 +104,12 @@
   .fi.pass { color: var(--seal); }
   .fi.fail { color: var(--alert); }
   .fi.warn { color: var(--warn); }
-  .fi.skip, .fi.na { color: var(--faint); }
+  /* Skip means the factor applies and did not run: no evidence to read, no
+     policy configured, or offline. That is a gap in coverage, so it warns.
+     NotApplicable means the factor does not apply to this provider at all,
+     which is settled, not missing. */
+  .fi.skip { color: var(--warn); }
+  .fi.na { color: var(--faint); }
   .factor.f-fail .fn { color: var(--alert); }
   .factor.f-warn .fn { color: var(--warn); }
 

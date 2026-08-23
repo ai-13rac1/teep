@@ -3,302 +3,16 @@ package tinfoil
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
 )
-
-// makeRawForReportData builds a RawAttestation with the given fields for REPORTDATA testing.
-func makeRawForReportData(t *testing.T, withNVSwitch bool) (*attestation.RawAttestation, attestation.Nonce, [64]byte) {
-	t.Helper()
-
-	nonce := attestation.NewNonce()
-	tlsKeyFP := makeHex32(0x01)
-	hpkeKey := makeHex32(0x02)
-
-	gpu := []byte(`{"evidences":[{"arch":"HOPPER","certificate":"Y2VydA==","evidence":"ZXZpZA==","nonce":"` + makeHex32(0xaa) + `"}]}`)
-	gpuHash := sha256.Sum256(gpu)
-	gpuHashHex := hex.EncodeToString(gpuHash[:])
-
-	var nvswitch []byte
-	var nvswitchHashHex string
-	if withNVSwitch {
-		nvswitch = []byte(`{"evidences":["c3dpdGNo"]}`)
-		nvswitchHash := sha256.Sum256(nvswitch)
-		nvswitchHashHex = hex.EncodeToString(nvswitchHash[:])
-	}
-
-	raw := &attestation.RawAttestation{
-		BackendFormat:               attestation.FormatTinfoil,
-		Nonce:                       nonce.Hex(),
-		TinfoilTLSKeyFP:             tlsKeyFP,
-		TinfoilHPKEKey:              hpkeKey,
-		TinfoilNonce:                nonce.Hex(),
-		TinfoilGPUEvidenceHash:      gpuHashHex,
-		TinfoilNVSwitchEvidenceHash: nvswitchHashHex,
-		GPURawJSON:                  gpu,
-		NVSwitchRawJSON:             nvswitch,
-	}
-
-	// Build the expected REPORTDATA.
-	tlsBytes, _ := hex.DecodeString(tlsKeyFP)
-	hpkeBytes, _ := hex.DecodeString(hpkeKey)
-	nonceBytes := nonce[:]
-	gpuHashBytes := gpuHash[:]
-
-	preimage := make([]byte, 0, 128+32)
-	preimage = append(preimage, tlsBytes...)
-	preimage = append(preimage, hpkeBytes...)
-	preimage = append(preimage, nonceBytes...)
-	preimage = append(preimage, gpuHashBytes...)
-	if withNVSwitch {
-		nvswitchHash := sha256.Sum256(nvswitch)
-		preimage = append(preimage, nvswitchHash[:]...)
-	}
-
-	hash := sha256.Sum256(preimage)
-	var reportData [64]byte
-	copy(reportData[:32], hash[:])
-	// [32:64] stays zeros.
-
-	return raw, nonce, reportData
-}
-
-func TestVerifyReportData_Valid(t *testing.T) {
-	raw, nonce, reportData := makeRawForReportData(t, false)
-
-	v := ReportDataVerifier{}
-	detail, err := v.VerifyReportData(reportData, raw, nonce)
-	if err != nil {
-		t.Fatalf("VerifyReportData failed: %v", err)
-	}
-	if detail == "" {
-		t.Error("expected non-empty detail string")
-	}
-	t.Logf("detail: %s", detail)
-}
-
-func TestVerifyReportData_ValidWithNVSwitch(t *testing.T) {
-	raw, nonce, reportData := makeRawForReportData(t, true)
-
-	// Need to build a GPU with 8 HOPPERs to trigger nvswitch expected.
-	var gpu8Builder strings.Builder
-	gpu8Builder.WriteString(`{"evidences":[`)
-	for i := range 8 {
-		if i > 0 {
-			gpu8Builder.WriteString(",")
-		}
-		gpu8Builder.WriteString(`{"arch":"HOPPER","certificate":"Y2VydA==","evidence":"ZXZpZA==","nonce":"` + makeHex32(byte(i)) + `"}`)
-	}
-	gpu8Builder.WriteString(`]}`)
-	gpu8 := gpu8Builder.String()
-	gpuHash := sha256.Sum256([]byte(gpu8))
-	raw.GPURawJSON = []byte(gpu8)
-	raw.TinfoilGPUEvidenceHash = hex.EncodeToString(gpuHash[:])
-
-	// Recalculate REPORTDATA.
-	tlsBytes, _ := hex.DecodeString(raw.TinfoilTLSKeyFP)
-	hpkeBytes, _ := hex.DecodeString(raw.TinfoilHPKEKey)
-	nonceBytes, _ := hex.DecodeString(raw.TinfoilNonce)
-	gpuHashBytes := gpuHash[:]
-	nvswitchHash := sha256.Sum256(raw.NVSwitchRawJSON)
-
-	preimage := make([]byte, 0, 160)
-	preimage = append(preimage, tlsBytes...)
-	preimage = append(preimage, hpkeBytes...)
-	preimage = append(preimage, nonceBytes...)
-	preimage = append(preimage, gpuHashBytes...)
-	preimage = append(preimage, nvswitchHash[:]...)
-
-	hash := sha256.Sum256(preimage)
-	copy(reportData[:32], hash[:])
-
-	v := ReportDataVerifier{}
-	detail, err := v.VerifyReportData(reportData, raw, nonce)
-	if err != nil {
-		t.Fatalf("VerifyReportData failed: %v", err)
-	}
-	if detail == "" {
-		t.Error("expected non-empty detail string")
-	}
-	t.Logf("detail: %s", detail)
-}
-
-func TestVerifyReportData_InvalidHash(t *testing.T) {
-	raw, nonce, reportData := makeRawForReportData(t, false)
-
-	// Corrupt the hash.
-	reportData[0] ^= 0xFF
-
-	v := ReportDataVerifier{}
-	_, err := v.VerifyReportData(reportData, raw, nonce)
-	if err == nil {
-		t.Fatal("expected error for invalid REPORTDATA hash")
-	}
-}
-
-func TestVerifyReportData_NonZeroUpper32(t *testing.T) {
-	raw, nonce, reportData := makeRawForReportData(t, false)
-
-	// Set REPORTDATA[32:64] to non-zero.
-	reportData[32] = 0xFF
-
-	v := ReportDataVerifier{}
-	_, err := v.VerifyReportData(reportData, raw, nonce)
-	if err == nil {
-		t.Fatal("expected error for non-zero REPORTDATA[32:64]")
-	}
-}
-
-func TestVerifyReportData_NonceMismatch(t *testing.T) {
-	raw, _, reportData := makeRawForReportData(t, false)
-
-	// Use a different nonce.
-	differentNonce := attestation.NewNonce()
-
-	v := ReportDataVerifier{}
-	_, err := v.VerifyReportData(reportData, raw, differentNonce)
-	if err == nil {
-		t.Fatal("expected error for nonce mismatch")
-	}
-}
-
-func TestVerifyGPUEvidenceHash_Valid(t *testing.T) {
-	gpu := []byte(`{"evidences":[]}`)
-	gpuHash := sha256.Sum256(gpu)
-
-	raw := &attestation.RawAttestation{
-		GPURawJSON:             gpu,
-		TinfoilGPUEvidenceHash: hex.EncodeToString(gpuHash[:]),
-	}
-
-	if err := verifyGPUEvidenceHash(raw); err != nil {
-		t.Fatalf("verifyGPUEvidenceHash failed: %v", err)
-	}
-}
-
-func TestVerifyGPUEvidenceHash_Mismatch(t *testing.T) {
-	gpu := []byte(`{"evidences":[]}`)
-
-	raw := &attestation.RawAttestation{
-		GPURawJSON:             gpu,
-		TinfoilGPUEvidenceHash: makeHex32(0xFF), // wrong hash
-	}
-
-	if err := verifyGPUEvidenceHash(raw); err == nil {
-		t.Fatal("expected error for GPU hash mismatch")
-	}
-}
-
-func TestVerifyGPUEvidenceHash_EmptyGPU(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		TinfoilGPUEvidenceHash: makeHex32(0x01),
-	}
-
-	if err := verifyGPUEvidenceHash(raw); err == nil {
-		t.Fatal("expected error for empty GPU field")
-	}
-}
-
-func TestIsNVSwitchExpected_SingleGPU(t *testing.T) {
-	gpu := []byte(`{"evidences":[{"arch":"HOPPER","certificate":"","evidence":"","nonce":"` + makeHex32(0x01) + `"}]}`)
-	expected, err := isNVSwitchExpected(gpu)
-	if err != nil {
-		t.Fatalf("isNVSwitchExpected failed: %v", err)
-	}
-	if expected {
-		t.Error("single GPU should not expect NVSwitch")
-	}
-}
-
-func TestIsNVSwitchExpected_8GPUHopper(t *testing.T) {
-	gpu := buildGPUJSON(8, ArchHopper)
-	expected, err := isNVSwitchExpected(gpu)
-	if err != nil {
-		t.Fatalf("isNVSwitchExpected failed: %v", err)
-	}
-	if !expected {
-		t.Error("8-GPU HOPPER should expect NVSwitch")
-	}
-}
-
-func TestIsNVSwitchExpected_8GPUBlackwell(t *testing.T) {
-	gpu := buildGPUJSON(8, ArchBlackwell)
-	expected, err := isNVSwitchExpected(gpu)
-	if err != nil {
-		t.Fatalf("isNVSwitchExpected failed: %v", err)
-	}
-	if expected {
-		t.Error("8-GPU BLACKWELL should not expect NVSwitch")
-	}
-}
-
-func TestIsNVSwitchExpected_8GPUMixedHopperBlackwell(t *testing.T) {
-	// Mix of HOPPER and BLACKWELL — at least one HOPPER means nvswitch expected.
-	var evBuilder strings.Builder
-	evBuilder.WriteString("[")
-	for i := range 8 {
-		if i > 0 {
-			evBuilder.WriteString(",")
-		}
-		arch := ArchBlackwell
-		if i == 0 {
-			arch = ArchHopper
-		}
-		evBuilder.Write(fmt.Appendf(nil, `{"arch":%q,"certificate":"","evidence":"","nonce":%q}`, arch, makeHex32(byte(i))))
-	}
-	evBuilder.WriteString("]")
-	gpu := fmt.Appendf(nil, `{"evidences":%s}`, evBuilder.String())
-
-	expected, err := isNVSwitchExpected(gpu)
-	if err != nil {
-		t.Fatalf("isNVSwitchExpected failed: %v", err)
-	}
-	if !expected {
-		t.Error("8-GPU with at least one HOPPER should expect NVSwitch")
-	}
-}
-
-func TestIsNVSwitchExpected_8GPUUnknownArch(t *testing.T) {
-	gpu := buildGPUJSON(8, "UNKNOWN_ARCH")
-	_, err := isNVSwitchExpected(gpu)
-	if err == nil {
-		t.Fatal("expected error for 8-GPU with unknown arch")
-	}
-}
-
-func TestIsNVSwitchExpected_MalformedJSON(t *testing.T) {
-	_, err := isNVSwitchExpected([]byte(`not json`))
-	if err == nil {
-		t.Fatal("expected error for malformed JSON")
-	}
-}
-
-func TestIsNVSwitchExpected_EmptyGPU(t *testing.T) {
-	_, err := isNVSwitchExpected(nil)
-	if err == nil {
-		t.Fatal("expected error for empty GPU")
-	}
-}
-
-// buildGPUJSON builds a GPU evidences JSON with count GPUs all of the given arch.
-func buildGPUJSON(count int, arch string) []byte {
-	var evBuilder strings.Builder
-	evBuilder.WriteString("[")
-	for i := range count {
-		if i > 0 {
-			evBuilder.WriteString(",")
-		}
-		evBuilder.Write(fmt.Appendf(nil, `{"arch":%q,"certificate":"","evidence":"","nonce":%q}`, arch, makeHex32(byte(i))))
-	}
-	evBuilder.WriteString("]")
-	return fmt.Appendf(nil, `{"evidences":%s}`, evBuilder.String())
-}
 
 // testMRSeam is a 48-byte MR_SEAM value used in policy tests.
 var testMRSeam = bytes.Repeat([]byte{0xAA}, 48)
@@ -501,114 +215,6 @@ func TestIsAllZeros(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// buildReportDataPreimage — hex decode error paths
-// ---------------------------------------------------------------------------
-
-func TestBuildReportDataPreimage_InvalidTLSKeyFP(t *testing.T) {
-	raw := &attestation.RawAttestation{TinfoilTLSKeyFP: "ZZZZ"}
-	_, err := buildReportDataPreimage(raw)
-	if err == nil {
-		t.Fatal("expected error for invalid TLS key fp hex")
-	}
-}
-
-func TestBuildReportDataPreimage_InvalidHPKEKey(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		TinfoilTLSKeyFP: makeHex32(0x01),
-		TinfoilHPKEKey:  "ZZZZ",
-	}
-	_, err := buildReportDataPreimage(raw)
-	if err == nil {
-		t.Fatal("expected error for invalid HPKE key hex")
-	}
-}
-
-func TestBuildReportDataPreimage_InvalidNonce(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		TinfoilTLSKeyFP: makeHex32(0x01),
-		TinfoilHPKEKey:  makeHex32(0x02),
-		TinfoilNonce:    "ZZZZ",
-	}
-	_, err := buildReportDataPreimage(raw)
-	if err == nil {
-		t.Fatal("expected error for invalid nonce hex")
-	}
-}
-
-func TestBuildReportDataPreimage_InvalidGPUHash(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		TinfoilTLSKeyFP:        makeHex32(0x01),
-		TinfoilHPKEKey:         makeHex32(0x02),
-		TinfoilNonce:           makeHex32(0x03),
-		TinfoilGPUEvidenceHash: "not-hex",
-	}
-	_, err := buildReportDataPreimage(raw)
-	if err == nil {
-		t.Fatal("expected error for invalid GPU evidence hash hex")
-	}
-}
-
-func TestBuildReportDataPreimage_InvalidNVSwitchHash(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		TinfoilTLSKeyFP:             makeHex32(0x01),
-		TinfoilHPKEKey:              makeHex32(0x02),
-		TinfoilNonce:                makeHex32(0x03),
-		TinfoilNVSwitchEvidenceHash: "not-hex",
-	}
-	_, err := buildReportDataPreimage(raw)
-	if err == nil {
-		t.Fatal("expected error for invalid NVSwitch evidence hash hex")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// verifyNVSwitchEvidenceHash — all error branches
-// ---------------------------------------------------------------------------
-
-func TestVerifyNVSwitchEvidenceHash_EmptyJSON(t *testing.T) {
-	raw := &attestation.RawAttestation{NVSwitchRawJSON: nil}
-	err := verifyNVSwitchEvidenceHash(raw)
-	if err == nil {
-		t.Fatal("expected error for empty NVSwitch JSON")
-	}
-	if !strings.Contains(err.Error(), "nvswitch field is empty") {
-		t.Errorf("error %q should mention nvswitch field is empty", err)
-	}
-}
-
-func TestVerifyNVSwitchEvidenceHash_EmptyHash(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		NVSwitchRawJSON:             []byte(`{"data":"test"}`),
-		TinfoilNVSwitchEvidenceHash: "",
-	}
-	err := verifyNVSwitchEvidenceHash(raw)
-	if err == nil {
-		t.Fatal("expected error for empty NVSwitch evidence hash")
-	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error %q should mention empty", err)
-	}
-}
-
-func TestVerifyNVSwitchEvidenceHash_Mismatch(t *testing.T) {
-	raw := &attestation.RawAttestation{
-		NVSwitchRawJSON:             []byte(`{"data":"test"}`),
-		TinfoilNVSwitchEvidenceHash: makeHex32(0xFF),
-	}
-	err := verifyNVSwitchEvidenceHash(raw)
-	if err == nil {
-		t.Fatal("expected error for NVSwitch hash mismatch")
-	}
-	if !strings.Contains(err.Error(), "mismatch") {
-		t.Errorf("error %q should mention mismatch", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// tcbSVNGTE — mismatched lengths
-// ---------------------------------------------------------------------------
-
 func TestTcbSVNGTE_MismatchedLengths(t *testing.T) {
 	if tcbSVNGTE([]byte{1, 2}, []byte{1}) {
 		t.Error("mismatched lengths should return false")
@@ -618,76 +224,157 @@ func TestTcbSVNGTE_MismatchedLengths(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// VerifyReportData — GPU evidence hash mismatch
-// ---------------------------------------------------------------------------
-
-func TestVerifyReportData_GPUHashMismatch(t *testing.T) {
-	raw, nonce, reportData := makeRawForReportData(t, false)
-	// Set GPU hash to a wrong value while GPURawJSON is present.
-	raw.TinfoilGPUEvidenceHash = makeHex32(0xFF)
-	_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, nonce)
-	if err == nil {
-		t.Fatal("expected error for GPU evidence hash mismatch")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// validateHexField — direct unit test
-// ---------------------------------------------------------------------------
-
-func TestValidateHexField_CorrectLenInvalidHex(t *testing.T) {
-	err := validateHexField("test", strings.Repeat("ZZ", 32))
-	if err == nil {
-		t.Fatal("expected error for 64-char invalid hex")
-	}
-}
-
-func TestValidateHexField_Valid(t *testing.T) {
-	err := validateHexField("test", makeHex32(0xAB))
+// parsedDocument builds a document, parses it, and returns the RawAttestation
+// with the REPORT_DATA a quote must carry.
+func parsedDocument(t *testing.T, b *docBuilder) (raw *attestation.RawAttestation, reportData [64]byte) {
+	t.Helper()
+	body, reportData := b.build(t)
+	raw, err := parseV3Document(body)
 	if err != nil {
-		t.Fatalf("unexpected error for valid hex: %v", err)
+		t.Fatalf("parseV3Document: %v", err)
+	}
+	return raw, reportData
+}
+
+func TestVerifyReportData_Valid(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
+
+	detail, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+	if err != nil {
+		t.Fatalf("VerifyReportData: %v", err)
+	}
+	if !strings.Contains(detail, "reportdata_hash verified") {
+		t.Errorf("detail = %q, want it to report a verified hash", detail)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// replaceSignatureValue — uncovered branches
-// ---------------------------------------------------------------------------
+// The client nonce is the authority for freshness. A document that echoes a
+// different nonce must be rejected even when it is internally consistent.
+func TestVerifyReportData_NonceMismatch(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
 
-func TestReplaceSignatureValue_NoClosingQuote(t *testing.T) {
-	body := []byte(`{"signature":"ABCD`)
-	_, err := replaceSignatureValue(body, "ABCD")
-	if err == nil {
-		t.Fatal("expected error for missing closing quote")
+	other := attestation.NewNonce()
+	if _, err := (ReportDataVerifier{}).VerifyReportData(reportData, raw, other); err == nil {
+		t.Fatal("VerifyReportData accepted a nonce the client did not choose")
 	}
 }
 
-func TestReplaceSignatureValue_ValueMismatch(t *testing.T) {
-	body := []byte(`{"signature":"WRONG"}`)
-	_, err := replaceSignatureValue(body, "RIGHT")
-	if err == nil {
-		t.Fatal("expected error for value mismatch")
+func TestVerifyReportData_NonZeroUpper32(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
+	reportData[63] = 1
+
+	_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+	if err == nil || !strings.Contains(err.Error(), "not all zeros") {
+		t.Fatalf("error = %v, want a non-zero upper half rejection", err)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// verifyEnvelopeSignature — bad PEM, invalid DER
-// ---------------------------------------------------------------------------
+// The quote is the authority. A REPORT_DATA the hardware did not sign must not
+// verify, whatever the document says.
+func TestVerifyReportData_QuoteMismatch(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
+	reportData[0] ^= 0xff
 
-func TestVerifyEnvelopeSignature_NoPEM(t *testing.T) {
-	resp := &v3Response{Certificate: "not a PEM block"}
-	err := verifyEnvelopeSignature([]byte(`{}`), resp)
-	if err == nil {
-		t.Fatal("expected error for invalid PEM")
+	_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+	if err == nil || !strings.Contains(err.Error(), "REPORTDATA") {
+		t.Fatalf("error = %v, want a REPORTDATA mismatch", err)
 	}
 }
 
-func TestVerifyEnvelopeSignature_InvalidDER(t *testing.T) {
-	resp := &v3Response{
-		Certificate: "-----BEGIN CERTIFICATE-----\nYmFkZGF0YQ==\n-----END CERTIFICATE-----",
+// The endorsed hash covers the exact section bytes. Changing one byte after the
+// enclave hashed them must break the binding.
+func TestVerifyReportData_TamperedSection(t *testing.T) {
+	tests := []struct {
+		name   string
+		tamper func(raw *attestation.RawAttestation)
+	}{
+		{
+			name: "crypto_material",
+			tamper: func(raw *attestation.RawAttestation) {
+				raw.TinfoilCryptoMaterialBytes[10] ^= 0xff
+			},
+		},
+		{
+			name: "device_evidence",
+			tamper: func(raw *attestation.RawAttestation) {
+				raw.TinfoilDeviceEvidenceBytes[10] ^= 0xff
+			},
+		},
 	}
-	err := verifyEnvelopeSignature([]byte(`{}`), resp)
-	if err == nil {
-		t.Fatal("expected error for invalid DER certificate")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newDocBuilder()
+			raw, reportData := parsedDocument(t, b)
+			tt.tamper(raw)
+
+			_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+			if err == nil || !strings.Contains(err.Error(), "cpu_evidence.endorsed") {
+				t.Fatalf("error = %v, want an endorsed hash mismatch", err)
+			}
+		})
+	}
+}
+
+// An absent section cannot be hashed, so it cannot be bound.
+func TestVerifyReportData_AbsentSectionBytes(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
+	raw.TinfoilCryptoMaterialBytes = nil
+
+	_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+	if err == nil || !strings.Contains(err.Error(), "absent") {
+		t.Fatalf("error = %v, want an absent section error", err)
+	}
+}
+
+// challenge.report_data is the enclave's own statement. A document whose claim
+// contradicts the verified quote is self-inconsistent and must be rejected.
+func TestVerifyReportData_ChallengeContradictsQuote(t *testing.T) {
+	b := newDocBuilder()
+	raw, reportData := parsedDocument(t, b)
+	raw.TinfoilChallengeReportData = strings.Repeat("0", reportDataLen)
+
+	_, err := ReportDataVerifier{}.VerifyReportData(reportData, raw, b.nonce)
+	if err == nil || !strings.Contains(err.Error(), "challenge.report_data") {
+		t.Fatalf("error = %v, want a challenge.report_data mismatch", err)
+	}
+}
+
+// The derivation must reproduce what a live enclave computed. This recomputes
+// REPORT_DATA from the captured sections and nonce and compares it against the
+// value in the captured document.
+func TestComputeReportData_MatchesCapturedDocuments(t *testing.T) {
+	for _, path := range []string{fixtureCloudRouter, fixtureDirectGPU} {
+		t.Run(path, func(t *testing.T) {
+			var doc v3Document
+			if err := json.Unmarshal(readFixture(t, path), &doc); err != nil {
+				t.Fatalf("unmarshal fixture: %v", err)
+			}
+			cryptoBytes, err := base64.StdEncoding.DecodeString(doc.CryptoMaterial)
+			if err != nil {
+				t.Fatalf("decode crypto_material: %v", err)
+			}
+			deviceBytes, err := base64.StdEncoding.DecodeString(doc.DeviceEvidence)
+			if err != nil {
+				t.Fatalf("decode device_evidence: %v", err)
+			}
+			nonce, err := hex.DecodeString(doc.Challenge.Nonce)
+			if err != nil {
+				t.Fatalf("decode nonce: %v", err)
+			}
+
+			cryptoHash := sha256.Sum256(cryptoBytes)
+			deviceHash := sha256.Sum256(deviceBytes)
+			got := computeReportData(nonce, cryptoHash[:], deviceHash[:])
+
+			if hex.EncodeToString(got[:]) != doc.Challenge.ReportData {
+				t.Errorf("computed REPORT_DATA %s, captured %s",
+					hex.EncodeToString(got[:]), doc.Challenge.ReportData)
+			}
+		})
 	}
 }

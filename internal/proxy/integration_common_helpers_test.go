@@ -29,7 +29,7 @@ var integrationClient = tlsct.NewHTTPClient(5 * time.Minute)
 const (
 	integrationRequestTimeoutDefault  = 2 * time.Minute
 	integrationRequestTimeoutHeadroom = 10 * time.Second
-	integrationRequestTimeoutMin      = 5 * time.Second
+	integrationRequestTimeoutFloor    = 5 * time.Second
 )
 
 // integrationPrompt is a short prompt that minimizes cost and response time.
@@ -57,8 +57,8 @@ func integrationRequestTimeout(t *testing.T) time.Duration {
 	if deadline, ok := t.Deadline(); ok {
 		remaining := time.Until(deadline) - integrationRequestTimeoutHeadroom
 		switch {
-		case remaining <= integrationRequestTimeoutMin:
-			return integrationRequestTimeoutMin
+		case remaining <= integrationRequestTimeoutFloor:
+			return integrationRequestTimeoutFloor
 		case remaining < timeout:
 			return remaining
 		}

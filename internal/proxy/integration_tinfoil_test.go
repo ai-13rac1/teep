@@ -841,9 +841,38 @@ func assertTinfoilReportCached(t *testing.T, proxyURL, providerName, reportModel
 	}
 }
 
-func tinfoilMustPassFactors() []string {
-	return []string{
+// tinfoilMustPassFactors returns the factors that must pass for a provider.
+//
+// The two providers attest different principals. tinfoil_v3_direct attests the
+// enclave that runs the model, so its evidence is in the core tier.
+// tinfoil_v3_cloud attests the router, which is a gateway in front of a backend
+// it exposes no evidence about, so its evidence is in the gateway tier and the
+// core factors are disclosed limitations.
+// SEE: docs/attestation_gaps/tinfoil_cloud_integrity.md.
+func tinfoilMustPassFactors(providerName string) []string {
+	shared := []string{
 		"nonce_match",
+		"signing_key_present",
+		"e2ee_capable",
+		"tls_key_binding",
+		"e2ee_usable",
+	}
+	if providerName == "tinfoil_v3_cloud" {
+		return append(shared,
+			"gateway_nonce_match",
+			"gateway_tee_quote_present",
+			"gateway_tee_quote_structure",
+			"gateway_tee_cert_chain",
+			"gateway_tee_quote_signature",
+			"gateway_tee_debug_disabled",
+			"gateway_tee_reportdata_binding",
+			"gateway_tee_hardware_config",
+			"gateway_tee_measurement",
+			"gateway_tee_tcb_current",
+			"gateway_tee_tcb_not_revoked",
+		)
+	}
+	return append(shared,
 		"tee_quote_present",
 		"tee_quote_structure",
 		"tee_cert_chain",
@@ -853,11 +882,7 @@ func tinfoilMustPassFactors() []string {
 		"tee_hardware_config",
 		"tee_tcb_current",
 		"tee_tcb_not_revoked",
-		"signing_key_present",
-		"e2ee_capable",
-		"tls_key_binding",
-		"e2ee_usable",
-	}
+	)
 }
 
 func assertTinfoilAttestationReport(t *testing.T, cfg *config.Config, model, providerName string) {
@@ -893,7 +918,7 @@ func assertTinfoilAttestationReport(t *testing.T, cfg *config.Config, model, pro
 		t.Fatalf("decode report: %v", err)
 	}
 
-	for _, name := range tinfoilMustPassFactors() {
+	for _, name := range tinfoilMustPassFactors(providerName) {
 		f, ok := findFactor(report.Factors, name)
 		if !ok {
 			t.Errorf("factor %q not found in report", name)

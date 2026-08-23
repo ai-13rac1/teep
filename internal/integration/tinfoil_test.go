@@ -29,7 +29,17 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 
 	logReportFactors(t, report)
 	assertNoEnforcedFailures(t, report)
-	assertMustPass(t, report, []string{"nonce_match", "tee_quote_present", "tee_reportdata_binding", "signing_key_present", "e2ee_capable", "e2ee_usable", "tls_key_binding"})
+	// The router is a gateway, so its evidence is asserted on the gateway
+	// factors. SEE: TestVerifyRun_Tinfoil_Fixture.
+	assertMustPass(t, report, []string{
+		"nonce_match",
+		"gateway_tee_quote_present",
+		"gateway_tee_reportdata_binding",
+		"signing_key_present",
+		"e2ee_capable",
+		"e2ee_usable",
+		"tls_key_binding",
+	})
 	logReportResult(t, report)
 }
 

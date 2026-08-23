@@ -1271,8 +1271,8 @@ func TestMergedAllowFailTinfoilDirectAllowsNVSwitchByDefault(t *testing.T) {
 	if !afSet["nvswitch_binding"] {
 		t.Errorf("nvswitch_binding should be in allow_fail for tinfoil_v3_direct: got %v", af)
 	}
-	if !afSet["response_schema"] {
-		t.Errorf("response_schema should be in allow_fail for tinfoil_v3_direct: got %v", af)
+	if afSet["response_schema"] {
+		t.Errorf("response_schema should be enforced for tinfoil_v3_direct: got %v", af)
 	}
 }
 
@@ -1299,11 +1299,13 @@ func TestMergedAllowFailTinfoilCloudAllowsKDSAndGPUFactorsByDefault(t *testing.T
 		"nvidia_claims",
 		"cpu_gpu_chain",
 		"nvswitch_binding",
-		"response_schema",
 	} {
 		if !afSet[name] {
 			t.Errorf("%s should be in allow_fail for tinfoil_v3_cloud: got %v", name, af)
 		}
+	}
+	if afSet["response_schema"] {
+		t.Errorf("response_schema should be enforced for tinfoil_v3_cloud: got %v", af)
 	}
 }
 

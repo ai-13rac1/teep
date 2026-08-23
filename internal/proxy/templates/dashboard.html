@@ -288,8 +288,8 @@ function postureFor(atts, anyReq) {
   var verified = 0, blocked = 0, e2ee = 0, pass = 0, scored = 0;
   for (var i = 0; i < atts.length; i++) {
     var a = atts[i];
-    var tiers = a.tiers || [];
-    for (var t = 0; t < tiers.length; t++) { pass += tiers[t].passed; scored += tiers[t].total; }
+    var sc = tierScore(a.tiers);
+    pass += sc.pass; scored += sc.scored;
     if (a.blocked) { blocked++; } else { verified++; if (a.e2ee === "usable") e2ee++; }
   }
   var frac = scored > 0 ? pass / scored : 0;
@@ -368,10 +368,18 @@ function renderEnclaves(d) {
       sub = "Secure enclave · end-to-end encrypted";
     } else if (a.e2ee === "capable") {
       sub = "Secure enclave · encryption available";
-    } else if (a.allowed_failed > 0) {
-      sub = "Secure enclave · " + a.passed + " checks passed, " + a.allowed_failed + " non-critical pending";
     } else {
-      sub = "Secure enclave · " + a.passed + " checks passed";
+      sub = "Secure enclave";
+    }
+    // Every card carries its own score, in the same terms as the Factors
+    // passed tile. Without it a card says "end-to-end encrypted" and nothing
+    // about how much of the report actually passed.
+    var cardScore = tierScore(a.tiers);
+    if (cardScore.scored) {
+      sub += " · " + cardScore.pass + "/" + cardScore.scored + " factors passed";
+    }
+    if (!a.blocked && a.allowed_failed > 0) {
+      sub += ", " + a.allowed_failed + " non-critical pending";
     }
     var meta = [];
     if (ms.requests) meta.push(ms.requests + " req");

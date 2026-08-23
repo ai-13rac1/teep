@@ -160,6 +160,13 @@ func providerUsesTLSBinding(providerName string) bool {
 	}
 }
 
+// providerE2EEKeyBoundByGateway returns true for providers whose E2EE key is
+// bound by the gateway attestation rather than the model endpoint's.
+// SYNC: proxy.fromConfig sets Provider.E2EEKeyBoundByGateway for the same set.
+func providerE2EEKeyBoundByGateway(providerName string) bool {
+	return providerName == "tinfoil_v3_cloud"
+}
+
 // e2eeEnabledByDefault reports whether the named provider has E2EE enabled
 // by default in config.go's applyAPIKeyEnv.
 func e2eeEnabledByDefault(name string) bool {

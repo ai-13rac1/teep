@@ -527,6 +527,32 @@ var factorRegistry = []factorInfo{
 			"gateway's TDX quote. Ensures the gateway's runtime measurement " +
 			"history has not been tampered with.",
 	},
+	{
+		Name:    attestation.FactorGWTCBCurrent,
+		Tier:    4,
+		Summary: "Gateway firmware and microcode meet minimum patch levels",
+		Description: "Checks the gateway's reported TCB version against the " +
+			"minimum bootloader, TEE, SNP firmware and microcode patch levels. " +
+			"A gateway holds request plaintext, so a host below these levels " +
+			"carries known vulnerabilities against the traffic it handles.",
+	},
+	{
+		Name:    attestation.FactorGWTCBNotRevoked,
+		Tier:    4,
+		Summary: "Gateway TCB at or above minimum thresholds",
+		Description: "Confirms the gateway's TCB version is at or above the " +
+			"accepted minimum thresholds. For a SEV-SNP gateway no AMD CRL is " +
+			"fetched, so this is a threshold check rather than a revocation check.",
+	},
+	{
+		Name:    attestation.FactorEvidenceVerified,
+		Tier:    4,
+		Summary: "Every supplied quote had a verification result",
+		Description: "Fails when attestation evidence was fetched but no verifier " +
+			"produced a result for it, which would otherwise drop the factors that " +
+			"assess that evidence and leave a shorter, all-passing report. Kept out " +
+			"of KnownFactors on purpose: no allow_fail list can reach it.",
+	},
 }
 
 // tierRegistry describes the verification tiers.
@@ -569,11 +595,13 @@ var tierRegistry = []tierInfo{
 		Number: 4,
 		Name:   "Gateway Attestation",
 		Label:  "Tier 4: Gateway Attestation",
-		Description: "Factors 33-45. Only applies to the nearcloud provider " +
-			"(cloud-api.near.ai). Verifies the API gateway itself runs in " +
-			"an Intel TDX enclave with its own TDX quote, certificate chain, " +
-			"and compose binding. This proves all traffic is routed through " +
-			"a TEE-attested gateway, not just that the model backend is attested.",
+		Description: "Applies to providers that route requests through an " +
+			"attested gateway: nearcloud (cloud-api.near.ai, Intel TDX) and " +
+			"tinfoil_v3_cloud (inference.tinfoil.sh, AMD SEV-SNP). Verifies the " +
+			"gateway itself with its own quote, certificate chain, measurement " +
+			"and REPORTDATA binding. For tinfoil_v3_cloud this tier carries all " +
+			"the evidence there is: the router is attested, the model backend " +
+			"behind it exposes none.",
 	},
 }
 

@@ -225,8 +225,10 @@ func verifyCertChain(certs []*x509.Certificate, pinnedRoot *x509.Certificate) er
 		intermediatePool.AddCert(c)
 	}
 
-	// NVIDIA device certs don't expire (notAfter=9999-12-31) and don't
-	// have standard key usages set, so we disable time and usage checks.
+	// Verify at Go's defaults: expiry against time.Now, and EKU treated as
+	// unrestricted because these certs carry none. NVIDIA device certs set
+	// notAfter=9999-12-31 and no key usage, so neither default rejects them.
+	// A cert that did carry an EKU would have to satisfy ExtKeyUsageServerAuth.
 	opts := x509.VerifyOptions{
 		Roots:         rootPool,
 		Intermediates: intermediatePool,

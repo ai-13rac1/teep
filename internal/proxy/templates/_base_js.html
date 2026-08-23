@@ -29,6 +29,18 @@ function timeAgo(ts) {
   return Math.floor(diff / 3600) + "h ago";
 }
 
+// tierScore sums the per-tier rollups into one pass/scored pair. N/A factors
+// are already out of the tier totals, so scored is the report's denominator.
+// SYNC: the dashboard's stat tile and each model card both read this, so the
+// headline number and the per-model numbers cannot disagree.
+function tierScore(tiers) {
+  var pass = 0, scored = 0;
+  for (var i = 0; tiers && i < tiers.length; i++) {
+    pass += tiers[i].passed; scored += tiers[i].total;
+  }
+  return { pass: pass, scored: scored };
+}
+
 function tierBars(tiers) {
   if (!tiers || !tiers.length) return "";
   var h = '<div class="tiers">';
@@ -68,9 +80,12 @@ function factorList(factors, open) {
       var f = list[j];
       var st = factorStatus(f.status);
       var glyph = STATUS_GLYPH[st] || "\u25cc";
+      // A skip warns like an allowed failure: the factor applies and did not
+      // run. Name and glyph both carry it, so the row reads as a gap at a
+      // glance. NotApplicable stays neutral.
       var fclass = "";
       if (st === "fail" && f.enforced) fclass = " f-fail";
-      else if (st === "fail") fclass = " f-warn";
+      else if (st === "fail" || st === "skip") fclass = " f-warn";
       var fiClass = (st === "fail" && !f.enforced) ? "warn" : st;
       var badge = "";
       if (st === "fail" && f.enforced) badge = '<span class="req">enforced</span>';
