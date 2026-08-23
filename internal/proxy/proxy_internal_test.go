@@ -216,7 +216,9 @@ func TestEHBPErrorBody(t *testing.T) {
 	}
 
 	t.Run("no session passes through", func(t *testing.T) {
-		body, ok := ehbpErrorBody(newResp(""), nil)
+		resp := newResp("")
+		defer resp.Body.Close()
+		body, ok := ehbpErrorBody(resp, nil)
 		if !ok || body == nil {
 			t.Fatal("a body that was never encrypted must relay unchanged")
 		}
@@ -224,17 +226,23 @@ func TestEHBPErrorBody(t *testing.T) {
 	// Without the nonce there is no way to decrypt, so the bytes must not be
 	// relayed: they are ciphertext and would reach the client as mojibake.
 	t.Run("session but no nonce is withheld", func(t *testing.T) {
-		if _, ok := ehbpErrorBody(newResp(""), session); ok {
+		resp := newResp("")
+		defer resp.Body.Close()
+		if _, ok := ehbpErrorBody(resp, session); ok {
 			t.Error("ciphertext relayed with no response nonce to decrypt it")
 		}
 	})
 	t.Run("session but short nonce is withheld", func(t *testing.T) {
-		if _, ok := ehbpErrorBody(newResp("abcd"), session); ok {
+		resp := newResp("abcd")
+		defer resp.Body.Close()
+		if _, ok := ehbpErrorBody(resp, session); ok {
 			t.Error("ciphertext relayed with an invalid response nonce")
 		}
 	})
 	t.Run("session and nonce decrypts", func(t *testing.T) {
-		body, ok := ehbpErrorBody(newResp(nonce), session)
+		resp := newResp(nonce)
+		defer resp.Body.Close()
+		body, ok := ehbpErrorBody(resp, session)
 		if !ok || body == nil {
 			t.Error("a decryptable error body must be relayed as plaintext")
 		}

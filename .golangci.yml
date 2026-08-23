@@ -12,6 +12,7 @@ linters:
     - dogsled            # too many blanks — we have legitimate multi-blank assigns in test handlers
     - dupl               # duplicate detection too aggressive for test code
     - exhaustruct        # requiring all struct fields initialized is too strict
+    - exhaustruct_v5     # renamed exhaustruct in golangci-lint >= 2.13
     - funlen             # function length limits are arbitrary
     - gochecknoglobals   # we have legitimate package-level vars
     - gochecknoinits     # we don't use init() but no need to lint for it

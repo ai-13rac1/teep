@@ -255,8 +255,7 @@ func (e requestNormalizationError) Unwrap() error {
 }
 
 func normalizationStatusCode(err error) int {
-	var normalizeErr requestNormalizationError
-	if errors.As(err, &normalizeErr) {
+	if normalizeErr, ok := errors.AsType[requestNormalizationError](err); ok {
 		return normalizeErr.statusCode
 	}
 	return http.StatusInternalServerError
