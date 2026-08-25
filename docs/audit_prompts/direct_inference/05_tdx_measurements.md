@@ -2,7 +2,7 @@
 
 ## Scope
 
-Audit extraction, integrity checks, and policy enforcement for TDX quote measurement fields, including documented residual risk when golden baselines are unavailable.
+Audit extraction, integrity checks, and policy enforcement for TDX quote measurement fields, including documented residual risk when reference baselines are unavailable.
 
 ## Primary Files
 
@@ -33,7 +33,7 @@ Understanding the security semantics of each register is critical for assessing 
 
 **MRSEAM** — Measurement of the TDX module (SEAM firmware). This 48-byte hash represents the identity and integrity of the Intel TDX module running in Secure Arbitration Mode. Intel signs and guarantees TDX module integrity; the MRSEAM value should correspond to a known Intel-released TDX module version. Verification of MRSEAM ensures the TDX firmware has not been tampered with and is a recognised, trusted version. Without MRSEAM verification, an attacker who compromises the hypervisor could potentially load a modified TDX module that subverts TD isolation guarantees.
 
-**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the root-of-trust anchor for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
+**MRTD** — Measurement Register for Trust Domain. This 48-byte hash captures the initial memory contents and configuration of the TD at creation time, specifically the virtual firmware (OVMF/TDVF) measurement. MRTD is measured by the TDX module in SEAM mode before any guest code executes, making it the trust root for the entire guest boot chain. In dstack's architecture, MRTD corresponds to TPM PCR[0] (FirmwareCode). MRTD can be pre-calculated from the built dstack OS image. Without MRTD verification, an attacker could substitute a different virtual firmware (e.g., one that leaks secrets or skips subsequent measured boot steps) while preserving the correct compose hash and RTMR3 values.
 
 **RTMR0** — Runtime firmware configuration measurement. RTMR0 records the CVM's virtual hardware setup as measured by OVMF, including CPU count, memory size, device configuration, secure boot policy variables (PK, KEK, db, dbx), boot variables, and TdHob/CFV data provided by the VMM. Corresponds to TPM PCR[1,7]. While dstack uses fixed devices, CPU and memory specifications can vary, so RTMR0 can be computed from the dstack image given specific CPU and RAM parameters. Without RTMR0 verification, a malicious VMM could alter the virtual hardware configuration (e.g., inject rogue devices or disable secure boot) without detection.
 
@@ -47,11 +47,11 @@ Understanding the security semantics of each register is critical for assessing 
 
 For complete attestation of a dstack-based CVM, the verification process should:
 
-1. **Obtain golden values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
+1. **Obtain reference values**: The inference provider MUST publish reference values for MRTD, RTMR0, RTMR1, and RTMR2 corresponding to each released CVM image version. These values can be computed using reproducible build tooling (e.g., dstack's `dstack-mr` tool) from the source-built image given the specific CPU and RAM configuration of the deployment.
 
 2. **Verify MRSEAM against Intel's published values**: MRSEAM should match a known Intel TDX module release. Intel publishes TDX module versions; the expected MRSEAM value can be derived from the specific TDX module version running on the platform.
 
-3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against golden values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
+3. **Verify MRTD, RTMR0, RTMR1, RTMR2 against reference values**: These four registers, taken together, attest that the firmware, kernel, initrd, rootfs, and boot configuration all match the expected dstack OS image for the provider's declared CPU/RAM configuration. This is the only way to establish that the base operating environment is the expected one.
 
 4. **Verify RTMR3 via event log replay**: RTMR3 contains runtime-specific measurements that cannot be pre-calculated. Replay the event log, compare the replayed RTMR3 against the quoted value, and then inspect the event log entries for expected compose hash, app ID, and key provider values.
 
@@ -138,21 +138,21 @@ The audit MUST verify:
 - whether allowlist mismatches are enforced fail-closed or informational (depends on whether the factor is in `allow_fail`),
 - the `--update-config` bootstrapping flow and that it correctly captures observed measurements.
 
-### Golden-Value Management Lifecycle
+### Reference Value Management
 
-The audit MUST assess the lifecycle of golden/reference measurement values:
-- **Acquisition**: How are golden values obtained? (reproducible build tooling, provider API, manual configuration)
-- **Versioning**: How are golden values versioned when the CVM image is updated? Is there a grace period where both old and new values are accepted during rollouts?
-- **Rotation**: How are stale golden values retired? Is there a mechanism to remove old values from the allowlist after a deployment upgrade completes?
-- **Distribution**: How would updated golden values reach the teep verifier? (code update, config reload, API fetch)
-- **Integrity**: How are golden values protected from tampering in transit and at rest? (signed manifests, pinned transport)
+The audit MUST assess the lifecycle of reference measurement values:
+- **Acquisition**: How are reference values obtained? (reproducible build tooling, provider API, manual configuration)
+- **Versioning**: How are reference values versioned when the CVM image is updated? Is there a grace period where both old and new values are accepted during rollouts?
+- **Rotation**: How are stale reference values retired? Is there a mechanism to remove old values from the allowlist after a deployment upgrade completes?
+- **Distribution**: How would updated reference values reach the teep verifier? (code update, config reload, API fetch)
+- **Integrity**: How are reference values protected from tampering in transit and at rest? (signed manifests, pinned transport)
 
-These questions apply both to the current state (where golden values are absent) and to the future state (when the provider publishes them).
+These questions apply both to the current state (where reference values are absent) and to the future state (when the provider publishes them).
 
 ### Relationship Between Measurements and Event Log
 
 The audit MUST verify how measurement registers interact with event log verification:
-- RTMR3 is verified by replaying the event log (see Section 06 — Event Log Integrity for replay details), while RTMR0-2 are verified against golden values (when available),
+- RTMR3 is verified by replaying the event log (see Section 06 — Event Log Integrity for replay details), while RTMR0-2 are verified against reference values (when available),
 - the event log replay for RTMR3 is a consistency check (quoted value matches replayed value), not a policy check — the actual policy checks happen when inspecting individual event log entries (compose hash, app ID, key provider),
 - MRCONFIGID is independently bound via compose hashing (see Section 08 — CVM Image Verification) and partially overlaps with RTMR3 compose hash verification,
 - the audit MUST document which measurement registers are covered by which verification mechanism and identify any registers that have no verification path at all.
@@ -168,7 +168,7 @@ TCB (Trusted Computing Base) level interacts with measurement verification:
 ## Mandatory Residual-Risk Analysis
 
 You MUST explicitly evaluate the known baseline-publication gap:
-- if provider golden values for MRSEAM/MRTD/RTMR0-2 are absent,
+- if provider reference values for MRSEAM/MRTD/RTMR0-2 are absent,
 - whether these fields become informational-only,
 - why this leaves system-level integrity gaps despite compose binding and RTMR3/event-log consistency checks.
 
@@ -177,7 +177,7 @@ You MUST quantify realistic attacker capability under this gap (for example, hyp
 **The audit MUST recommend** that the inference provider publish:
 1. The specific dstack OS version (or equivalent CVM image) and TDX module version used in their deployments,
 2. Reproducible build instructions or source references for their CVM image,
-3. Pre-computed golden values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration,
+3. Pre-computed reference values for MRTD, RTMR0, RTMR1, and RTMR2 for each supported CPU/RAM configuration,
 4. The expected MRSEAM value for the Intel TDX module version deployed on their hardware,
 5. A versioned manifest or API endpoint that maps deployment configurations to expected measurement values, so that verifiers like teep can populate `MeasurementPolicy` allowlists automatically.
 
@@ -205,11 +205,11 @@ See `docs/attestation_gaps/dstack_integrity.md` for the detailed analysis and re
 ### General Security Audit Practices
 
 - **Trust boundary for measurement values**: Measurement values from the quote are cryptographically attested (after quote signature verification succeeds), but their interpretation depends on policy. Verify that no measurement-based security decisions are made before quote signature verification is complete.
-- **Fail-secure for empty policy**: When no golden values are configured, the measurement check must be explicitly documented as "skipped due to no policy" rather than silently returning "pass." Verify that the verification report clearly distinguishes between "checked and matched" and "not checked."
+- **Fail-secure for empty policy**: When no reference values are configured, the measurement check must be explicitly documented as "skipped due to no policy" rather than silently returning "pass." Verify that the verification report clearly distinguishes between "checked and matched" and "not checked."
 - **Defense in depth across registers**: Verify that the code is structured to check all measurement registers independently, so that a bug in one register's check does not bypass checks on other registers.
 - **Audit trail completeness**: Verify that all measurement register values (both expected and actual) are included in the verification report for offline forensic analysis, even for registers where no policy enforcement occurs.
 - **Configuration injection prevention**: If measurement allowlists can be configured via external input (config files, environment variables), verify that the configuration parsing validates input format strictly (exact hex length, no whitespace, no wildcards/regex).
-- **Rollback protection**: When golden values are updated (future state), verify whether the old values are immediately removed from the allowlist or whether a transition window exists. A too-long transition window could allow an attacker to roll back to a vulnerable CVM image that still matches an old allowlist entry.
+- **Rollback protection**: When reference values are updated (future state), verify whether the old values are immediately removed from the allowlist or whether a transition window exists. A too-long transition window could allow an attacker to roll back to a vulnerable CVM image that still matches an old allowlist entry.
 
 ## Section Deliverable
 

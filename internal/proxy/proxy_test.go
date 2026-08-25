@@ -459,7 +459,7 @@ const veniceModelsJSON = `{
 	]
 }`
 
-// buildConfig returns a *config.Config wired to the given attestation server
+// buildConfig returns a *config.Config configured for the given attestation server
 // URL, with a single "venice" provider.
 func buildConfig(attestBaseURL string, _ bool) *config.Config {
 	return &config.Config{
@@ -686,7 +686,7 @@ func (h *pathCapturingPinnedHandler) HandlePinned(_ context.Context, req *provid
 }
 
 // newNeardirectProxyServer creates a neardirect-backed proxy server with all
-// endpoint paths wired and a stub PinnedHandler attached.
+// endpoint paths configured and a stub PinnedHandler attached.
 func newNeardirectProxyServer(t *testing.T, handler provider.PinnedHandler) *httptest.Server {
 	t.Helper()
 	cfg := &config.Config{
@@ -4420,7 +4420,7 @@ func (m *mockMarkingFetcher) Invalidate(_ string) {
 	m.invalidateCalls++
 }
 
-// newChutesRetryTestServer creates a proxy with a "chutes" provider wired
+// newChutesRetryTestServer creates a proxy with a "chutes" provider configured
 // for unit testing instance failover. The encryptor is replaced with a
 // passthrough so tests can focus on the retry routing logic.
 func newChutesRetryTestServer(t *testing.T, upstreamURL string) (srv *proxy.Server, ts *httptest.Server) {

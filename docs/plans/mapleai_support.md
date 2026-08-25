@@ -81,7 +81,7 @@ AWS Nitro Root Certificate (embedded, byte-compared)
 
 1. **Root cert byte-identity**: `cabundle[0]` must be byte-identical to the embedded
    AWS Nitro root certificate DER. Do NOT use flexible X.509 subject matching — only
-   exact byte comparison. This is the sole trust anchor.
+   exact byte comparison. This is the sole trust root.
 2. **Full chain signature verification**: Every link in the chain (root → intermediates
    → leaf) must have its signature cryptographically verified. A missing or invalid
    intermediate breaks the entire chain.
@@ -114,7 +114,7 @@ AWS Nitro Root Certificate (embedded, byte-compared)
 **Gap vs. dstack:** Dstack providers have an online TCB freshness check via Intel PCS
 (`intel_pcs_collateral`, `tdx_tcb_current`, `tdx_tcb_not_revoked`). Nitro has no
 equivalent online service for TCB validation. The AWS Nitro PKI certificate chain
-provides the trust anchor, but there is no mechanism to check whether a specific
+provides the trust root, but there is no mechanism to check whether a specific
 enclave image has been revoked or superseded. This means a compromised enclave image
 that was once valid could continue to pass PCR0 checks until the operator manually
 removes it from the allowlist.
@@ -1546,7 +1546,7 @@ This is analogous to the existing `if chutesE2EE != nil` check for Chutes.
 - Assert report is not blocked with MapleAI allow-fail list
 - Assert E2EE session establishment succeeds with mock key exchange
 
-**Live integration tests** (gated behind `TEEP_LIVE_TESTS` + `MAPLEAI_API_KEY`):
+**Live integration tests** (requiring `TEEP_LIVE_TESTS` + `MAPLEAI_API_KEY`):
 - `TestMapleAIModels` — GET /v1/models returns valid model list
 - `TestMapleAIAttestation` — Full attestation fetch + verify cycle
 - `TestMapleAIChatNonStreaming` — Non-streaming chat completion with E2EE
@@ -1563,7 +1563,7 @@ This is analogous to the existing `if chutesE2EE != nil` check for Chutes.
 
 **Reference patterns:**
 - `internal/integration/nearcloud_test.go` for fixture-based replay
-- `internal/integration/neardirect_test.go` for live test gating
+- `internal/integration/neardirect_test.go` for live test requirements
 - `internal/integration/helpers_test.go` for shared test helpers
 
 ## Verification

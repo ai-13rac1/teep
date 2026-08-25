@@ -146,7 +146,7 @@ func (v *NVIDIAVerifier) Shutdown() {
 // VerifyNRAS posts the raw EAT payload to NVIDIA's Remote Attestation
 // Service for RIM-based measurement comparison and verifies the returned JWT.
 // This provides defense-in-depth: local SPDM verification proves evidence is
-// well-formed; NRAS compares GPU firmware measurements against NVIDIA's golden
+// well-formed; NRAS compares GPU firmware measurements against NVIDIA's
 // Reference Integrity Manifest values.
 func (v *NVIDIAVerifier) VerifyNRAS(ctx context.Context, eatPayload string, client *http.Client, opts ...jwt.ParserOption) *NvidiaVerifyResult {
 	if client == nil {
@@ -223,8 +223,8 @@ func (v *NVIDIAVerifier) VerifyNRAS(ctx context.Context, eatPayload string, clie
 //
 // Context note: singleflight coalesces concurrent callers under one shared
 // execution. ctx is the leader's context; if the leader's context is cancelled
-// mid-fetch, all waiting callers receive the cancellation error. This is an
-// acceptable trade-off — JWKS fetches are short-lived and rarely cancelled.
+// mid-fetch, all waiting callers receive the cancellation error. JWKS fetches
+// are short-lived and rarely cancelled.
 func (v *NVIDIAVerifier) getOrCreateKeyfunc(ctx context.Context, jwksURL string, client *http.Client) (keyfunc.Keyfunc, error) {
 	v.mu.RLock()
 	if entry, ok := v.cache[jwksURL]; ok && time.Since(entry.createdAt) < v.cacheTTL {

@@ -107,7 +107,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 	nvidiaResult, nrasResult := verifyNVIDIA(ctx, raw, nonce, client, opts.Offline, nv, nrasJWTParserOptions(opts.VerificationTime)...)
 	pocResult := checkPoC(ctx, raw.IntelQuote, client, opts.Offline, opts.VerificationTime)
 
-	// Model compose evidence (gated on TDX).
+	// Model compose evidence (requires a parsed TDX quote).
 	var composeResult *attestation.ComposeBindingResult
 	var modelCD attestation.ComposeDigests
 	if raw.AppCompose != "" && tdxResult != nil && tdxResult.ParseErr == nil {

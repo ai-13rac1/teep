@@ -98,7 +98,7 @@ The watchtower is Chutes' continuous validator-side monitoring system that probe
 LaunchConfig.env_type != "tee",  # Exclude TEE
 ```
 
-For the exact class of instances that run in hardware TEEs, the watchtower's weight verification does not run. TEE instances rely entirely on the measured boot chain (LUKS gating + cosign admission) rather than runtime filesystem probing for weight integrity.
+For the exact class of instances that run in hardware TEEs, the watchtower's weight verification does not run. TEE instances rely entirely on the measured boot chain (LUKS boot enforcement + cosign admission) rather than runtime filesystem probing for weight integrity.
 
 The watchtower exclusion is architecturally coherent: the TEE's measured boot chain should make filesystem probing redundant because the cosign admission controller prevents loading unsigned images, and the LUKS-encrypted root filesystem prevents boot-time substitution. However, this means there is no runtime verification that the correct model weights are loaded in GPU VRAM after the initial boot sequence.
 
@@ -237,7 +237,7 @@ This is the single most impactful potential enhancement for model weight authent
 
 ### Compose-attested model image identity (dstack attestation chain)
 
-For dstack-based providers (Venice, Nearcloud, Neardirect), a stronger approach than simple metadata is available today through the existing dstack attestation chain. The key insight is that the Docker Compose manifest is cryptographically bound to the TDX hardware attestation, and the images referenced in that manifest can be independently verified through Sigstore and Rekor. If the inference container image is built reproducibly and its source code is auditable, then the attestation chain can prove that a specific model image — and therefore specific model weights — is in use.
+For dstack-based providers (Venice, Nearcloud, Neardirect), a stronger approach than simple metadata is available today through the existing dstack attestation chain: the Docker Compose manifest is cryptographically bound to the TDX hardware attestation, and the images referenced in that manifest can be independently verified through Sigstore and Rekor. If the inference container image is built reproducibly and its source code is auditable, then the attestation chain can prove that a specific model image — and therefore specific model weights — is in use.
 
 #### The dstack attestation chain for model identity
 
@@ -407,7 +407,7 @@ Both SGLang and vLLM have recently added **batch-invariant inference** modes tha
 
 3. **Comparison**: If the target's output is token-for-token identical to the baseline, the target is running the same model with the same weights on a deterministic inference engine. A mismatch indicates either a different model, different weights (quantized, fine-tuned, or backdoored), or a non-deterministic engine configuration.
 
-This approach is powerful because it requires **no provider API changes** — it works entirely through the existing OpenAI-compatible chat completions endpoint, which already supports a `seed` parameter. It detects model substitution attacks at the inference output level rather than the filesystem level.
+This approach requires **no provider API changes** — it works entirely through the existing OpenAI-compatible chat completions endpoint, which already supports a `seed` parameter. It detects model substitution attacks at the inference output level rather than the filesystem level.
 
 #### SGLang deterministic inference
 

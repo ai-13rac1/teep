@@ -352,7 +352,7 @@ func (h *PinnedHandler) attestOnConn(
 		composeResult.Err = attestation.VerifyComposeBinding(raw.AppCompose, tdxResult.MRConfigID)
 	}
 
-	// Gateway TLS fingerprint — connection trust anchor. MUST remain inline/fatal.
+	// Gateway TLS fingerprint — connection trust root. MUST remain inline/fatal.
 	if gwRaw.TLSCertFingerprint == "" {
 		return nil, "", errors.New("gateway attestation response missing tls_cert_fingerprint")
 	}

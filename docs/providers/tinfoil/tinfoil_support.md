@@ -139,7 +139,7 @@ HTTP 400. `/v1/realtime` and `/v1/convert/file` are deferred to
 Vision models (qwen3-vl-30b, gemma4-31b, kimi-k2-6) use the chat completions
 endpoint with multimodal content arrays — no separate vision endpoint is needed.
 
-Note: For exchanges with non-empty HTTP bodies, EHBP encrypts the entire body
+For exchanges with non-empty HTTP bodies, EHBP encrypts the entire body
 as a single AEAD stream. There are **no field-level gaps** for those encrypted
 exchanges. Bodyless endpoints (for example `GET /v1/models`) are plaintext at
 the HTTP-body layer by design.
@@ -159,7 +159,7 @@ code, teep must follow these endpoint-specific routing mechanics:
    bodies. Current teep behavior forwards them only when provider E2EE is
    disabled; when E2EE is enabled for Tinfoil, the proxy fails closed before
    routing because Tinfoil is a non-pinned full-body E2EE provider and the
-   multipart route is not wired through EHBP.
+   multipart route is not implemented through EHBP.
 5. For multipart audio requests, extract model from multipart field `model`.
    Missing or empty model is a fail-closed request error.
 6. `/v1/models` is a bodyless proxy-aggregated GET. It is not EHBP-encrypted
@@ -507,7 +507,7 @@ Link 1: Hardware Root of Trust
         Workflow bound to specific GitHub repo + tag
    Code bundle contains code measurements (RTMR1/RTMR2 or SNP measurement)
    Hardware-measurements bundle contains platform measurements (MRTD/RTMR0)
-        Verified by: sigstore-go against Sigstore root trust anchor
+        Verified by: sigstore-go against Sigstore trust root
 ```
 
 **What teep must verify (enforcement checklist):**
@@ -1447,7 +1447,7 @@ follows:
 even if strict schema validation is loosened for forward compatibility):
 
 1. Require `format` equals exactly `https://tinfoil.sh/predicate/attestation/v3`.
-   This is the authoritative format gate. Reject any other value.
+   This is the authoritative format check. Reject any other value.
 2. Reject any response with a `body` field (legacy V2 format indicator).
    This is the independent legacy-format guard.
 3. Parse the full envelope with `internal/jsonstrict`. Current code records
@@ -1487,7 +1487,7 @@ even if strict schema validation is loosened for forward compatibility):
       present (32 bytes).
 10. Verify `signature` using ECDSA ASN.1 over SHA-256 of the JSON payload
    with the `signature` value replaced by an empty string.
-   - **Preferred approach**: byte-level surgery on the raw JSON response.
+   - **Preferred approach**: edit the raw JSON response bytes directly.
      Find the `"signature":"<base64>"` value in the raw bytes and replace
      the value with `""`, preserving all other bytes exactly. This avoids
      implementation-dependent JSON serialization differences between Go's
@@ -1734,7 +1734,7 @@ Compatibility rule: for Tinfoil, apply EHBP behavior consistently across
 `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and
 `/v1/audio/speech` when provider E2EE is enabled. The current proxy rejects
 `/v1/audio/transcriptions` when E2EE is enabled because multipart uploads are
-not wired through the non-pinned EHBP path; the same route can be forwarded
+not implemented through the non-pinned EHBP path; the same route can be forwarded
 with provider E2EE disabled after attestation. `/v1/convert/file` is deferred
 to `tinfoil_endpoints.md`.
 
@@ -1877,7 +1877,7 @@ Current teep behavior is:
   field to the upstream model ID and forwards the body after attestation.
 - When provider E2EE is enabled for either Tinfoil provider, teep rejects the
   request with a fail-closed diagnostic because multipart uploads are not
-  wired through the non-pinned EHBP path.
+  implemented through the non-pinned EHBP path.
 
 ---
 
@@ -2218,7 +2218,7 @@ encryption and response decryption.
 
 ### Provider Wiring and Configuration
 
-Both `tinfoil_v3_cloud` and `tinfoil_v3_direct` are wired into the proxy,
+Both `tinfoil_v3_cloud` and `tinfoil_v3_direct` are connected to the proxy,
 config, and endpoint dispatch.
 
 **Core files**:
@@ -2392,7 +2392,7 @@ wiring as a thin layer on top.
 
 9. **Responses + TTS Endpoints**:
    - `tinfoil_v3_cloud`: supports `/v1/responses`, `/v1/audio/speech`, and
-     the other Tinfoil routes explicitly wired in `proxy.go`.
+     the other Tinfoil routes explicitly connected in `proxy.go`.
    - `tinfoil_v3_direct`: supports `/v1/responses` and `/v1/chat/completions`
      on all inference enclaves; audio/TTS only on enclaves that expose them
      per their `tinfoil-config.yml` `api_routes` configuration.

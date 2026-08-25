@@ -196,8 +196,9 @@ func VerifySEVReportOffline(ctx context.Context, report []byte) *SEVVerifyResult
 	result.DebugEnabled = policy.Debug
 
 	// Log the raw guest policy and platform_info bitmasks plus their
-	// hazard/identity bits, decoded by name, so drift is greppable on every
-	// attestation without decoding raw report bytes by hand. platform_info is
+	// hazard/identity bits, decoded by name, so a changed value can be found by
+	// text search in every attestation without decoding raw report bytes by
+	// hand. platform_info is
 	// a separate 8-byte little-endian field at report offset 0x40; go-sev-guest
 	// parses it directly off the report proto.
 	platformInfo := parsed.GetPlatformInfo()

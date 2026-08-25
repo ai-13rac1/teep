@@ -376,7 +376,7 @@ func TestIntegration_NearCloud_Embeddings_E2EE(t *testing.T) {
 			// the user's client believes E2EE is active.
 			t.Log("FINDING: Server returned PLAINTEXT embeddings despite E2EE headers")
 			t.Log("CONCLUSION: NearCloud does NOT encrypt embeddings responses when E2EE headers are present")
-			t.Log("This confirms the E2EE gate is correct: nearcloud non-chat endpoints MUST NOT be wired with E2EE")
+			t.Log("This confirms the E2EE check is correct: nearcloud non-chat endpoints MUST NOT be configured with E2EE")
 		} else {
 			// Response is not standard JSON — might be encrypted.
 			bodyStr := string(e2eeRespBody)
@@ -460,7 +460,7 @@ func TestIntegration_NearCloud_Audio_E2EE(t *testing.T) {
 		}
 	default:
 		t.Logf("FINDING: Server rejected E2EE audio request: status=%d", e2eeResp.StatusCode)
-		t.Log("This is consistent with the E2EE gate — audio is not supported with nearcloud E2EE")
+		t.Log("This is consistent with the E2EE check — audio is not supported with nearcloud E2EE")
 	}
 }
 
@@ -538,7 +538,7 @@ func TestIntegration_NearCloud_Rerank_E2EE(t *testing.T) {
 		if err := json.Unmarshal(e2eeBody, &result); err == nil && len(result.Results) > 0 {
 			t.Log("FINDING: Server returned PLAINTEXT rerank results despite E2EE headers")
 			t.Log("CONCLUSION: NearCloud does NOT encrypt rerank responses when E2EE headers are present")
-			t.Log("The query and documents were sent in PLAINTEXT — E2EE gate is correct")
+			t.Log("The query and documents were sent in PLAINTEXT — the E2EE check is correct")
 		} else {
 			bodyStr := string(e2eeBody)
 			if e2ee.IsEncryptedChunkXChaCha20(bodyStr) {

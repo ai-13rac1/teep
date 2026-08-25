@@ -2,7 +2,7 @@
 
 ## Scope
 
-Audit Intel TDX quote verification pipeline for BOTH the gateway CVM and the model backend CVM: parsing, certificate chain validation, signature checks, debug status checks, and collateral currency behavior. This covers the full cryptographic verification path from raw quote bytes through to the Intel root CA trust anchor.
+Audit Intel TDX quote verification pipeline for BOTH the gateway CVM and the model backend CVM: parsing, certificate chain validation, signature checks, debug status checks, and collateral currency behavior. This covers the full cryptographic verification path from raw quote bytes through to the Intel root CA, the trust root of the chain.
 
 In the gateway inference model, both the gateway and the model backend produce separate TDX quotes that must each be independently verified. The audit MUST verify that the gateway TDX verification uses the same code path / library as the model TDX verification (to avoid diverging security standards).
 
@@ -43,7 +43,7 @@ Verify and report:
 
 Verify and report:
 - full chain validation: PCK leaf certificate → Intermediate CA (Platform CA or Processor CA) → Intel SGX Root CA,
-- that the Intel SGX Root CA trust anchor is embedded in the code (not fetched from the network at verification time),
+- that the Intel SGX Root CA trust root is embedded in the code (not fetched from the network at verification time),
 - how the embedded root CA is identified and verified (e.g., hardcoded SHA-256 fingerprint of the root CA certificate),
 - that certificate validity periods (NotBefore/NotAfter) are checked against current time,
 - that certificate key usage and extended key usage fields are validated where applicable,
@@ -85,7 +85,7 @@ The audit MUST verify that the gateway's TDX quote undergoes the same verificati
 - same code path / library for quote parsing, signature verification, and chain validation,
 - separate enforcement factors for gateway (prefixed with `gateway_`) vs model factors,
 - that a failure in the gateway's TDX verification blocks the request independently of model verification results,
-- that the gateway TDX verification result and the model TDX verification result are both checked by the `Blocked()` gate.
+- that the gateway TDX verification result and the model TDX verification result are both checked by the `Blocked()` check.
 
 ### Verification Architecture
 
@@ -129,7 +129,7 @@ Chutes providers produce TDX quotes only from the backend sek8s instances, not f
 - **No gateway TDX quote**: The Chutes gateway is unattested and produces no TDX quote. No `gateway_*` TDX factors exist for chutes.
 - **Two-step fetch**: The TDX quote is fetched via the evidence endpoint (`/chutes/{chute}/evidence?nonce={hex}`) through the Chutes gateway, separate from the instances endpoint that returns E2EE keys. The audit should verify that the evidence response is correctly parsed and that the TDX quote bytes are extracted from the response structure.
 - **Same verification code**: The TDX quote parsing, signature verification, PCK chain validation, and debug-bit checking should use the same `internal/attestation/tdx.go` code path as nearcloud. Verify this is the case.
-- **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 golden values than nearcloud. These are checked via the same `tee_measurement` factor. See Section 05 for measurement details.
+- **Sek8s-specific measurements**: The chutes measurement policy defines different MRTD, MRSEAM, and RTMR0-2 reference values than nearcloud. These are checked via the same `tee_measurement` factor. See Section 05 for measurement details.
 - **Multiple instances**: Chutes may return multiple instances (up to `MaxInstances = 256`), each producing its own TDX quote. Verify that each instance's quote is independently verified and that a single verification failure blocks the request.
 
 Primary reference: `internal/provider/chutes/chutes.go`, `internal/attestation/tdx.go`.

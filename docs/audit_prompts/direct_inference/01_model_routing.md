@@ -70,7 +70,7 @@ Verify:
 
 - **SSRF prevention**: Verify that resolved domains are not private IP ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, ::1, fc00::/7) to prevent server-side request forgery through the model routing layer.
 - **DNS rebinding**: Consider whether an attacker could register a domain that initially resolves to a valid IP for the discovery check but later resolves to a malicious IP for the inference connection. Document any mitigations or residual risk.
-- **Trust boundary**: The discovery endpoint itself is only weakly authenticated (TLS + CT). An attacker who compromises the discovery API could redirect models to rogue servers. Document this trust boundary clearly and note that attestation of the destination server is the compensating control.
+- **Trust boundary**: The discovery endpoint itself is only weakly authenticated (TLS + CT). An attacker who compromises the discovery API could redirect models to rogue servers. Document this trust boundary clearly and state that attestation of the destination server is the compensating control.
 - **Cache poisoning**: Verify that a malicious discovery response cannot persistently poison the endpoint cache beyond the TTL. Verify that cache entries are keyed to prevent cross-provider contamination.
 - **Input validation depth**: The model identity string from the user request flows into the discovery lookup. Verify that this string is validated/sanitized before use as a cache key or in any string interpolation.
 

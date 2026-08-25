@@ -35,9 +35,9 @@ Verify and report:
 - whether failure degrades confidentiality/integrity without blocking traffic,
 - how enforced factors are configured (hardcoded/config/env),
 - startup behavior for unknown/misspelled factor names (must identify reject vs silent ignore),
-- existence and usage of a pre-forwarding block gate (`Blocked()` or equivalent) on every forwarded request.
+- existence and usage of a pre-forwarding block check (`Blocked()` or equivalent) on every forwarded request.
 
-#### `Blocked()` Gate Implementation
+#### `Blocked()` Check Implementation
 
 The [`Blocked()`](../../../internal/attestation/report.go:63) method on `VerificationReport` iterates all factor results and returns `true` if any factor with `Enforced=true` has `Status==Fail`. The proxy MUST call this method before forwarding every request. Verify:
 - that `Blocked()` is invoked on every code path that forwards traffic (not just the happy path),
@@ -105,7 +105,7 @@ Audit each cache layer and produce this table in your output:
 | Cache | Keys | TTL | Bounds/Eviction | Stale Behavior | Security-Critical Notes |
 |------|------|-----|-----------------|----------------|-------------------------|
 | Attestation report cache | provider, model | ~minutes | ... | ... | Signing key MUST NOT be cached; must be fetched fresh for each E2EE session |
-| Negative cache | provider, model | ~seconds | ... | ... | Must prevent upstream hammering; must expire so recovery is possible |
+| Negative cache | provider, model | ~seconds | ... | ... | Must prevent repeated upstream requests; must expire so recovery is possible |
 | SPKI pin cache | domain, spkiHash | ~hour | ... | ... | Must be populated only after successful attestation; eviction must force re-attestation |
 | Endpoint mapping cache | model→domain | ~minutes | ... | ... | Stale mapping must not bypass attestation |
 | PCS collateral cache | platform FMSPC | ~hours | ... | ... | TCB info and CRL freshness bounds Intel-mandated revocation windows |

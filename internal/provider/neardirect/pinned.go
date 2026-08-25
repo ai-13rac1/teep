@@ -329,7 +329,7 @@ func (h *PinnedHandler) attestOnConn(
 	pocResult := h.checkPoC(ctx, raw.IntelQuote)
 
 	// Verify live SPKI matches the attested TLS fingerprint.
-	// Connection trust anchor — MUST remain inline and fatal.
+	// Connection trust root — MUST remain inline and fatal.
 	if raw.TLSFingerprint == "" {
 		return nil, "", errors.New("attestation response missing tls_cert_fingerprint")
 	}

@@ -311,7 +311,7 @@ func VerifyTDXQuoteOffline(ctx context.Context, hexQuote string, verifyTime time
 	}
 
 	// TD_ATTRIBUTES is an 8-byte little-endian bitmask (Intel TDX Module ABI
-	// spec). The debug bit (bit 0) lives in byte 0 and is checked directly;
+	// spec). The debug bit (bit 0) is in byte 0 and is checked directly;
 	// wider hazard bits like SEPT_VE_DISABLE (bit 28) require decoding the
 	// full uint64.
 	debugBitSet := len(tdAttrs) > 0 && (tdAttrs[0]&tdxDebugBit) != 0

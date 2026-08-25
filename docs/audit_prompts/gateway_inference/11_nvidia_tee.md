@@ -6,7 +6,7 @@ Audit NVIDIA evidence verification depth across both local evidence validation (
 
 The NVIDIA attestation is for the **model backend only**. The gateway is a CPU-only TEE and does not have GPU attestation. The audit MUST verify that the code does not expect or require NVIDIA attestation from the gateway.
 
-The NVIDIA attestation provides a secondary layer of TEE assurance alongside the primary Intel TDX CPU attestation. The EAT (Entity Attestation Token) is an NVIDIA-defined JSON structure containing per-GPU evidence entries, each with an X.509 certificate chain and SPDM binary evidence blob. The NRAS (NVIDIA Remote Attestation Service) provides defense-in-depth by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) golden values.
+The NVIDIA attestation provides a secondary layer of TEE assurance alongside the primary Intel TDX CPU attestation. The EAT (Entity Attestation Token) is an NVIDIA-defined JSON structure containing per-GPU evidence entries, each with an X.509 certificate chain and SPDM binary evidence blob. The NRAS (NVIDIA Remote Attestation Service) provides defense-in-depth by comparing GPU firmware measurements against NVIDIA's Reference Integrity Manifest (RIM) values.
 
 ## Primary Files
 
@@ -132,7 +132,7 @@ Identify which NVIDIA checks remain active offline and which are skipped:
 
 - **Response size limits**: NRAS response bounded by `io.LimitReader`.
 - **All-or-nothing verification**: Single GPU failure fails the entire check.
-- **Trust boundary**: Local EAT proves evidence is well-formed and signed. NRAS proves firmware matches golden values.
+- **Trust boundary**: Local EAT proves evidence is well-formed and signed. NRAS proves firmware matches reference values.
 - **Input validation on binary parsing**: SPDM bounds checks prevent buffer overread.
 
 ## Known Divergence: Chutes/Sek8s

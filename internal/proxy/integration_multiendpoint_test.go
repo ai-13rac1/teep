@@ -577,8 +577,8 @@ func assertAudioResponse(t *testing.T, body []byte) {
 		t.Fatalf("decode audio response: %v\nraw: %s", err, body[:min(500, len(body))])
 	}
 
-	// A silent WAV produces empty or whitespace-only transcription — that's
-	// fine. The test validates the response structure, not speech content.
+	// A silent WAV produces empty or whitespace-only transcription. The test
+	// validates the response structure, not speech content.
 	t.Logf("audio transcription: %q", resp.Text)
 }
 

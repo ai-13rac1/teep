@@ -142,7 +142,7 @@ Each factor produces PASS, FAIL, or SKIP. Factors marked `[ENFORCED]` cause the 
 
 | # | Factor | Description |
 |---|--------|-------------|
-| 12 | `tee_reportdata_binding` | REPORTDATA cryptographically binds enclave public key to TDX quote. Without this, an attacker can substitute the key while leaving the quote intact — making E2EE security theater. |
+| 12 | `tee_reportdata_binding` | REPORTDATA cryptographically binds enclave public key to TDX quote. Without this, an attacker can substitute the key while leaving the quote intact, so the client encrypts to the attacker. |
 | 13 | `intel_pcs_collateral` | Intel PCS collateral (TCB info, CRLs) fetched for TCB currency check. Skipped in `--offline` mode. |
 | 14 | `tee_tcb_current` | TCB SVN meets minimum threshold. Passes for `UpToDate` and `SWHardeningNeeded`. Fails for `OutOfDate` or `Revoked`. Reports Intel Security Advisory IDs when applicable. |
 | 15 | `tee_tcb_not_revoked` | TCB SVN is not in the revoked set per Intel PCS. Skipped in `--offline` mode. |

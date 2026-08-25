@@ -102,7 +102,7 @@ The audit MUST explicitly state:
 The compose binding (`MRConfigID`) provides application-layer assurance that the docker compose content matches what the TEE measured. However, this does not verify the base CVM image (firmware, kernel, initrd) — those require `MRTD` / `RTMR0-2` verification (see Section 05). The audit MUST document:
 - compose binding covers: docker images listed in the compose file,
 - compose binding does NOT cover: the host OS, kernel, initrd, firmware, TDX module,
-- the combined assurance level when compose binding is enforced but `MRTD`/`RTMR0-2` golden values are absent.
+- the combined assurance level when compose binding is enforced but `MRTD`/`RTMR0-2` reference values are absent.
 
 ## Go Best-Practice Audit Points
 

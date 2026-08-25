@@ -134,7 +134,7 @@ func (h *Handler) attestOnConn(...) (*Report, error) {
     raw, err := h.sendAttestationRequest(...)
     tdxResult := h.verifyTDX(ctx, raw, nonce)
     nvidiaResult, nrasResult := h.verifyNVIDIA(ctx, raw, nonce)
-    // ... TLS fingerprint check (inline — fatal trust anchor) ...
+    // ... TLS fingerprint check (inline — fatal trust root) ...
     compose, repos, digests, sig, rekor := h.verifySupplyChain(ctx, raw, tdxResult)
     return buildReport(...)
 }
@@ -148,10 +148,33 @@ Reference implementations to mirror when adding providers or verification logic:
 ### Follow Go Conventions
 
 - Follow Effective Go idioms and best practices.
-- When uncertain, prefer DEFENSE IN DEPTH validation.
+- When uncertain, prefer DEFENSE IN DEPTH validation: a check of a different kind, not the same property re-checked in a second place (SEE: `docs/writing_style.md` § Security).
 - Bound all reads from untrusted sources (HTTP bodies, JSON arrays).
-- Prefer mocks over live tests: any live-network test must be gated behind the `TEEP_LIVE_TESTS` environment variable or API keys.
+- Prefer mocks over live tests: any live-network test must require the `TEEP_LIVE_TESTS` environment variable or API keys.
 - ALWAYS add regression test coverage for code review issues and audit findings.
+
+### Writing Style
+
+Use ASD-STE100 (Simplified Technical English) as the basis for style decisions in comments, commit messages, and user-visible strings: active voice, one meaning per word, no metaphors or idioms, no invented compound words.
+
+#### Allowed metaphors
+
+A metaphor is allowed when it is the name of the thing. It is not allowed when it decorates a name that already exists.
+
+A metaphor is a name when it has a definition that people outside this project share, and a reader who does not know it can look it up and find that definition. Test: could it be the title of a section in a reference book about the subject?
+
+Replace a metaphor when any of these is true:
+
+1. A plain word has the same meaning. A `gate` is a check. Code is not `wired`, it is connected, invoked, enabled, or configured — use the one that states what happened. You do not `hit` an endpoint, you send a request to it.
+2. The word rates the code instead of describing it. A `sanity check` says how much the author trusts the check, not what the check does. `quick`, `simple`, and `best` fail the same way.
+3. The word is less exact than the thing it names. `byte-level surgery` does not say which bytes change. A `generous` timeout does not say how long.
+4. The word is borrowed from another field and a common word means the same thing. A `gloss` is a definition. A `corpus` is a set of files.
+
+A term that is a name can still be wrong in one place. Use it only where its definition holds.
+
+SEE: `docs/writing_style.md` for the approved terms. Check that list before you replace a word.
+
+The word "gate" refers only to a physical fence. Do not use it for checks, conditions, or enforcement.
 
 ### No Fallbacks or Backwards Compatibility
 

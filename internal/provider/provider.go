@@ -124,7 +124,7 @@ type ReportDataVerifier interface {
 	VerifyReportData(reportData [64]byte, raw *attestation.RawAttestation, nonce attestation.Nonce) (detail string, err error)
 }
 
-// Provider is a fully wired TEE-capable AI backend. It combines the data from
+// Provider is a fully constructed TEE-capable AI backend. It combines the data from
 // config.Provider with the behavioral interfaces Attester and Preparer.
 //
 // The zero value is not useful; construct with New or fill fields directly.

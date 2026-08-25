@@ -104,7 +104,7 @@ Explicitly state:
 Compose binding (`MRConfigID`) provides application-layer assurance. Document:
 - compose binding covers: docker images listed in the compose file,
 - compose binding does NOT cover: the host OS, kernel, initrd, firmware, TDX module,
-- the combined assurance level when compose binding is enforced but `MRTD`/`RTMR0-2` golden values are absent.
+- the combined assurance level when compose binding is enforced but `MRTD`/`RTMR0-2` reference values are absent.
 
 ## Go Best-Practice Audit Points
 
@@ -142,7 +142,7 @@ Chutes/sek8s does **not** use compose binding, Sigstore verification, or Rekor p
 
 Sek8s uses different mechanisms that are **not verifiable by teep**:
 - **Cosign admission controller**: Runs inside the TEE and verifies container image signatures at deployment time. Teep cannot observe or audit this check.
-- **LUKS boot gating**: Runtime measurements are validated against expected values during boot, with disk decryption gated on success. Teep relies on the MRTD/RTMR golden values as opaque evidence that this process completed successfully.
+- **LUKS boot enforcement**: Runtime measurements are validated against expected values during boot, with disk decryption conditional on success. Teep relies on the MRTD/RTMR reference values as opaque evidence that this process completed successfully.
 - **Image digest pinning**: Sek8s Kubernetes manifests pin images by digest. Teep does not have access to these manifests.
 
 The audit should verify:

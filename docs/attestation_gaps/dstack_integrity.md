@@ -112,7 +112,7 @@ But the yellow nodes require externally-sourced expected values, and the lack of
 
 ## Detailed Gap Analysis
 
-### Publicly Available Golden Values
+### Publicly Available Reference Values
 
 Investigation of GitHub source code, release artifacts, and third-party verifiers reveals that several register values **can** be determined from public sources today, even though neardirect and nearcloud do not explicitly publish them in-band. This per-register analysis demonstrates exactly where the in-band discovery gap lies.
 
@@ -183,7 +183,7 @@ RTMR2 measures the kernel command line, initrd, and rootfs. Five distinct values
 
 #### RTMR3: Replayable from Event Log (Already Verified)
 
-RTMR3 is computed by the dstack runtime from the compose hash, instance ID, key provider, and other runtime events. Teep already verifies RTMR3 by replaying the event log, so this register does not have a golden-value gap.
+RTMR3 is computed by the dstack runtime from the compose hash, instance ID, key provider, and other runtime events. Teep already verifies RTMR3 by replaying the event log, so this register does not have a reference-value gap.
 
 ### Summary of Per-Register Gap Status
 
@@ -212,7 +212,7 @@ At minimum, a provider should publish:
 1. the dstack OS or equivalent CVM image version used in production
 2. the CPU and RAM configuration for each deployment class, because these affect `RTMR0`
 3. the expected TDX module version and corresponding `MRSEAM`
-4. golden values for `MRTD`, `RTMR0`, `RTMR1`, and `RTMR2` for each supported deployment class
+4. reference values for `MRTD`, `RTMR0`, `RTMR1`, and `RTMR2` for each supported deployment class
 5. the event-log format and any runtime identifiers needed to interpret `RTMR3`
 6. the raw `app_compose` manifests for both gateway and model CVMs where both exist
 7. the image digests and provenance expectations for every compose-listed component image
@@ -278,7 +278,7 @@ Unlike dstack, where RTMR0 varies with CPU/RAM/GPU count and operators must main
 
 2. **Strongest path (provider cooperation):** Adopt a Sigstore-based publication model (Option A or B above). This provides cryptographic authentication of all measurement baselines and eliminates the maintenance burden entirely.
 
-3. **Intermediate path:** Providers publish per-deployment-class golden values at a stable HTTPS endpoint, even without Sigstore signing. This reduces the discovery burden while the authenticated publication mechanism is developed.
+3. **Intermediate path:** Providers publish per-deployment-class reference values at a stable HTTPS endpoint, even without Sigstore signing. This reduces the discovery burden while the authenticated publication mechanism is developed.
 
 ### Practical Recommendations
 

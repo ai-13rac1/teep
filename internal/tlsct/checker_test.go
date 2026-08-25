@@ -419,7 +419,7 @@ func TestCacheEviction(t *testing.T) {
 		n := c.CacheLen()
 		t.Logf("after TTL sweep: %d entries", n)
 		if n > 2 {
-			// Only the new entry (and maybe a few that raced) should survive.
+			// The new entry survives; entries that raced with eviction may also survive.
 			// All 1025 expired entries should have been evicted.
 			t.Fatalf("expected ≤2 entries after TTL sweep, got %d", n)
 		}
