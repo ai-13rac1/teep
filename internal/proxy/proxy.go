@@ -699,6 +699,9 @@ func fromConfig(
 		p.Preparer = venice.NewPreparer(cp.APIKey)
 		p.Encryptor = venice.NewE2EE()
 		p.ReportDataVerifier = venice.ReportDataVerifier{}
+		// The ACI/1 gateway quote binds the same keccak256(signing key)+nonce
+		// REPORTDATA as the dstack model quote, so the verifier is shared.
+		p.GatewayReportDataVerifier = venice.ReportDataVerifier{}
 		p.SupplyChainPolicy = venice.SupplyChainPolicy()
 		p.ModelLister = venice.NewModelLister(cp.BaseURL, cp.APIKey, config.NewAttestationClient(offline))
 	case "neardirect":
@@ -748,6 +751,7 @@ func fromConfig(
 		p.Attester = nearcloud.NewAttester(cp.APIKey, offline)
 		p.Preparer = neardirect.NewPreparer(cp.APIKey)
 		p.ReportDataVerifier = rdVerifier
+		p.GatewayReportDataVerifier = nearcloud.GatewayReportDataVerifier{}
 		p.SupplyChainPolicy = nearcloud.SupplyChainPolicy()
 		p.PinnedHandler = nearcloud.NewPinnedHandler(
 			spkiCache,
@@ -831,9 +835,6 @@ func fromConfig(
 		p.ResponsesPath = "/v1/responses"
 		p.SpeechPath = "/v1/audio/speech"
 		p.UsesTLSBinding = true
-		// The router is the gateway, and its REPORTDATA binds the HPKE key
-		// clients encrypt to. SEE: tinfoil.asGatewayEvidence.
-		p.E2EEKeyBoundByGateway = true
 		p.Attester = tinfoil.NewAttester(cp.BaseURL, cp.APIKey, offline)
 		p.Preparer = tinfoil.NewPreparer(cp.APIKey)
 		p.Encryptor = tinfoil.NewE2EE()
@@ -1023,6 +1024,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		GatewayPoC:             gatewayPoCResult,
 		GatewayNonceHex:        raw.GatewayNonceHex,
 		GatewayNonce:           nonce,
+		GatewayEventLog:        raw.GatewayEventLog,
 		Nvidia:                 nvidiaResult,
 		NvidiaNRAS:             nrasResult,
 		PoC:                    pocResult,
@@ -1034,7 +1036,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		E2EEConfigured:         prov.E2EE,
 		Inapplicable:           inapplicableForProvider(prov.Name),
 		ProviderUsesTLSBinding: prov.UsesTLSBinding,
-		E2EEKeyBoundByGateway:  prov.E2EEKeyBoundByGateway,
+		E2EEKeyBoundByGateway:  provider.GatewayBindsE2EEKey(prov.Name, raw.BackendFormat),
 	})
 	return report, raw
 }
@@ -1124,8 +1126,11 @@ func (s *Server) verifyGatewaySEV(
 
 // verifyGatewayTDX runs gateway TDX verification, REPORTDATA binding, compose
 // binding, and Proof of Cloud for providers that populate GatewayIntelQuote.
+// The REPORTDATA binding scheme is per-provider (prov.GatewayReportDataVerifier);
+// with no verifier configured the binding detail stays empty and
+// evalGatewayReportDataBinding fails closed.
 //
-// SYNC: verify.verifyNearcloudGateway does the same for teep verify. Without
+// SYNC: verify.verifyGatewayTDX does the same for teep verify. Without
 // this the proxy supplies gateway evidence it never verified, and
 // unverifiedEvidence blocks the provider outright.
 func (s *Server) verifyGatewayTDX(
@@ -1139,8 +1144,8 @@ func (s *Server) verifyGatewayTDX(
 	}
 	slog.DebugContext(ctx, "gateway TDX verification starting", "provider", prov.Name)
 	tdx := s.verifyQuote(ctx, raw.GatewayIntelQuote)
-	if tdx.ParseErr == nil {
-		detail, err := nearcloud.GatewayReportDataVerifier{}.VerifyReportData(tdx.ReportData, raw, nonce)
+	if tdx.ParseErr == nil && prov.GatewayReportDataVerifier != nil {
+		detail, err := prov.GatewayReportDataVerifier.VerifyReportData(tdx.ReportData, raw, nonce)
 		tdx.ReportDataBindingErr = err
 		tdx.ReportDataBindingDetail = detail
 	}

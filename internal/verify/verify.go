@@ -16,6 +16,7 @@ import (
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/defaults"
+	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/venice"
 )
 
@@ -122,8 +123,9 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		}
 	}
 
-	// Gateway verification (nearcloud-specific fields).
-	gatewayTDX, gatewayCompose, gatewayPoCResult := verifyNearcloudGateway(ctx, raw, nonce, client, opts.Offline, verifier, opts.VerificationTime)
+	// Gateway verification for providers that populate GatewayIntelQuote.
+	gatewayTDX, gatewayCompose, gatewayPoCResult := verifyGatewayTDX(ctx, raw, nonce, client, opts.Offline, verifier,
+		newGatewayReportDataVerifier(opts.ProviderName), opts.VerificationTime)
 	var gatewayCD attestation.ComposeDigests
 	if gatewayCompose != nil && gatewayCompose.Err == nil {
 		gatewayCD = attestation.ExtractComposeDigests(raw.GatewayAppCompose)
@@ -189,7 +191,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		E2EETest:               e2eeResult,
 		Inapplicable:           inapplicableFactors(opts.ProviderName),
 		ProviderUsesTLSBinding: providerUsesTLSBinding(opts.ProviderName),
-		E2EEKeyBoundByGateway:  providerE2EEKeyBoundByGateway(opts.ProviderName),
+		E2EEKeyBoundByGateway:  provider.GatewayBindsE2EEKey(opts.ProviderName, raw.BackendFormat),
 	})
 
 	return report, nil
@@ -424,6 +426,7 @@ var metadataDisplayOrder = []struct {
 	{"nonce_source", "Nonce source"},
 	{"candidates", "Candidates"},
 	{"event_log", "Event log"},
+	{"gateway_downstream_tls", "Gateway downstream TLS"},
 	// Self-check metadata
 	{"version", "Version"},
 	{"commit", "Commit"},
