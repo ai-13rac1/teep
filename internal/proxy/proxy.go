@@ -518,7 +518,9 @@ func New(cfg *config.Config) (*Server, error) {
 		mDefaults, gwDefaults := defaults.MeasurementDefaults(name)
 		mergedPolicy := config.MergedMeasurementPolicy(name, cfg, mDefaults)
 		mergedGWPolicy := config.MergedGatewayMeasurementPolicy(name, cfg, gwDefaults)
-		p, err := fromConfig(cp, spkiCache, cfg.Offline, config.MergedAllowFail(name, cfg, cfg.Offline), mergedPolicy, mergedGWPolicy, s.rekorClient, s.nvidiaVerifier, s.collateral)
+		// No response format is known at construction time; the near*
+		// PinnedHandlers this list feeds serve a single format each.
+		p, err := fromConfig(cp, spkiCache, cfg.Offline, config.MergedAllowFail(name, "", cfg, cfg.Offline), mergedPolicy, mergedGWPolicy, s.rekorClient, s.nvidiaVerifier, s.collateral)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
@@ -1010,7 +1012,7 @@ func (s *Server) fetchAndVerify(ctx context.Context, prov *provider.Provider, up
 		Model:                  upstreamModel,
 		Raw:                    raw,
 		Nonce:                  nonce,
-		AllowFail:              config.MergedAllowFail(prov.Name, s.cfg, s.cfg.Offline),
+		AllowFail:              config.MergedAllowFail(prov.Name, raw.BackendFormat, s.cfg, s.cfg.Offline),
 		Policy:                 prov.MeasurementPolicy,
 		GatewayPolicy:          prov.GatewayMeasurementPolicy,
 		SupplyChainPolicy:      prov.SupplyChainPolicy,

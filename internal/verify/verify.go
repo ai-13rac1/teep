@@ -164,7 +164,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		Model:                  opts.ModelName,
 		Raw:                    raw,
 		Nonce:                  nonce,
-		AllowFail:              config.MergedAllowFail(opts.ProviderName, cfg, opts.Offline),
+		AllowFail:              config.MergedAllowFail(opts.ProviderName, raw.BackendFormat, cfg, opts.Offline),
 		Policy:                 mergedPolicy,
 		GatewayPolicy:          mergedGWPolicy,
 		SupplyChainPolicy:      scPolicy,
