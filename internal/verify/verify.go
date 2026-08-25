@@ -16,6 +16,7 @@ import (
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/defaults"
+	"github.com/13rac1/teep/internal/provider/venice"
 )
 
 // Options holds all parameters for Run.
@@ -184,6 +185,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		GatewayCompose:         gatewayCompose,
 		GatewayEventLog:        raw.GatewayEventLog,
 		TinfoilSC:              tinfoilSC,
+		ACIKeyset:              venice.VerifyACIKeyset(raw),
 		E2EETest:               e2eeResult,
 		Inapplicable:           inapplicableFactors(opts.ProviderName),
 		ProviderUsesTLSBinding: providerUsesTLSBinding(opts.ProviderName),
