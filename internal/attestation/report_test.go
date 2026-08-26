@@ -3379,7 +3379,8 @@ func TestCheckComponentRepoPolicy_NoComponentRepos(t *testing.T) {
 }
 
 func TestCheckComponentRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
-	// Policy has gateway components but GatewayImageRepos is empty → fail.
+	// Policy has gateway components, the report carries gateway evidence,
+	// but GatewayImageRepos is empty → fail.
 	scPolicy := &SupplyChainPolicy{
 		Images: []ImageProvenance{
 			{Repo: "myrepo/model", ModelTier: true},
@@ -3388,6 +3389,7 @@ func TestCheckComponentRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
 	}
 	in := &ReportInput{
 		Raw:               &RawAttestation{},
+		GatewayTDX:        &TDXVerifyResult{},
 		ImageRepos:        []string{"myrepo/model"},
 		GatewayImageRepos: nil, // no gateway component repos
 	}
@@ -3397,6 +3399,27 @@ func TestCheckComponentRepoPolicy_GatewayPolicyNoGatewayRepos(t *testing.T) {
 	}
 	if result.Status != Fail {
 		t.Errorf("status = %v, want Fail", result.Status)
+	}
+}
+
+func TestCheckComponentRepoPolicy_GatewayPolicyNoGatewayEvidence(t *testing.T) {
+	// Policy has gateway components, but this report carries no gateway
+	// evidence (a provider can serve gateway and non-gateway formats under
+	// one name — venice dstack vs ACI/1). The gateway repo requirement must
+	// not fail the non-gateway format.
+	scPolicy := &SupplyChainPolicy{
+		Images: []ImageProvenance{
+			{Repo: "myrepo/model", ModelTier: true},
+			{Repo: "myrepo/gateway", GatewayTier: true},
+		},
+	}
+	in := &ReportInput{
+		Raw:               &RawAttestation{},
+		ImageRepos:        []string{"myrepo/model"},
+		GatewayImageRepos: nil,
+	}
+	if result, done := checkComponentRepoPolicy(in, scPolicy); done {
+		t.Errorf("expected no policy violation without gateway evidence, got %+v", result)
 	}
 }
 
