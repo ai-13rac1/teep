@@ -8,11 +8,11 @@ import (
 	"fmt"
 )
 
-// dstackRuntimeEventType marks a dstack runtime event, whose RTMR digest is
+// DstackRuntimeEventType marks a dstack runtime event, whose RTMR digest is
 // computed from its semantic fields rather than trusted as a declared value.
 // SEE: dstack_event_digest in
 // https://github.com/Dstack-TEE/private-ai-gateway src/aci/verifier/dstack.rs.
-const dstackRuntimeEventType = 0x08000001
+const DstackRuntimeEventType = 0x08000001
 
 // ReplayEventLog replays event log entries to recompute the four RTMR values.
 // Each entry extends the RTMR at its IMR index: RTMR_new = SHA384(RTMR_old || digest).
@@ -63,7 +63,7 @@ func eventDigest(e EventLogEntry) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid hex digest: %w", err)
 	}
-	if e.EventType != dstackRuntimeEventType {
+	if e.EventType != DstackRuntimeEventType {
 		return declared, nil
 	}
 	payload, err := hex.DecodeString(e.EventPayload)

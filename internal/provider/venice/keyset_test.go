@@ -584,7 +584,7 @@ func TestVerifyACIKeyset_LiveSample(t *testing.T) {
 
 func TestAppIDFromEventLog(t *testing.T) {
 	runtime := func(event, payload string) attestation.EventLogEntry {
-		return attestation.EventLogEntry{IMR: 3, EventType: dstackRuntimeEventType, Event: event, EventPayload: payload}
+		return attestation.EventLogEntry{IMR: 3, EventType: attestation.DstackRuntimeEventType, Event: event, EventPayload: payload}
 	}
 	t.Run("single runtime app-id", func(t *testing.T) {
 		got, err := appIDFromEventLog([]attestation.EventLogEntry{runtime("app-id", "1122")})

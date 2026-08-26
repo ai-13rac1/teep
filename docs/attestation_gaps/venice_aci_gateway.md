@@ -57,6 +57,16 @@ openai/gpt-oss-120b); asserted continuously by
   expired. The app id is read from the RTMR3 "app-id" runtime event, whose
   digest the event-log replay recomputes from its semantic fields, so
   `gateway_event_log_integrity` authenticates the value against the quote.
+
+  What the quote hardware-binds is only the E2EE signing key and the client
+  nonce (Venice's gateway REPORTDATA uses the dstack keccak256-address
+  scheme, not the ACI/1 spec's keyset-digest binding). The rest of the
+  keyset — `not_after`, `subject`, `tls_public_keys` — is self-asserted: the
+  keyset digest is recomputed only against the same response, not against
+  the quote. So `aci_key_custody` proves the E2EE key is the gateway's
+  KMS-issued, hardware-bound key, and the expiry check is advisory (it holds
+  against an honest gateway, not against one that rewrites `not_after` and
+  recomputes the digest). See residual exposure 7.
 - `gateway_compose_binding` (enforced): the gateway publishes its
   `app_compose` and `sha256(app_compose)` matches the quote's MRConfigID.
   The manifest pins its four images by sha256 digest
@@ -121,6 +131,23 @@ entry from the list blocks every ACI/1 model.
    currently records the four gateway images as `ComposeBindingOnly` — the
    digest pin in the measured manifest; upgrading the two Dstack-TEE images
    to Fulcio-signed policy entries would add signer identity checks.
+7. **Keyset metadata is not hardware-anchored.** Venice's gateway REPORTDATA
+   binds only the E2EE signing key and the client nonce, so the
+   `workload_keyset` fields other than that key — `not_after`, `subject`,
+   `tls_public_keys` — are self-asserted (the keyset digest is recomputed
+   only against the same response). A party that can rewrite the response
+   and re-serve teep's request to the genuine gateway — the gateway operator,
+   or a TLS-position attacker who has defeated WebPKI and Certificate
+   Transparency — can change `not_after` and recompute the digest without
+   detection. This does not affect the confidentiality claim: the E2EE key
+   stays doubly bound (REPORTDATA plus the custody chain to the pinned KMS
+   root and app id), and per-request freshness is the REPORTDATA nonce, not
+   `not_after`. The `not_after` check is therefore a rotation bound that
+   holds against an honest gateway, not a hardware-enforced expiry. Closing
+   it requires Venice to emit the ACI/1 spec REPORTDATA (the statement digest
+   over the whole keyset); no teep-side code closes it while the gateway
+   uses the dstack REPORTDATA layout. A third party without a TLS position
+   cannot reach it.
 
 ## Remediation
 

@@ -340,12 +340,6 @@ func VerifyACIKeyset(raw *attestation.RawAttestation, now time.Time) *attestatio
 		appID, now, defaultACIKMSRootAllow, defaultACIGatewayAppIDAllow)
 }
 
-// dstackRuntimeEventType marks a dstack runtime event; the RTMR replay
-// recomputes its digest from the semantic fields, so an app-id event of this
-// type is authenticated against the quote.
-// SYNC: attestation.dstackRuntimeEventType.
-const dstackRuntimeEventType = 0x08000001
-
 // appIDFromEventLog returns the payload of the single RTMR3 dstack-runtime
 // "app-id" event. It requires the runtime event type so the value is one the
 // RTMR replay authenticated (an "app-id" event of any other type carries an
@@ -356,7 +350,7 @@ func appIDFromEventLog(entries []attestation.EventLogEntry) ([]byte, error) {
 	var found []byte
 	for i := range entries {
 		e := entries[i]
-		if e.IMR != 3 || e.Event != "app-id" || e.EventType != dstackRuntimeEventType {
+		if e.IMR != 3 || e.Event != "app-id" || e.EventType != attestation.DstackRuntimeEventType {
 			continue
 		}
 		if found != nil {
@@ -462,6 +456,12 @@ func verifyKeyset(
 // keysetNotExpired reports whether the keyset not_after (a unix-seconds
 // timestamp) is in the future at now. An unparseable value is treated as
 // expired (fail closed) with a describing detail.
+//
+// NOTE: not_after is self-asserted. Venice's gateway REPORTDATA binds only
+// the E2EE signing key and nonce (SEE: ReportDataVerifier), not the keyset
+// digest, so this is a rotation bound that holds against an honest gateway,
+// not a hardware-enforced expiry.
+// SEE: docs/attestation_gaps/venice_aci_gateway.md residual exposure 7.
 func keysetNotExpired(notAfter string, now time.Time) (ok bool, detail string) {
 	na, err := notAfterCanonical(notAfter)
 	if err != nil {
