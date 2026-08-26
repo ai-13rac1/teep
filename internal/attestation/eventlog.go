@@ -2,13 +2,28 @@ package attestation
 
 import (
 	"crypto/sha512"
+	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 )
 
+// dstackRuntimeEventType marks a dstack runtime event, whose RTMR digest is
+// computed from its semantic fields rather than trusted as a declared value.
+// SEE: dstack_event_digest in
+// https://github.com/Dstack-TEE/private-ai-gateway src/aci/verifier/dstack.rs.
+const dstackRuntimeEventType = 0x08000001
+
 // ReplayEventLog replays event log entries to recompute the four RTMR values.
 // Each entry extends the RTMR at its IMR index: RTMR_new = SHA384(RTMR_old || digest).
 // RTMRs start as 48 zero bytes.
+//
+// For dstack runtime events the digest is recomputed from (event_type, event,
+// event_payload) and must match the entry's declared digest — the event and
+// event_payload strings would otherwise be free text that survives the
+// replay, letting a caller read attacker-chosen values (such as the app-id)
+// out of a log that still matched the quote. SEE: appIDFromEventLog in
+// internal/provider/venice/keyset.go, which reads those fields.
 //
 // Based on github.com/Dstack-TEE/dstack/sdk/go/dstack (Apache-2.0).
 func ReplayEventLog(entries []EventLogEntry) ([4][48]byte, error) {
@@ -19,9 +34,9 @@ func ReplayEventLog(entries []EventLogEntry) ([4][48]byte, error) {
 			return rtmrs, fmt.Errorf("event %d: IMR index %d out of range [0,3]", i, e.IMR)
 		}
 
-		digest, err := hex.DecodeString(e.Digest)
+		digest, err := eventDigest(e)
 		if err != nil {
-			return rtmrs, fmt.Errorf("event %d: invalid hex digest: %w", i, err)
+			return rtmrs, fmt.Errorf("event %d: %w", i, err)
 		}
 
 		if len(digest) < 48 {
@@ -37,4 +52,35 @@ func ReplayEventLog(entries []EventLogEntry) ([4][48]byte, error) {
 	}
 
 	return rtmrs, nil
+}
+
+// eventDigest returns the RTMR extend digest for an event. For a dstack
+// runtime event it recomputes SHA384(u32le(event_type) || ":" || event ||
+// ":" || event_payload) and fails when the declared digest disagrees; other
+// events use their declared digest.
+func eventDigest(e EventLogEntry) ([]byte, error) {
+	declared, err := hex.DecodeString(e.Digest)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex digest: %w", err)
+	}
+	if e.EventType != dstackRuntimeEventType {
+		return declared, nil
+	}
+	payload, err := hex.DecodeString(e.EventPayload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex event_payload: %w", err)
+	}
+	var typeBytes [4]byte
+	binary.LittleEndian.PutUint32(typeBytes[:], uint32(e.EventType))
+	h := sha512.New384()
+	h.Write(typeBytes[:])
+	h.Write([]byte(":"))
+	h.Write([]byte(e.Event))
+	h.Write([]byte(":"))
+	h.Write(payload)
+	computed := h.Sum(nil)
+	if subtle.ConstantTimeCompare(computed, declared) != 1 {
+		return nil, fmt.Errorf("runtime event %q digest mismatch: the event or event_payload does not match the declared digest", e.Event)
+	}
+	return computed, nil
 }

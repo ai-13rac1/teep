@@ -48,10 +48,15 @@ openai/gpt-oss-120b); asserted continuously by
   `tee_reportdata_binding` never passes.
 - `aci_key_custody`: the workload keyset digest recomputes (SHA-256 over
   the JCS-canonicalized keyset), the E2EE key teep encrypts to is a member
-  of that keyset, and the dstack-KMS custody chain verifies — the app key
-  signs the key's derivation purpose, the KMS root signs the app key
-  together with the app id measured into the quote's RTMR3, and the
-  recovered root must be an accepted dstack-KMS root.
+  of that keyset, the dstack-KMS custody chain verifies (the app key signs
+  the key's derivation purpose, the KMS root signs the app key together with
+  the gateway app id, and the recovered root must be an accepted dstack-KMS
+  root), the app id is on an accepted-app-id list — so the chain identifies
+  the private-ai-gateway, not merely a tenant of the same KMS — a non-null
+  keyset subject must restate that app id, and the keyset must not have
+  expired. The app id is read from the RTMR3 "app-id" runtime event, whose
+  digest the event-log replay recomputes from its semantic fields, so
+  `gateway_event_log_integrity` authenticates the value against the quote.
 - `gateway_compose_binding` (enforced): the gateway publishes its
   `app_compose` and `sha256(app_compose)` matches the quote's MRConfigID.
   The manifest pins its four images by sha256 digest
@@ -80,22 +85,37 @@ entry from the list blocks every ACI/1 model.
    separately as the `phalacloud` provider — with per-instance attestation
    — but ACI/1 gives no way to connect this gateway's forwarding to a
    specific attested instance.
-2. **The KMS root is trust-on-first-use.** The accepted dstack-KMS root in
-   `internal/provider/venice/keyset.go` was recovered from the custody
-   signature chains of live attestations of two models. Whoever controls
-   that list controls which key-releasing authority teep accepts.
-   Corroborate against the dstack KmsAuth registry (Phala publishes the
-   KMS root on-chain) before extending it.
-3. **Gateway measurements churn.** The gateway image is a dev channel
+2. **The KMS root and gateway app id are trust-on-first-use.** The accepted
+   dstack-KMS root and the accepted gateway app id in
+   `internal/provider/venice/keyset.go` were recovered from live
+   attestations of two models. Whoever controls those lists controls which
+   key-releasing authority and which dstack app teep accepts as the gateway.
+   Corroborate the KMS root against the dstack KmsAuth registry (Phala
+   publishes it on-chain) before extending it.
+3. **A malicious provider can downgrade a dstack model to ACI/1 reporting.**
+   teep has no authenticated binding from a model name to its expected
+   attestation format, so the provider chooses the format per response and
+   thereby selects the enforcement list (`config.MergedAllowFail` keys on
+   the parsed format). A Venice model that today attests its own inference
+   host through the dstack format could instead be answered with a genuine
+   ACI/1 gateway attestation, and teep would report it gateway-only —
+   losing the host-attestation assurance while still passing. A third party
+   cannot exploit this: passing the ACI/1 list now requires presenting the
+   real gateway's quote (pinned app id and KMS root, REPORTDATA binding the
+   client nonce), which only the gateway can produce. The residual is a
+   provider-integrity downgrade of a specific model's assurance level.
+   Closing it needs a per-model expected-format pin (from the model listing
+   or trust-on-first-use), tracked as follow-up.
+4. **Gateway measurements churn.** The gateway image is a dev channel
    (`dstack-dev-*`); RTMR0-2 change with each redeploy, so
    `gateway_tee_hardware_config` and `gateway_tee_boot_config` are waived.
    MRTD/MRSEAM (enforced) come from the shared dstack base list.
-4. **The downstream TLS pin is reported, not verified.** The gateway
+5. **The downstream TLS pin is reported, not verified.** The gateway
    attests the SPKI it pins for `api.redpill.ai`, but teep never dials that
    domain, so the report carries it as `gateway_downstream_tls` metadata.
    Cross-provider correlation with the phalacloud provider's live SPKI is
    possible follow-up work.
-5. **Gateway image provenance can tighten.** Rekor holds Fulcio provenance
+6. **Gateway image provenance can tighten.** Rekor holds Fulcio provenance
    for `dstacktee/dstack-ingress` (built from Dstack-TEE/dstack-examples)
    and `dstacktee/dstack-verifier` (Dstack-TEE/dstack). The policy
    currently records the four gateway images as `ComposeBindingOnly` — the

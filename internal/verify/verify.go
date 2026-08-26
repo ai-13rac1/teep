@@ -187,7 +187,7 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		GatewayCompose:         gatewayCompose,
 		GatewayEventLog:        raw.GatewayEventLog,
 		TinfoilSC:              tinfoilSC,
-		ACIKeyset:              venice.VerifyACIKeyset(raw),
+		ACIKeyset:              venice.VerifyACIKeyset(raw, opts.VerificationTime),
 		E2EETest:               e2eeResult,
 		Inapplicable:           inapplicableFactors(opts.ProviderName),
 		ProviderUsesTLSBinding: providerUsesTLSBinding(opts.ProviderName),
