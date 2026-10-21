@@ -426,6 +426,7 @@ type Server struct {
 	authorizations     *authorizationStore
 	signingKeyCache    *attestation.SigningKeyCache
 	rekorClient        *attestation.RekorClient
+	sigstoreRoots      attestation.TrustedRootSource // Sigstore trusted root for Tinfoil bundles
 	nvidiaVerifier     *attestation.NVIDIAVerifier
 	mux                *http.ServeMux
 	attestClient       *http.Client            // for attestation fetches
@@ -487,6 +488,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.upstreamClient = upstreamClient
 	s.pinnedUpstreams = newPinnedUpstreamPools()
 
+	s.sigstoreRoots = attestation.NewTUFTrustedRootSource()
 	s.rekorClient = attestation.NewRekorClient(attestClient)
 	s.nvidiaVerifier = attestation.DefaultNVIDIAVerifier()
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
@@ -1368,7 +1370,7 @@ func (s *Server) verifyTinfoilSupplyChain(
 	}
 
 	// Sigstore DSSE bundle verification.
-	sv := tinfoil.NewSigstoreVerifier(s.attestClient)
+	sv := tinfoil.NewSigstoreVerifier(s.attestClient, s.sigstoreRoots)
 	predicateBytes, predicateType, signer, err := sv.FetchAndVerify(ctx, sigstoreRepo)
 	if err != nil {
 		result.SigstoreErr = err

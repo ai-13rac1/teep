@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 )
@@ -516,7 +517,7 @@ func TestReplay_BadDir(t *testing.T) {
 	ctx := context.Background()
 	_, _, err := Replay(ctx, "/no/such/directory/for/testing", func(_ string) (*config.Config, *config.Provider, error) {
 		return nil, nil, nil
-	})
+	}, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	if err == nil {
 		t.Fatal("expected error for non-existent capture dir")
 	}
@@ -534,7 +535,7 @@ func TestReplay_InvalidNonce(t *testing.T) {
 	ctx := context.Background()
 	_, _, err := Replay(ctx, dir, func(_ string) (*config.Config, *config.Provider, error) {
 		return nil, nil, nil
-	})
+	}, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	if err == nil {
 		t.Fatal("expected error for invalid nonce in manifest")
 	}
@@ -553,7 +554,7 @@ func TestReplay_CfgLoaderError(t *testing.T) {
 	ctx := context.Background()
 	_, _, err := Replay(ctx, dir, func(_ string) (*config.Config, *config.Provider, error) {
 		return nil, nil, errors.New("config load error")
-	})
+	}, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	if err == nil {
 		t.Fatal("expected error from cfgLoader")
 	}

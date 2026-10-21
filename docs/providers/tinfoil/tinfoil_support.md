@@ -2071,6 +2071,7 @@ Releases fetched through `github-proxy.tinfoil.sh`.
 **Core files**:
 - `internal/provider/tinfoil/sigstore.go` — Sigstore bundle fetching and
   verification
+- `internal/attestation/sigstore_root.go` — Sigstore trusted root source
 - `internal/provider/tinfoil/measurements.go` — Measurement comparison logic
 
 **Implementation**:
@@ -2081,14 +2082,28 @@ Releases fetched through `github-proxy.tinfoil.sh`.
    - Fetch Sigstore attestation bundle from
      `repos/{repo}/attestations/sha256:{digest}`.
 
-2. **Sigstore Bundle Verifier**:
-   - Use the `sigstore-go` library to verify the DSSE bundle. This is a new
-     dependency for Tinfoil bundle verification; teep's existing
-     `internal/attestation/sigstore.go` and `internal/attestation/rekor.go`
-     do not use `sigstore-go` and should only be referenced for reusable
-     Rekor/Sigstore validation patterns. The `RekorClient` struct (with
-     `NewRekorClient`, `NewRekorClientWithKey` constructors) manages Rekor
-     interactions and public key validation without globals.
+2. **Sigstore Trusted Root**:
+   - `tinfoil.NewSigstoreVerifier` takes an `attestation.TrustedRootSource`
+     and panics when it is nil. The verifier gets the trusted root from the
+     source once for each bundle verification.
+   - The proxy and `teep verify` use `attestation.NewTUFTrustedRootSource`.
+     Each fetch starts from the TUF root that `sigstore-go` embeds, updates
+     the metadata from `tuf-repo-cdn.sigstore.dev` with a new CT-enforcing
+     Teep client, makes one attempt for each file, rejects redirects, and
+     keeps the verification context for header and body reads. The TUF
+     client keeps the metadata in memory and writes no local cache. A fetch
+     failure fails the bundle verification; no earlier root is used.
+   - `teep verify --replay` also uses the TUF source. A capture directory is
+     untrusted input, so teep never reads a trusted root from it.
+   - Tests use `attestation.NewStaticTrustedRootSource` with the checked-in
+     root `internal/attestation/testdata/sigstore_trusted_root.json`, which
+     `internal/attestation/sigstoretest` loads. Its
+     provenance note records the TUF target SHA-256, the fetch date and the
+     `targets.json` version.
+
+3. **Sigstore Bundle Verifier**:
+   - Use the `sigstore-go` library to verify the DSSE bundle against the
+     trusted root from step 2.
    - Certificate identity: OIDC issuer =
      `https://token.actions.githubusercontent.com`.
     - Workflow identity: enforce repository and tag-ref binding with an anchored
@@ -2098,13 +2113,13 @@ Releases fetched through `github-proxy.tinfoil.sh`.
    - Require SCT, transparency log entry, observer timestamp.
    - Extract the in-toto predicate after verification.
 
-3. **Code Measurement Extraction**:
+4. **Code Measurement Extraction**:
    - Parse predicateType from the verified statement.
    - For `https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1`:
      Extract `snp_measurement`, `tdx_measurement.rtmr1`,
      `tdx_measurement.rtmr2` as 3-register measurement.
 
-4. **Hardware Measurement Fetcher** (TDX only):
+5. **Hardware Measurement Fetcher** (TDX only):
    - Same GitHub + Sigstore flow, but for repo
      `tinfoilsh/hardware-measurements`.
    - Predicate type: `https://tinfoil.sh/predicate/hardware-measurements/v1`.
@@ -2113,7 +2128,7 @@ Releases fetched through `github-proxy.tinfoil.sh`.
    - Match enclave's MRTD (register 0) and RTMR0 (register 1) against map
      values.
 
-5. **Measurement Comparison**:
+6. **Measurement Comparison**:
    - Implement cross-platform comparison:
      - Multi-platform vs. TDX: compare RTMR1 and RTMR2; verify RTMR3 == 0.
      - Multi-platform vs. SEV-SNP: compare snp_measurement.
@@ -2121,7 +2136,7 @@ Releases fetched through `github-proxy.tinfoil.sh`.
    - Record code match as `sigstore_code_verified` factor.
    - Record hardware-measurement match as `tee_boot_config` detail (not `cpu_id_registry`).
 
-6. **Configuration Repo Mapping**:
+7. **Configuration Repo Mapping**:
    - `tinfoil_v3_cloud` uses the static router repo
      `tinfoilsh/confidential-model-router`.
    - `tinfoil_v3_direct` records the per-model repo returned by
@@ -2130,7 +2145,19 @@ Releases fetched through `github-proxy.tinfoil.sh`.
      discovery is unavailable.
 
 **Unit tests**:
-- Test Sigstore bundle verification with a captured bundle (testdata).
+- Test Sigstore bundle verification with a captured bundle (testdata):
+  `TestFetchAndVerifyUsesInjectedTrustedRoot` replays a captured router
+  bundle with the static root, gets the root once and writes no TUF cache;
+  `TestFetchAndVerifyTrustedRootError` fails the bundle when the source
+  fails; `TestFetchAndVerifyRejectsAlteredGitHubData` changes one recorded
+  GitHub proxy response at a time (status, JSON, release tag, hash, bundle,
+  artifact digest, size limit) and requires each change to fail.
+- Test the trusted root source in `internal/attestation`: the static source
+  rejects empty, malformed and incomplete JSON; the checked-in root holds the
+  Fulcio CA, the `ctfe.sigstore.dev/2022` log and the pinned Rekor log; the
+  TUF fetcher rejects redirects without retry
+  (`TestTrustedRootFetcherRejectsRedirectWithoutRetry`) and keeps
+  cancellation (`TestTrustedRootVerificationCancellation`).
 - Test measurement extraction for multi-platform predicate.
 - Test cross-platform comparison: TDX match, TDX mismatch, SEV-SNP match.
 - Test hardware measurement matching: found, not found.
@@ -2505,7 +2532,10 @@ Full API-key-based integration tests cover both `tinfoil_v3_cloud` and
 **Fixture Tests** (offline, no API key, shared):
 - Capture V3 attestation responses from both router and inference enclave
   and save as separate testdata fixtures.
-- Test the full V3 verification pipeline against both fixtures.
+- Test the full V3 verification pipeline against both fixtures. Fixture and
+  replay tests set `verify.Options.TrustedRoot` or the `verify.Replay` root
+  argument to the static checked-in root, so they send no TUF request. A nil
+  source in either place selects the TUF source.
 - Refresh fixtures periodically to detect schema/policy drift.
 
 ---

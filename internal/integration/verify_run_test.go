@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/verify"
@@ -41,6 +43,7 @@ func TestVerifyRun_Venice_Fixture(t *testing.T) {
 		Nonce:                    env.nonce,
 		CapturedE2EE:             fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime:         fixtureVerificationTime(&env),
+		TrustedRoot:              sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -60,7 +63,7 @@ func TestVerifyRun_NearDirect_Fixture(t *testing.T) {
 
 	cfg, cp := buildVerifyRunConfig(env.manifest.Provider, env.manifest.NearConfig.Origin)
 	cp.E2EE = env.manifest.NearConfig.E2EE
-	report, _, err := verify.Replay(context.Background(), findFixtureDir(t, "neardirect"), func(string) (*config.Config, *config.Provider, error) { return cfg, cp, nil })
+	report, _, err := verify.Replay(context.Background(), findFixtureDir(t, "neardirect"), func(string) (*config.Config, *config.Provider, error) { return cfg, cp, nil }, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -89,7 +92,7 @@ func TestVerifyReplay_Venice_Fixture(t *testing.T) {
 		return cfg, cp, nil
 	}
 
-	report, reportText, err := verify.Replay(context.Background(), fdir, cfgLoader)
+	report, reportText, err := verify.Replay(context.Background(), fdir, cfgLoader, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	if err != nil {
 		t.Fatalf("verify.Replay: %v", err)
 	}
@@ -125,6 +128,7 @@ func TestVerifyRun_WithCapture_Venice(t *testing.T) {
 		CaptureDir:               captureDir,
 		CapturedE2EE:             fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime:         fixtureVerificationTime(&env),
+		TrustedRoot:              sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run with capture: %v", err)
@@ -164,6 +168,7 @@ func TestVerifyRun_Tinfoil_Fixture(t *testing.T) {
 		Nonce:                    env.nonce,
 		CapturedE2EE:             fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime:         fixtureVerificationTime(&env),
+		TrustedRoot:              sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -217,6 +222,7 @@ func TestVerifyRun_TinfoilDirect_Fixture(t *testing.T) {
 		Nonce:                    env.nonce,
 		CapturedE2EE:             fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime:         fixtureVerificationTime(&env),
+		TrustedRoot:              sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)

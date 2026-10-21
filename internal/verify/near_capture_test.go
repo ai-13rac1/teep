@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 )
@@ -103,7 +104,7 @@ func TestNearTLSOnlySignedCaptureReplay(t *testing.T) {
 			allowFail = append(allowFail, "e2ee_usable")
 			cfg := &config.Config{Providers: map[string]*config.Provider{manifest.Provider: cp}, ProviderAllowFail: map[string][]string{manifest.Provider: allowFail}}
 			loader := func(string) (*config.Config, *config.Provider, error) { return cfg, cp, nil }
-			report, text, err := Replay(t.Context(), dir, loader)
+			report, text, err := Replay(t.Context(), dir, loader, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -123,7 +124,7 @@ func TestNearTLSOnlySignedCaptureReplay(t *testing.T) {
 				}
 			}
 			cp.E2EE = true
-			if _, _, err := Replay(t.Context(), dir, loader); err == nil {
+			if _, _, err := Replay(t.Context(), dir, loader, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource)); err == nil {
 				t.Fatal("replay accepted a changed E2EE mode")
 			}
 		})
@@ -200,7 +201,7 @@ func TestNearCloudTLSOnlyReplayRejectsSubstitutedBoundKey(t *testing.T) {
 	policy := config.ProviderDefaultAllowFail()["nearcloud"]
 	policy = append(policy, attestation.FactorE2EEUsable, attestation.FactorTEEReportData)
 	cfg := &config.Config{Providers: map[string]*config.Provider{"nearcloud": cp}, ProviderAllowFail: map[string][]string{"nearcloud": policy}}
-	report, _, err := Replay(t.Context(), altered, func(string) (*config.Config, *config.Provider, error) { return cfg, cp, nil })
+	report, _, err := Replay(t.Context(), altered, func(string) (*config.Config, *config.Provider, error) { return cfg, cp, nil }, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	if err != nil {
 		t.Fatal(err)
 	}

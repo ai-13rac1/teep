@@ -285,6 +285,7 @@ func verifyTinfoilSupplyChain(
 	policy attestation.MeasurementPolicy,
 	offline bool,
 	client *http.Client,
+	roots attestation.TrustedRootSource,
 ) *attestation.TinfoilSupplyChainResult {
 	if raw.BackendFormat != attestation.FormatTinfoil {
 		return nil
@@ -337,7 +338,7 @@ func verifyTinfoilSupplyChain(
 	if client == nil {
 		client = config.NewAttestationClient(offline)
 	}
-	sv := tinfoil.NewSigstoreVerifier(client)
+	sv := tinfoil.NewSigstoreVerifier(client, roots)
 	predicateBytes, predicateType, signer, err := sv.FetchAndVerify(ctx, sigstoreRepo)
 	if err != nil {
 		result.SigstoreErr = err

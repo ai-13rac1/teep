@@ -25,9 +25,10 @@ it is not an inference transport exception.
 
 ## Clients created by dependencies
 
-`sigstore-go` uses the `go-tuf` fetcher to retrieve its trusted root. Teep
-supplies a separate Teep client that enforces CT through `WithFetcher`. TUF
-retrieval remains independent of attestation capture and replay. Teep does not
+`sigstore-go` uses the `go-tuf` fetcher to retrieve its trusted root. The
+[trusted root source](../../internal/attestation/sigstore_root.go) supplies a
+separate Teep client that enforces CT through `WithFetcher`. TUF retrieval
+remains independent of attestation capture and replay. Teep does not
 modify a global HTTP client.
 
 The Google TDX and SEV verification packages expose default HTTP getters, but

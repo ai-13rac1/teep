@@ -39,6 +39,9 @@ type Options struct {
 	CapturedTLSInference     *attestation.TLSInferenceResult
 	CapturedE2EE             *attestation.E2EETestResult // nil = run live test
 	NVIDIAVerifier           *attestation.NVIDIAVerifier // nil = use default
+	// TrustedRoot supplies the Sigstore trusted root. Nil selects the
+	// production TUF source. Tests set the static checked-in root.
+	TrustedRoot attestation.TrustedRootSource
 	// VerificationTime is the time used for cryptographic validity checks
 	// during replay. Zero means use the verifier's live wall clock. It must
 	// not affect context deadlines, HTTP timeouts, cache TTLs, or timing logs.
@@ -80,6 +83,9 @@ func Run(ctx context.Context, opts *Options) (report *attestation.VerificationRe
 		}
 	}
 	defer local.initializeClients()()
+	if local.TrustedRoot == nil {
+		local.TrustedRoot = attestation.NewTUFTrustedRootSource()
+	}
 	if nonceIsZero(local.Nonce) {
 		local.Nonce = attestation.NewNonce()
 	}
@@ -227,7 +233,7 @@ func runEvidence(ctx context.Context, opts *Options, route *provider.ResolvedRou
 	mergedGWPolicy := config.MergedGatewayMeasurementPolicy(opts.ProviderName, cfg, gwDefaults)
 
 	scSEV := attestation.SupplyChainSEVResult(sevResult, gatewaySEVResult)
-	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, scSEV, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, client)
+	tinfoilSC := verifyTinfoilSupplyChain(ctx, raw, tdxResult, scSEV, opts.ProviderName, opts.ModelName, mergedPolicy, opts.Offline, client, opts.TrustedRoot)
 
 	report = attestation.BuildReport(&attestation.ReportInput{
 		Provider:               opts.ProviderName,
@@ -279,8 +285,13 @@ func runEvidence(ctx context.Context, opts *Options, route *provider.ResolvedRou
 }
 
 // Replay loads a capture directory, replays all HTTP traffic, and returns the
-// verification report and formatted text.
-func Replay(ctx context.Context, captureDir string, cfgLoader CfgLoader) (report *attestation.VerificationReport, reportText string, err error) {
+// verification report and formatted text. roots supplies the Sigstore trusted
+// root; nil selects the TUF source, as in Run. Replay never reads a root
+// from the capture directory.
+func Replay(ctx context.Context, captureDir string, cfgLoader CfgLoader, roots attestation.TrustedRootSource) (report *attestation.VerificationReport, reportText string, err error) {
+	if roots == nil {
+		roots = attestation.NewTUFTrustedRootSource()
+	}
 	manifest, entries, err := capture.Load(captureDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("load capture: %w", err)
@@ -330,6 +341,7 @@ func Replay(ctx context.Context, captureDir string, cfgLoader CfgLoader) (report
 		CapturedTLSInference: tlsInferenceFromCapture(manifest.TLSInference),
 		CapturedE2EE:         capturedE2EE,
 		VerificationTime:     verificationTimeForCapture(&manifest),
+		TrustedRoot:          roots,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("replay verification: %w", err)
@@ -409,7 +421,7 @@ func saveCapture(
 	cfgLoader := func(_ string) (*config.Config, *config.Provider, error) {
 		return opts.Config, opts.Provider, nil
 	}
-	if err := verifyCapture(ctx, subdir, reportText, cfgLoader); err != nil {
+	if err := verifyCapture(ctx, subdir, reportText, cfgLoader, opts.TrustedRoot); err != nil {
 		return fmt.Errorf("capture self-check: %w", err)
 	}
 	return nil
@@ -417,8 +429,8 @@ func saveCapture(
 
 // verifyCapture loads a just-saved capture and re-verifies it to confirm the
 // capture round-trips cleanly.
-func verifyCapture(ctx context.Context, captureDir, originalReport string, cfgLoader CfgLoader) error {
-	_, reverifyText, err := Replay(ctx, captureDir, cfgLoader)
+func verifyCapture(ctx context.Context, captureDir, originalReport string, cfgLoader CfgLoader, roots attestation.TrustedRootSource) error {
+	_, reverifyText, err := Replay(ctx, captureDir, cfgLoader, roots)
 	if err != nil {
 		return fmt.Errorf("verify capture: %w", err)
 	}

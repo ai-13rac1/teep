@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/provider/venice"
 	"github.com/13rac1/teep/internal/verify"
@@ -42,6 +43,7 @@ func TestVerifyRun_VeniceACI_Fixture(t *testing.T) {
 		Nonce:            env.nonce,
 		CapturedE2EE:     fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime: fixtureVerificationTime(&env),
+		TrustedRoot:      sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)

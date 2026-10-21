@@ -98,8 +98,10 @@ GitHub attestations API to close the subject gap.
   `internal/provider/tinfoil` to `internal/attestation` as an interface,
   `TrustedRootSource.TrustedRoot(ctx) (root.TrustedMaterial, error)`. The
   production implementation keeps today's Tinfoil behavior (embedded TUF
-  root, `tuf-repo-cdn.sigstore.dev`, single-attempt `newTrustedRootFetcher`).
-  Tinfoil and the Rekor path both use it.
+  root, `tuf-repo-cdn.sigstore.dev`, single-attempt `newTrustedRootFetcher`),
+  but disables the local TUF cache: the source fetches on every call, so the
+  cache gives nothing and adds a shared directory that every NEAR, Venice
+  and Tinfoil verification writes. Tinfoil and the Rekor path both use it.
 - **Injection.** `NewRekorClient` takes a `TrustedRootSource` and panics on
   nil. `proxy.New` and `verify.checkSigstore` pass the production source. No
   package-level state.
@@ -187,12 +189,13 @@ One commit per phase; `make check` before each commit.
 - Behavior: add `internal/attestation/sigstore_root.go` with
   `TrustedRootSource`, a TUF implementation and a static implementation;
   move `newTrustedRootFetcher` and `trustedRootDo` from the tinfoil package;
-  `tinfoil.NewSigstoreVerifier` takes a source. Production behavior does
-  not change.
+  `tinfoil.NewSigstoreVerifier` takes a source. The TUF source writes no
+  local cache; production behavior does not otherwise change.
 - Tests: move `redirect_test.go` and `root_cancellation_test.go`; the static
   source rejects empty and malformed JSON; the checked-in root parses and
   holds the Fulcio CA, the `ctfe.sigstore.dev/2022` key and the Rekor log ID
-  of `rekorLogPublicKeyPEM` (`c0d23d6a…`). Tinfoil replay tests use the
+  of `rekorLogPublicKeyPEM` (`c0d23d6a…`). A TUF fetch with a fake fetcher
+  writes nothing below the home directory. Tinfoil replay tests use the
   static source and send no TUF requests.
 - Documents: `docs/providers/tinfoil/tinfoil_support.md` (root source, test
   coverage); the note for the root file.

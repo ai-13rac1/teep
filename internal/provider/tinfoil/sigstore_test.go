@@ -3,6 +3,8 @@ package tinfoil
 import (
 	"context"
 	"encoding/json"
+	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,12 +144,16 @@ func TestGithubAttestationResponse_WithBundle(t *testing.T) {
 }
 
 func TestNewSigstoreVerifier(t *testing.T) {
-	sv := NewSigstoreVerifier(http.DefaultClient)
+	roots := sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource)
+	sv := NewSigstoreVerifier(http.DefaultClient, roots)
 	if sv == nil {
 		t.Fatal("NewSigstoreVerifier returned nil")
 	}
 	if sv.client != http.DefaultClient {
 		t.Error("client not set correctly")
+	}
+	if sv.roots != roots {
+		t.Error("trusted root source not set correctly")
 	}
 }
 

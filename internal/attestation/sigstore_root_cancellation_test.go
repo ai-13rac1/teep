@@ -1,4 +1,4 @@
-package tinfoil
+package attestation
 
 import (
 	"context"

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/verify"
 )
@@ -49,6 +50,7 @@ func TestVerifyRun_ConcurrentVeniceFormats(t *testing.T) {
 					Nonce:            tc.env.nonce,
 					CapturedE2EE:     fixtureE2EEResult(tc.env.manifest.E2EE),
 					VerificationTime: fixtureVerificationTime(&tc.env),
+					TrustedRoot:      sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 				})
 				results <- result{tc.env.manifest.Model, tc.binding, report, err}
 			})

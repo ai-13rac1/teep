@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/capture"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/provider"
@@ -106,7 +107,8 @@ func TestVerificationCaptureFinalOutcomeReplay(t *testing.T) {
 			staleResponse.Body.Close()
 			opts := &Options{Config: cfg, Provider: cp, ProviderName: manifest.Provider, ModelName: manifest.Model,
 				Client: client, Nonce: nonce, CapturedE2EE: e2eeResultFromOutcome(manifest.E2EE),
-				VerificationTime: verificationTimeForCapture(&manifest), CaptureDir: t.TempDir(), capture: state}
+				VerificationTime: verificationTimeForCapture(&manifest), CaptureDir: t.TempDir(), capture: state,
+				TrustedRoot: sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource)}
 			route := provider.ResolvedRoute{}
 			result, err := runEvidence(context.Background(), opts, &route)
 			if err != nil {

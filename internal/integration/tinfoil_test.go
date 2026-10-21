@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/verify"
 )
 
@@ -22,6 +24,7 @@ func TestIntegration_Tinfoil_Fixture(t *testing.T) {
 		Nonce:            env.nonce,
 		CapturedE2EE:     fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime: fixtureVerificationTime(&env),
+		TrustedRoot:      sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)
@@ -57,6 +60,7 @@ func TestIntegration_TinfoilDirect_Fixture(t *testing.T) {
 		Nonce:            env.nonce,
 		CapturedE2EE:     fixtureE2EEResult(env.manifest.E2EE),
 		VerificationTime: fixtureVerificationTime(&env),
+		TrustedRoot:      sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 	})
 	if err != nil {
 		t.Fatalf("verify.Run: %v", err)

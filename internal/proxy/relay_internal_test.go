@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/config"
 	"github.com/13rac1/teep/internal/e2ee"
 	"github.com/13rac1/teep/internal/multi"
@@ -216,6 +217,7 @@ func newMinimalServer() *Server {
 		signingKeyCache: attestation.NewSigningKeyCache(time.Minute),
 		reportEpochs:    make(map[providerModelKey]uint64),
 		reportPubs:      make(map[providerModelKey]uint64),
+		sigstoreRoots:   sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource),
 		stats:           stats{startTime: time.Now(), models: make(map[string]*modelStats)},
 	}
 }

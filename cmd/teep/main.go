@@ -452,8 +452,10 @@ func runVerify(ctx context.Context, provider, model, captureDir string, offline,
 
 // runReverify re-verifies attestation from a previously captured directory.
 // All HTTP traffic is served from the saved responses via a replay transport.
+// The Sigstore trusted root comes from the live TUF repository, not from the
+// capture.
 func runReverify(ctx context.Context, captureDir string) error {
-	report, reverifyText, err := verify.Replay(ctx, captureDir, loadConfig)
+	report, reverifyText, err := verify.Replay(ctx, captureDir, loadConfig, nil)
 	if err != nil {
 		return fmt.Errorf("replay verification failed: %w", err)
 	}
