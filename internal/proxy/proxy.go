@@ -489,7 +489,7 @@ func New(cfg *config.Config) (*Server, error) {
 	s.pinnedUpstreams = newPinnedUpstreamPools()
 
 	s.sigstoreRoots = attestation.NewTUFTrustedRootSource()
-	s.rekorClient = attestation.NewRekorClient(attestClient)
+	s.rekorClient = attestation.NewRekorClient(attestClient, s.sigstoreRoots)
 	s.nvidiaVerifier = attestation.DefaultNVIDIAVerifier()
 	s.collateral = attestation.NewCollateralGetter(s.attestClient)
 	// Zero time.Time means "use the real wall clock": passing a zero verifyTime

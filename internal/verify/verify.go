@@ -220,7 +220,7 @@ func runEvidence(ctx context.Context, opts *Options, route *provider.ResolvedRou
 	if err := scPolicy.Validate(); err != nil {
 		return verificationOutcome{}, fmt.Errorf("supply chain policy: %w", err)
 	}
-	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, digestToRepo, scPolicy, client, opts.Offline)
+	sigstoreResults, rekorResults := checkSigstore(ctx, allDigests, digestToRepo, scPolicy, client, opts.TrustedRoot, opts.Offline)
 
 	e2eeResult = evidenceE2EEOutcome(ctx, opts, raw)
 

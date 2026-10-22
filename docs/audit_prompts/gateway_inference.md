@@ -429,7 +429,7 @@ The audit MUST verify:
 - Rekor provenance extraction logic,
 - issuer/identity checks used to classify provenance as trusted (what OIDC issuer values are accepted?),
 - behavior when a digest appears in Sigstore but has no Fulcio certificate (raw key signature — is this treated as passing provenance or only presence?),
-- handling of Rekor entries that lack DSSE (Dead Simple Signing Envelope) signatures — some images have Rekor transparency log entries but no DSSE envelope signatures; the `NoDSSE` field in `ImageProvenance` controls whether this is accepted.
+- handling of the DSSE signature of Rekor `dsse` entries — Rekor stores only the envelope and payload hashes, so teep cannot verify the DSSE signature from Rekor data; verify that each `FulcioSigned` entry instead requires a verified SET and a certificate that chains to a Fulcio CA in the Sigstore trusted root, with an SCT, at the integrated time, and that the remaining gap (the digest-to-payload link comes from the unsigned Rekor search index) is documented.
 
 The audit MUST explicitly state if Sigstore/Rekor are soft-fail in default policy and what traffic is still allowed during outage conditions.
 

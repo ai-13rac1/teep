@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/defaults"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 	"github.com/13rac1/teep/internal/provider/neardirect"
@@ -106,18 +107,19 @@ func TestIntegration_NearCloud_Fixture(t *testing.T) {
 
 	// --- Sigstore + Rekor ---
 	allDigests, digestToRepo := attestation.MergeComposeDigests(modelCD, gatewayCD)
-	rc := attestation.NewRekorClient(env.client)
+	rc := attestation.NewRekorClient(env.client, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	sigstoreResults := rc.CheckSigstoreDigests(ctx, allDigests)
 	t.Logf("sigstore: %d digests checked", len(sigstoreResults))
 	var rekorResults []attestation.RekorProvenance
 	for _, sr := range sigstoreResults {
 		if sr.OK {
 			prov := rc.FetchRekorProvenanceForPolicy(ctx, sr.Digest, digestToRepo[sr.Digest], nearcloud.SupplyChainPolicy())
-			t.Logf("  rekor: digest=%s hasCert=%v err=%v", prov.Digest[:min(16, len(prov.Digest))], prov.HasCert, prov.Err)
+			t.Logf("  rekor: digest=%s fulcioVerified=%v fulcioErr=%v err=%v", prov.Digest[:min(16, len(prov.Digest))], prov.FulcioVerified, prov.FulcioErr, prov.Err)
 			rekorResults = append(rekorResults, prov)
 		}
 	}
 	assertRekorExercised(t, sigstoreResults, rekorResults)
+	assertFulcioSignedVerified(t, nearcloud.SupplyChainPolicy(), digestToRepo, rekorResults)
 
 	// --- PoC (model + gateway) ---
 	poc := attestation.NewPoCClient(attestation.PoCPeers, attestation.PoCQuorum, env.client).

@@ -6,7 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,10 +16,10 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/13rac1/teep/internal/tlsct"
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 )
@@ -67,64 +66,62 @@ type rekorInclusionProof struct {
 type RekorClient struct {
 	baseURL      string
 	httpClient   *http.Client
-	publicKeyPEM string // overrides rekorLogPublicKeyPEM when non-empty (tests)
+	publicKeyPEM string            // overrides rekorLogPublicKeyPEM when non-empty (tests)
+	roots        TrustedRootSource // Sigstore trusted root for Fulcio certificate checks
 }
 
 // NewRekorClient returns a RekorClient pointing at the production Rekor API.
-func NewRekorClient(httpClient *http.Client) *RekorClient {
-	return &RekorClient{baseURL: defaultRekorBase, httpClient: httpClient}
+// roots supplies the Sigstore trusted root that Fulcio certificates must
+// chain to. It panics when httpClient or roots is nil.
+func NewRekorClient(httpClient *http.Client, roots TrustedRootSource) *RekorClient {
+	return newRekorClient(defaultRekorBase, "", httpClient, roots)
 }
 
 // NewRekorClientWithBase returns a RekorClient with a custom base URL.
 // Intended for tests and environments with a private Rekor instance.
-func NewRekorClientWithBase(baseURL string, httpClient *http.Client) *RekorClient {
-	return &RekorClient{baseURL: baseURL, httpClient: httpClient}
+func NewRekorClientWithBase(baseURL string, httpClient *http.Client, roots TrustedRootSource) *RekorClient {
+	return newRekorClient(baseURL, "", httpClient, roots)
 }
 
 // NewRekorClientWithKey returns a RekorClient with a custom base URL and
 // signing public key PEM. Intended for tests that need to verify entries
 // against a known key without hitting the production Rekor log.
-func NewRekorClientWithKey(baseURL, publicKeyPEM string, httpClient *http.Client) *RekorClient {
-	return &RekorClient{baseURL: baseURL, publicKeyPEM: publicKeyPEM, httpClient: httpClient}
+func NewRekorClientWithKey(baseURL, publicKeyPEM string, httpClient *http.Client, roots TrustedRootSource) *RekorClient {
+	return newRekorClient(baseURL, publicKeyPEM, httpClient, roots)
 }
 
-// Fulcio OIDC extension OID prefix: 1.3.6.1.4.1.57264.1.
-var (
-	fulcioOIDPrefix  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1}
-	oidOIDCIssuer    = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 1}
-	oidTrigger       = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 2}
-	oidSourceCommit  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 3}
-	oidSourceRepo    = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 5}
-	oidSourceRef     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 6}
-	oidRunnerEnv     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 11}
-	oidSourceRepoURL = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 12}
-	oidRunURL        = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 21}
-)
+func newRekorClient(baseURL, publicKeyPEM string, httpClient *http.Client, roots TrustedRootSource) *RekorClient {
+	if httpClient == nil {
+		panic("attestation.NewRekorClient: nil HTTP client")
+	}
+	if roots == nil {
+		panic("attestation.NewRekorClient: nil Sigstore trusted root source")
+	}
+	return &RekorClient{baseURL: baseURL, publicKeyPEM: publicKeyPEM, httpClient: httpClient, roots: roots}
+}
 
-// RekorProvenance holds the build provenance metadata extracted from a Rekor
-// transparency log entry's Fulcio certificate.
+// RekorProvenance holds the result of the Rekor entry that teep selected for
+// a digest. The identity fields are set only when FulcioVerified is true.
 type RekorProvenance struct {
-	Digest           string
-	HasCert          bool   // false = raw public key or non-Fulcio cert
-	HasNonFulcioCert bool   // true = X.509 cert present but missing Fulcio OIDC extensions
-	KeyFingerprint   string // SHA-256 hex of the PKIX public key bytes
-	SubjectURI       string // SAN URI from Fulcio cert (OIDC identity)
-	OIDCIssuer       string // 1.3.6.1.4.1.57264.1.1
-	Trigger          string // 1.3.6.1.4.1.57264.1.2
-	SourceCommit     string // 1.3.6.1.4.1.57264.1.3
-	SourceRepo       string // 1.3.6.1.4.1.57264.1.5
-	SourceRef        string // 1.3.6.1.4.1.57264.1.6
-	SourceRepoURL    string // 1.3.6.1.4.1.57264.1.12
-	RunnerEnv        string // 1.3.6.1.4.1.57264.1.11
-	RunURL           string // 1.3.6.1.4.1.57264.1.21
-	Err              error  // non-fatal: provenance unavailable but digest exists
-
-	// SignatureVerified is true when the DSSE envelope signature was
-	// successfully verified against the Fulcio certificate's public key.
-	SignatureVerified bool
-
-	// SignatureErr is set when signature verification was attempted but failed.
-	SignatureErr error
+	Digest string
+	// FulcioVerified is true when the entry verifier is a certificate, the
+	// entry SET verified, and the certificate chains to a Fulcio CA in the
+	// Sigstore trusted root, with a valid SCT, at the integrated time.
+	FulcioVerified bool
+	// FulcioErr is set when the verifier is a certificate that is not
+	// verified as a Fulcio certificate. It is nil for a raw public key.
+	FulcioErr      error
+	KeyFingerprint string // SHA-256 hex of the PKIX public key bytes
+	SubjectURI     string // certificate SAN (OIDC identity)
+	OIDCIssuer     string // 1.3.6.1.4.1.57264.1.8, or 1.3.6.1.4.1.57264.1.1
+	Trigger        string // 1.3.6.1.4.1.57264.1.2
+	SourceCommit   string // 1.3.6.1.4.1.57264.1.3
+	SourceRepo     string // 1.3.6.1.4.1.57264.1.5
+	SourceRef      string // 1.3.6.1.4.1.57264.1.6
+	SourceRepoURL  string // 1.3.6.1.4.1.57264.1.12
+	RunnerEnv      string // 1.3.6.1.4.1.57264.1.11
+	RunURL         string // 1.3.6.1.4.1.57264.1.21
+	Err            error  // non-fatal: provenance unavailable but digest exists
 
 	// SETVerified is true when the Rekor Signed Entry Timestamp was
 	// successfully verified against the Rekor log's public key.
@@ -145,14 +142,15 @@ type RekorProvenance struct {
 }
 
 // FetchRekorProvenance queries the Rekor API for a digest's log entry and
-// parses Fulcio certificate provenance if present.
+// verifies its Fulcio certificate provenance if present.
 //
 // All returned UUIDs are tried in order. The function prefers an entry backed
-// by a Fulcio certificate (which carries OIDC build-provenance metadata) over
-// a raw-public-key entry (F-23: mitigates front-running where an attacker
-// inserts a raw-key entry before the legitimate Fulcio-signed entry).
+// by a verified Fulcio certificate (which carries OIDC build-provenance
+// metadata) over a raw-public-key entry or a certificate that does not
+// verify, so that an entry logged before the legitimate entry does not
+// replace it.
 func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) RekorProvenance {
-	return rc.fetchRekorProvenance(ctx, digest, nil)
+	return rc.fetchWithTrustedRoot(ctx, digest, nil)
 }
 
 // FetchRekorProvenanceForImage queries Rekor for a digest and, when img has a
@@ -160,7 +158,7 @@ func (rc *RekorClient) FetchRekorProvenance(ctx context.Context, digest string) 
 // avoids accepting unrelated downstream attestations that merely reference the
 // same digest.
 func (rc *RekorClient) FetchRekorProvenanceForImage(ctx context.Context, digest string, img *ImageProvenance) RekorProvenance {
-	return rc.fetchRekorProvenance(ctx, digest, rekorImageMatcher(img))
+	return rc.fetchWithTrustedRoot(ctx, digest, rekorImageMatcher(img))
 }
 
 // FetchRekorProvenanceForPolicy queries Rekor for a digest and prefers entries
@@ -172,15 +170,14 @@ func (rc *RekorClient) FetchRekorProvenanceForPolicy(
 	repo string,
 	policy *SupplyChainPolicy,
 ) RekorProvenance {
-	if policy == nil {
-		return rc.FetchRekorProvenance(ctx, digest)
-	}
-	return rc.fetchRekorProvenance(ctx, digest, rekorPolicyMatcherForRepo(policy, repo))
+	return rc.fetchWithTrustedRoot(ctx, digest, policyMatcher(policy, repo))
 }
 
 // FetchRekorProvenancesForPolicy fetches provenance for each digest
 // concurrently, preferring entries that match the component-specific policy for
-// that digest when one is available.
+// that digest when one is available. It gets the Sigstore trusted root once
+// and gives the same read-only material to every digest. When the root is
+// not available, every result has Err set.
 func (rc *RekorClient) FetchRekorProvenancesForPolicy(
 	ctx context.Context,
 	digests []string,
@@ -188,16 +185,41 @@ func (rc *RekorClient) FetchRekorProvenancesForPolicy(
 	policy *SupplyChainPolicy,
 ) []RekorProvenance {
 	results := make([]RekorProvenance, len(digests))
+	if len(digests) == 0 {
+		return results
+	}
+	material, err := rc.trustedRoot(ctx)
+	if err != nil {
+		for i, d := range digests {
+			results[i] = RekorProvenance{Digest: d, Err: err}
+		}
+		return results
+	}
 	var wg sync.WaitGroup
 	for i, d := range digests {
 		wg.Add(1)
 		go func(i int, d string) {
 			defer wg.Done()
-			results[i] = rc.FetchRekorProvenanceForPolicy(ctx, d, digestToRepo[d], policy)
+			results[i] = rc.fetchRekorProvenance(ctx, d, policyMatcher(policy, digestToRepo[d]), material)
 		}(i, d)
 	}
 	wg.Wait()
 	return results
+}
+
+func policyMatcher(policy *SupplyChainPolicy, repo string) rekorMatcher {
+	if policy == nil {
+		return nil
+	}
+	return rekorPolicyMatcherForRepo(policy, repo)
+}
+
+func (rc *RekorClient) fetchWithTrustedRoot(ctx context.Context, digest string, matcher rekorMatcher) RekorProvenance {
+	material, err := rc.trustedRoot(ctx)
+	if err != nil {
+		return RekorProvenance{Digest: digest, Err: err}
+	}
+	return rc.fetchRekorProvenance(ctx, digest, matcher, material)
 }
 
 type rekorMatch int
@@ -210,7 +232,7 @@ const (
 
 type rekorMatcher func(*RekorProvenance) rekorMatch
 
-func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, matcher rekorMatcher) RekorProvenance {
+func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, matcher rekorMatcher, material root.TrustedMaterial) RekorProvenance {
 	uuids, err := rc.fetchRekorUUIDs(ctx, digest)
 	if err != nil {
 		return RekorProvenance{Digest: digest, Err: fmt.Errorf("search Rekor: %w", err)}
@@ -220,15 +242,30 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 	}
 
 	preferPolicyMatch := matcher != nil
-	// Try each UUID; prefer one whose verifier is a Fulcio certificate.
-	// This prevents a front-running attack where an adversary inserts a
-	// raw-key entry first, causing us to skip build-provenance verification.
+	// Try each UUID; prefer one whose verifier is a verified Fulcio
+	// certificate. An entry with a raw key or a certificate that does not
+	// verify is kept only as a fallback, so that an entry logged first by
+	// another party does not replace the build-provenance entry.
 	var rawKeyFallback *RekorProvenance
 	var fulcioFallback *RekorProvenance
 	var policyFallback *RekorProvenance
 	var lastErr error
+	// A public digest can have many entries from other parties. Warn once
+	// for the digest, not once for each entry whose certificate fails.
+	var fulcioFailures int
+	var lastFulcioErr error
+	defer func() {
+		if fulcioFailures > 0 {
+			slog.WarnContext(ctx, "Rekor entry certificates not verified as Fulcio certificates",
+				"digest", digest, "entries", fulcioFailures, "last_reason", lastFulcioErr.Error())
+		}
+	}()
 	for _, uuid := range uuids {
-		entry, body, err := rc.fetchRekorEntryBody(ctx, uuid)
+		p, err := rc.fetchEntryProvenance(ctx, digest, uuid, material)
+		if p.FulcioErr != nil {
+			fulcioFailures++
+			lastFulcioErr = p.FulcioErr
+		}
 		if err != nil {
 			if _, rejected := errors.AsType[rekorEntryRejectedError](err); rejected {
 				slog.WarnContext(ctx, "Rekor entry rejected",
@@ -237,18 +274,8 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 			lastErr = fmt.Errorf("entry %s: %w", truncate(uuid, 100), err)
 			continue
 		}
-		verifierPEM, block := body.VerifierPEM, body.Verifier
 
-		if block.Type == "PUBLIC KEY" {
-			// Raw public key — no Fulcio provenance. Keep as fallback and
-			// continue looking for an entry with a Fulcio certificate.
-			h := sha256.Sum256(block.Bytes)
-			p := RekorProvenance{
-				Digest:         digest,
-				HasCert:        false,
-				KeyFingerprint: hex.EncodeToString(h[:]),
-			}
-			rc.verifyRekorEntry(entry, &p)
+		if !p.FulcioVerified {
 			if preferPolicyMatch && rekorPolicyMatched(matcher, &p, &policyFallback) {
 				return p
 			}
@@ -257,57 +284,18 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 			}
 			continue
 		}
-
-		prov, err := parseFulcioProvenance(verifierPEM)
-		if err != nil {
-			lastErr = fmt.Errorf("parse Fulcio cert in entry %s: %w", uuid, err)
-			continue
-		}
-		prov.Digest = digest
-		prov.IntegratedTime = entry.IntegratedTime
-
-		// Distinguish genuine Fulcio certs (with OIDC issuer) from non-Fulcio
-		// X.509 certs that happen to be used for signing. A non-Fulcio cert
-		// has no build-provenance OIDs so OIDCIssuer is empty. Treat it like
-		// a raw-key fallback and keep looking for a real Fulcio entry.
-		if prov.OIDCIssuer == "" {
-			p := RekorProvenance{
-				Digest:           digest,
-				HasCert:          false,
-				HasNonFulcioCert: true,
-				KeyFingerprint:   prov.KeyFingerprint,
-			}
-			rc.verifyRekorEntry(entry, &p)
-			if preferPolicyMatch && rekorPolicyMatched(matcher, &p, &policyFallback) {
-				return p
-			}
-			if rawKeyFallback == nil {
-				rawKeyFallback = &p
-			}
-			continue
-		}
-		// Verify the DSSE envelope signature against the Fulcio cert.
-		if err := verifyDSSESignature(body.Raw, verifierPEM); err != nil {
-			prov.SignatureErr = fmt.Errorf("DSSE signature verification: %w", err)
-		} else {
-			prov.SignatureVerified = true
-		}
-
-		// Verify the Signed Entry Timestamp (SET) and inclusion proof.
-		rc.verifyRekorEntry(entry, prov)
 
 		if preferPolicyMatch {
-			if rekorPolicyMatched(matcher, prov, &policyFallback) {
-				return *prov
+			if rekorPolicyMatched(matcher, &p, &policyFallback) {
+				return p
 			}
 			if fulcioFallback == nil {
-				p := *prov
 				fulcioFallback = &p
 			}
 			continue
 		}
 
-		return *prov
+		return p
 	}
 
 	if policyFallback != nil {
@@ -318,7 +306,7 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 		return *fulcioFallback
 	}
 
-	// No Fulcio-backed entry found; return raw-key fallback if available.
+	// No verified Fulcio entry found; return the first other entry.
 	if rawKeyFallback != nil {
 		return *rawKeyFallback
 	}
@@ -327,6 +315,16 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 		return RekorProvenance{Digest: digest, Err: lastErr}
 	}
 	return RekorProvenance{Digest: digest, Err: fmt.Errorf("no usable Rekor entry for sha256:%s", digest)}
+}
+
+// fetchEntryProvenance fetches and parses the entry for uuid and builds its
+// provenance.
+func (rc *RekorClient) fetchEntryProvenance(ctx context.Context, digest, uuid string, material root.TrustedMaterial) (RekorProvenance, error) {
+	entry, body, err := rc.fetchRekorEntryBody(ctx, uuid)
+	if err != nil {
+		return RekorProvenance{}, err
+	}
+	return rc.rekorEntryProvenance(ctx, digest, uuid, entry, body, material)
 }
 
 func rekorPolicyMatched(matcher rekorMatcher, prov *RekorProvenance, fallback **RekorProvenance) bool {
@@ -513,178 +511,7 @@ func parseRekorEntryAndBody(respBody []byte, uuid string) (*rekorEntry, *rekorDS
 	if len(unknown) > 0 {
 		return nil, nil, fmt.Errorf("body has unknown fields: %s", formatUnknownFields(unknown))
 	}
-	body.Raw = raw
 	return entry, body, nil
-}
-
-// parseFulcioProvenance parses a Fulcio certificate PEM and extracts the
-// Sigstore OIDC extension OIDs containing build provenance metadata.
-func parseFulcioProvenance(certPEM []byte) (*RekorProvenance, error) {
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return nil, errors.New("no PEM block found")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse X.509: %w", err)
-	}
-
-	prov := &RekorProvenance{HasCert: true}
-
-	// Extract the OIDC identity from the certificate SAN (URI type).
-	if len(cert.URIs) > 0 {
-		prov.SubjectURI = cert.URIs[0].String()
-	}
-
-	// Compute the public key fingerprint (SHA-256 of SPKI DER bytes).
-	h := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-	prov.KeyFingerprint = hex.EncodeToString(h[:])
-
-	for _, ext := range cert.Extensions {
-		if !hasFulcioPrefix(ext.Id) {
-			continue
-		}
-		val := decodeExtensionValue(ext.Value)
-
-		switch {
-		case ext.Id.Equal(oidOIDCIssuer):
-			prov.OIDCIssuer = val
-		case ext.Id.Equal(oidTrigger):
-			prov.Trigger = val
-		case ext.Id.Equal(oidSourceCommit):
-			prov.SourceCommit = val
-		case ext.Id.Equal(oidSourceRepo):
-			prov.SourceRepo = val
-		case ext.Id.Equal(oidSourceRef):
-			prov.SourceRef = val
-		case ext.Id.Equal(oidRunnerEnv):
-			prov.RunnerEnv = val
-		case ext.Id.Equal(oidSourceRepoURL):
-			prov.SourceRepoURL = val
-		case ext.Id.Equal(oidRunURL):
-			prov.RunURL = val
-		}
-	}
-
-	return prov, nil
-}
-
-// hasFulcioPrefix checks whether oid starts with 1.3.6.1.4.1.57264.1.
-func hasFulcioPrefix(oid asn1.ObjectIdentifier) bool {
-	if len(oid) < len(fulcioOIDPrefix) {
-		return false
-	}
-	for i, v := range fulcioOIDPrefix {
-		if oid[i] != v {
-			return false
-		}
-	}
-	return true
-}
-
-// decodeExtensionValue decodes a Fulcio extension value. These are ASN.1
-// UTF8String encoded (tag 0x0C). Some older entries may use raw bytes.
-//
-// The fallback to raw bytes is logged at Warn level to avoid silently masking
-// ASN.1 encoding errors in Rekor entries (F-26).
-func decodeExtensionValue(raw []byte) string {
-	var s string
-	if _, err := asn1.Unmarshal(raw, &s); err == nil {
-		return s
-	}
-	// Fallback: some older Rekor entries store the value as raw UTF-8
-	// (pre-ASN.1 encoding convention). Validate it's valid UTF-8 before using.
-	if !utf8.Valid(raw) {
-		slog.Warn("Rekor extension value is neither valid ASN.1 UTF8String nor valid UTF-8; skipping",
-			"oid_hex", hex.EncodeToString(raw))
-		return ""
-	}
-	slog.Debug("Rekor extension: using raw UTF-8 fallback (not ASN.1 encoded)")
-	return string(raw)
-}
-
-// verifyDSSESignature verifies the DSSE envelope signature in a Rekor entry
-// body against the provided verifier certificate. The DSSE Pre-Authentication
-// Encoding (PAE) is: "DSSEv1" SP LEN(payloadType) SP payloadType SP LEN(payload) SP payload
-// where payload is the raw (base64-decoded) content.
-func verifyDSSESignature(entryBody, verifierPEM []byte) error {
-	var entry struct {
-		Kind string `json:"kind"`
-		Spec struct {
-			Content struct {
-				Envelope struct {
-					Payload     string `json:"payload"`
-					PayloadType string `json:"payloadType"`
-					Signatures  []struct {
-						Sig string `json:"sig"`
-					} `json:"signatures"`
-				} `json:"envelope"`
-			} `json:"content"`
-		} `json:"spec"`
-	}
-	if err := json.Unmarshal(entryBody, &entry); err != nil {
-		return fmt.Errorf("decode entry: %w", err)
-	}
-	if entry.Kind != "dsse" {
-		return fmt.Errorf("signature verification not supported for entry kind %q", entry.Kind)
-	}
-
-	env := entry.Spec.Content.Envelope
-	if len(env.Signatures) == 0 {
-		return errors.New("no signatures in DSSE envelope")
-	}
-
-	// Decode the signature.
-	sigBytes, err := base64.StdEncoding.DecodeString(env.Signatures[0].Sig)
-	if err != nil {
-		return fmt.Errorf("decode signature: %w", err)
-	}
-
-	// Build the PAE (Pre-Authentication Encoding).
-	payloadBytes, err := base64.StdEncoding.DecodeString(env.Payload)
-	if err != nil {
-		return fmt.Errorf("decode payload: %w", err)
-	}
-	pae := buildPAE(env.PayloadType, payloadBytes)
-
-	// Parse the verifier certificate.
-	block, _ := pem.Decode(verifierPEM)
-	if block == nil {
-		return errors.New("no PEM block in verifier")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("parse verifier certificate: %w", err)
-	}
-
-	// Verify the signature over the PAE using the cert's public key.
-	digest := sha256.Sum256(pae)
-	switch pub := cert.PublicKey.(type) {
-	case *ecdsa.PublicKey:
-		if !ecdsa.VerifyASN1(pub, digest[:], sigBytes) {
-			return errors.New("ECDSA signature verification failed")
-		}
-	default:
-		return fmt.Errorf("unsupported public key type %T for DSSE verification", cert.PublicKey)
-	}
-	return nil
-}
-
-// buildPAE constructs the DSSE Pre-Authentication Encoding.
-// Format: "DSSEv1" SP LEN(payloadType) SP payloadType SP LEN(payload) SP payload.
-func buildPAE(payloadType string, payload []byte) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("DSSEv1")
-	buf.WriteByte(' ')
-	fmt.Fprintf(&buf, "%d", len(payloadType))
-	buf.WriteByte(' ')
-	buf.WriteString(payloadType)
-	buf.WriteByte(' ')
-	fmt.Fprintf(&buf, "%d", len(payload))
-	buf.WriteByte(' ')
-	buf.Write(payload)
-	return buf.Bytes()
 }
 
 // verifyRekorEntry verifies the Signed Entry Timestamp (SET) and Merkle tree

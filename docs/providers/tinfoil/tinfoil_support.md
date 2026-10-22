@@ -2087,6 +2087,9 @@ Releases fetched through `github-proxy.tinfoil.sh`.
      and panics when it is nil. The verifier gets the trusted root from the
      source once for each bundle verification.
    - The proxy and `teep verify` use `attestation.NewTUFTrustedRootSource`.
+     The same source supplies the root for the Fulcio certificate checks of
+     the NEAR and Venice Rekor path (SEE:
+     [NEAR supply chain verification](../near/near_attestation.md#supply-chain-verification)).
      Each fetch starts from the TUF root that `sigstore-go` embeds, updates
      the metadata from `tuf-repo-cdn.sigstore.dev` with a new CT-enforcing
      Teep client, makes one attempt for each file, rejects redirects, and

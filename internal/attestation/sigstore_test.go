@@ -3,6 +3,7 @@ package attestation
 import (
 	"context"
 	"encoding/json"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,7 +33,7 @@ func TestCheckSigstoreDigests_AllOK(t *testing.T) {
 	ts := makeRekorMock(t, true)
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 
 	digests := []string{
 		"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
@@ -58,7 +59,7 @@ func TestCheckSigstoreDigests_NotFound(t *testing.T) {
 	ts := makeRekorMock(t, false)
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 
 	digests := []string{"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"}
 	results := rc.CheckSigstoreDigests(context.Background(), digests)
@@ -80,7 +81,7 @@ func TestCheckSigstoreDigests_RekorError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 
 	digests := []string{"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"}
 	results := rc.CheckSigstoreDigests(context.Background(), digests)
@@ -97,7 +98,7 @@ func TestCheckSigstoreDigests_RekorError(t *testing.T) {
 }
 
 func TestCheckSigstoreDigests_Empty(t *testing.T) {
-	rc := NewRekorClient(http.DefaultClient)
+	rc := NewRekorClient(http.DefaultClient, sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 	results := rc.CheckSigstoreDigests(context.Background(), nil)
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results for nil digests, got %d", len(results))

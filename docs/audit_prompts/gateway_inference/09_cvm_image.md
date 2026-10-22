@@ -81,12 +81,12 @@ Verify and report:
 Verify and report:
 - Rekor API interaction: UUID search via POST, then entry fetch via POST,
 - response body size limits (recommended: 1 MiB limit),
-- DSSE envelope parsing: extraction of verifier from `spec.signatures[0]`,
+- Rekor entry parsing: only `dsse` 0.0.1 bodies with exactly one signature and no unknown fields are accepted,
 - PEM block type classification: `CERTIFICATE` → Fulcio provenance, `PUBLIC KEY` → raw key (no provenance),
 - Fulcio certificate provenance extraction via X.509 extension OIDs (1.3.6.1.4.1.57264.1.*),
 - accepted signer identity model (OIDC issuer, identity patterns, exact-match vs glob),
 - behavior when a Rekor entry has a raw public key (no Fulcio cert): document whether this is treated as passing provenance,
-- handling of Rekor entries that lack DSSE (Dead Simple Signing Envelope) signatures — the `NoDSSE` field in `ImageProvenance` controls whether this is accepted,
+- handling of the DSSE signature of Rekor `dsse` entries — Rekor stores only the envelope and payload hashes, so teep cannot verify the DSSE signature from Rekor data; verify that each `FulcioSigned` entry instead requires a verified SET and a certificate that chains to a Fulcio CA in the Sigstore trusted root, with an SCT, at the integrated time, and that the remaining gap (the digest-to-payload link comes from the unsigned Rekor search index) is documented,
 - when multiple Rekor UUIDs are returned, only the first is fetched — document risk.
 
 For the nearcloud provider, the supply chain policy (`internal/provider/nearcloud/policy.go`) extends the neardirect base policy with gateway-specific images. The model-tier images (shared with neardirect) include `datadog/agent`, `certbot/dns-cloudflare`, and `nearaidev/compose-manager`. Gateway-tier images include `nearaidev/dstack-vpc`, `nearaidev/cloud-api`, and `nearaidev/cvm-ingress`. Each image entry specifies whether it is a model-tier or gateway-tier image, and the expected provenance (Sigstore key, Fulcio OIDC identity, or compose-binding-only).

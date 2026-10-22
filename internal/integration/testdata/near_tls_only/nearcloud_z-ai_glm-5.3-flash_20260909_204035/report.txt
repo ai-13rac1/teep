@@ -43,7 +43,7 @@ Tier 3: Supply Chain & Channel Integrity
   ✗ cpu_gpu_chain                     CPU-GPU attestation not bound  [ALLOWED]
   — nvswitch_binding                  NVSwitch fabric verification is Tinfoil-specific
   ✗ measured_model_weights            no model weight hashes  [ALLOWED]
-  ✓ build_transparency_log            7 component(s) verified by Fulcio provenance; 2 present in Sigstore (nearai/compose-manager@f91a204, github-hosted; log integrity: SET 9/9, inclusion 9/9)  [ENFORCED]
+  ✓ build_transparency_log            7 component(s) with Fulcio certificate chain and SCT verified at log time; 2 present in Sigstore (nearai/compose-manager@f91a204, github-hosted; log integrity: SET 9/9, inclusion 9/9)  [ENFORCED]
   ✓ component_recognition             4 model component(s) recognized; 7 gateway component(s) recognized  [ALLOWED]
   ✓ provider_signer_recognition       9 component signer(s) recognized provider-wide  [ENFORCED]
   ✓ component_signature_recognition   9 component signature policy match(es)  [ENFORCED]

@@ -173,7 +173,7 @@ For neardirect, nearcloud and Venice:
 |---|---|---|
 | `formatBuildTransparencyResult` Pass | `N component(s) verified by Fulcio provenance` | `N component(s) with Fulcio certificate chain and SCT verified at log time` |
 | `verifyFulcioEntry` | `DSSE envelope signature verification failed: …` | removed |
-| `verifyFulcioEntry` | `expected Fulcio certificate but entry has non-Fulcio X.509 cert (no OIDC issuer OID)` | `expected Fulcio certificate but no entry certificate chains to the Sigstore trusted root: …` |
+| `verifyFulcioEntry` | `expected Fulcio certificate but entry has non-Fulcio X.509 cert (no OIDC issuer OID)` | `expected Fulcio certificate but the entry certificate does not chain to the Sigstore trusted root: …` |
 | `verifyFulcioEntry` | — | `Fulcio certificate chain not verified` (checked before identity) |
 | `classifyRekorEntry`, `verifyComponentSignature` | `Rekor provenance fetch failed: …` | `Rekor provenance unavailable: …` (cause: fetch, parse, trusted root or chain) |
 
@@ -230,6 +230,12 @@ One commit per phase; `make check` before each commit.
   - A leaf without an SCT, or with an SCT from a log not in the root, is
     rejected.
   - An invalid SET gives no chain check and no Fulcio identity.
+  - A valid SET with a failed inclusion proof gives the chain-verified
+    identity; `build_transparency_log` fails on the inclusion proof and the
+    recognition factors pass.
+  - Certificate entries that fail the Fulcio checks give one warning for the
+    digest, with the count and the last reason; each entry is logged at
+    DEBUG.
   - An attacker entry listed before the legitimate entry does not change
     the selected entry; the attacker entry alone fails the factors.
   - A trusted root source error fails all three factors.

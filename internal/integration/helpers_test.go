@@ -214,6 +214,29 @@ func assertRekorExercised(t *testing.T, sigstore []attestation.SigstoreResult, r
 	}
 }
 
+// assertFulcioSignedVerified requires a chain-verified Fulcio certificate,
+// with no error, for every Rekor result whose component policy is
+// FulcioSigned, and at least one such component.
+func assertFulcioSignedVerified(t *testing.T, policy *attestation.SupplyChainPolicy, digestToRepo map[string]string, rekor []attestation.RekorProvenance) {
+	t.Helper()
+	checked := 0
+	for i := range rekor {
+		r := &rekor[i]
+		img := policy.Lookup(digestToRepo[r.Digest])
+		if img == nil || img.Provenance != attestation.FulcioSigned {
+			continue
+		}
+		checked++
+		if !r.FulcioVerified || r.FulcioErr != nil || r.Err != nil {
+			t.Errorf("rekor: FulcioSigned component %q: FulcioVerified=%v FulcioErr=%v Err=%v",
+				img.Repo, r.FulcioVerified, r.FulcioErr, r.Err)
+		}
+	}
+	if checked == 0 {
+		t.Error("rekor: no FulcioSigned component checked")
+	}
+}
+
 func total(r *attestation.VerificationReport) int {
 	return r.Passed + r.Failed + r.Skipped
 }

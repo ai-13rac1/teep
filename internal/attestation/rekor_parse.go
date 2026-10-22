@@ -35,7 +35,6 @@ type rekorDSSEBody struct {
 	Signature    []byte     // DSSE signature
 	VerifierPEM  []byte     // PEM-encoded verifier
 	Verifier     *pem.Block // decoded verifier: CERTIFICATE or PUBLIC KEY
-	Raw          []byte     // decoded body JSON
 }
 
 // decodeRekorArray decodes one JSON array into target, a pointer to a slice.

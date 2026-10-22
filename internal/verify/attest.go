@@ -220,12 +220,13 @@ func checkSigstore(
 	digestToRepo map[string]string,
 	scPolicy *attestation.SupplyChainPolicy,
 	client *http.Client,
+	roots attestation.TrustedRootSource,
 	offline bool,
 ) ([]attestation.SigstoreResult, []attestation.RekorProvenance) {
 	if len(digests) == 0 || offline {
 		return nil, nil
 	}
-	rc := attestation.NewRekorClient(client)
+	rc := attestation.NewRekorClient(client, roots)
 	sigstoreResults := rc.CheckSigstoreDigests(ctx, digests)
 	for _, r := range sigstoreResults {
 		switch {
@@ -254,7 +255,7 @@ func checkSigstore(
 		switch {
 		case prov.Err != nil:
 			slog.Warn("Rekor provenance fetch failed", "digest", "sha256:"+d[:min(16, len(d))]+"...", "err", prov.Err)
-		case prov.HasCert:
+		case prov.FulcioVerified:
 			slog.Info("Rekor provenance found",
 				"digest", "sha256:"+d[:min(16, len(d))]+"...",
 				"issuer", prov.OIDCIssuer,
@@ -262,6 +263,8 @@ func checkSigstore(
 				"commit", prov.SourceCommit[:min(7, len(prov.SourceCommit))],
 				"runner", prov.RunnerEnv,
 			)
+		case prov.FulcioErr != nil:
+			slog.Warn("Rekor entry certificate not verified as a Fulcio certificate", "digest", "sha256:"+d[:min(16, len(d))]+"...", "err", prov.FulcioErr)
 		default:
 			slog.Info("Rekor entry has raw public key (no Fulcio provenance)", "digest", "sha256:"+d[:min(16, len(d))]+"...")
 		}

@@ -55,14 +55,14 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			OK:     true, Status: 200,
 		}}
 		rekor := []attestation.RekorProvenance{{
-			Digest:        sig[0].Digest,
-			HasCert:       true,
-			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-			OIDCIssuer:    "https://token.actions.githubusercontent.com",
-			SourceRepo:    "nearai/compose-manager",
-			SourceRepoURL: "https://github.com/nearai/compose-manager",
-			SourceCommit:  "0123456789abcdef",
-			RunnerEnv:     "github-hosted",
+			Digest:         sig[0].Digest,
+			FulcioVerified: true,
+			SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "nearai/compose-manager",
+			SourceRepoURL:  "https://github.com/nearai/compose-manager",
+			SourceCommit:   "0123456789abcdef",
+			RunnerEnv:      "github-hosted",
 		}}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
@@ -95,14 +95,14 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			OK:     true, Status: 200,
 		}}
 		rekor := []attestation.RekorProvenance{{
-			Digest:        sig[0].Digest,
-			HasCert:       true,
-			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-			OIDCIssuer:    "https://token.actions.githubusercontent.com",
-			SourceRepo:    "nearai/compose-manager",
-			SourceRepoURL: "https://github.com/nearai/compose-manager",
-			SourceCommit:  "0123456789abcdef",
-			RunnerEnv:     "github-hosted",
+			Digest:         sig[0].Digest,
+			FulcioVerified: true,
+			SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "nearai/compose-manager",
+			SourceRepoURL:  "https://github.com/nearai/compose-manager",
+			SourceCommit:   "0123456789abcdef",
+			RunnerEnv:      "github-hosted",
 		}}
 		attestation.AssertSingleFactorForTest(t, attestation.EvalBuildTransparencyLogForTest(&attestation.ReportInput{
 			Provider:          "nearcloud",
@@ -136,12 +136,12 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			OK:     true, Status: 200,
 		}}
 		rekor := []attestation.RekorProvenance{{
-			Digest:        sig[0].Digest,
-			HasCert:       true,
-			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-			OIDCIssuer:    "https://token.actions.githubusercontent.com",
-			SourceRepo:    "attacker/router",
-			SourceRepoURL: "https://github.com/attacker/router",
+			Digest:         sig[0].Digest,
+			FulcioVerified: true,
+			SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "attacker/router",
+			SourceRepoURL:  "https://github.com/attacker/router",
 		}}
 		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
@@ -164,14 +164,14 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 			OK:     true, Status: 200,
 		}}
 		rekor := []attestation.RekorProvenance{{
-			Digest:        sig[0].Digest,
-			HasCert:       true,
-			SubjectURI:    "https://github.com/attacker/evil-repo/.github/workflows/evil.yml@refs/heads/main",
-			OIDCIssuer:    "https://token.actions.githubusercontent.com",
-			SourceRepo:    "nearai/compose-manager",
-			SourceRepoURL: "https://github.com/nearai/compose-manager",
-			SourceCommit:  "0123456789abcdef",
-			RunnerEnv:     "github-hosted",
+			Digest:         sig[0].Digest,
+			FulcioVerified: true,
+			SubjectURI:     "https://github.com/attacker/evil-repo/.github/workflows/evil.yml@refs/heads/main",
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "nearai/compose-manager",
+			SourceRepoURL:  "https://github.com/nearai/compose-manager",
+			SourceCommit:   "0123456789abcdef",
+			RunnerEnv:      "github-hosted",
 		}}
 		f := attestation.AssertSingleFactorForTest(t, attestation.EvalComponentSignatureRecognitionForTest(&attestation.ReportInput{
 			Provider:          "neardirect",
@@ -197,18 +197,18 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 		}
 		rekor := []attestation.RekorProvenance{
 			{
-				Digest:        composeManagerDigest,
-				HasCert:       true,
-				SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-				OIDCIssuer:    "https://token.actions.githubusercontent.com",
-				SourceRepo:    "nearai/compose-manager",
-				SourceRepoURL: "https://github.com/nearai/compose-manager",
-				SourceCommit:  "0123456789abcdef",
-				RunnerEnv:     "github-hosted",
+				Digest:         composeManagerDigest,
+				FulcioVerified: true,
+				SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+				OIDCIssuer:     "https://token.actions.githubusercontent.com",
+				SourceRepo:     "nearai/compose-manager",
+				SourceRepoURL:  "https://github.com/nearai/compose-manager",
+				SourceCommit:   "0123456789abcdef",
+				RunnerEnv:      "github-hosted",
 			},
 			{
 				Digest:         datadogDigest,
-				HasCert:        false,
+				FulcioVerified: false,
 				KeyFingerprint: "0000000000000000000000000000000000000000000000000000000000000000",
 			},
 		}
@@ -239,18 +239,18 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 		}
 		rekor := []attestation.RekorProvenance{
 			{
-				Digest:        composeManagerDigest,
-				HasCert:       true,
-				SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-				OIDCIssuer:    "https://token.actions.githubusercontent.com",
-				SourceRepo:    "nearai/compose-manager",
-				SourceRepoURL: "https://github.com/nearai/compose-manager",
-				SourceCommit:  "0123456789abcdef",
-				RunnerEnv:     "github-hosted",
+				Digest:         composeManagerDigest,
+				FulcioVerified: true,
+				SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+				OIDCIssuer:     "https://token.actions.githubusercontent.com",
+				SourceRepo:     "nearai/compose-manager",
+				SourceRepoURL:  "https://github.com/nearai/compose-manager",
+				SourceCommit:   "0123456789abcdef",
+				RunnerEnv:      "github-hosted",
 			},
 			{
 				Digest:            datadogDigest,
-				HasCert:           false,
+				FulcioVerified:    false,
 				KeyFingerprint:    "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b",
 				SETVerified:       true,
 				InclusionVerified: true,
@@ -280,19 +280,19 @@ func TestEvalBuildTransparencyLog(t *testing.T) {
 		}
 		rekor := []attestation.RekorProvenance{
 			{
-				Digest:        composeManagerDigest,
-				HasCert:       true,
-				SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-				OIDCIssuer:    "https://token.actions.githubusercontent.com",
-				SourceRepo:    "nearai/compose-manager",
-				SourceRepoURL: "https://github.com/nearai/compose-manager",
-				SourceCommit:  "0123456789abcdef",
-				RunnerEnv:     "github-hosted",
+				Digest:         composeManagerDigest,
+				FulcioVerified: true,
+				SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+				OIDCIssuer:     "https://token.actions.githubusercontent.com",
+				SourceRepo:     "nearai/compose-manager",
+				SourceRepoURL:  "https://github.com/nearai/compose-manager",
+				SourceCommit:   "0123456789abcdef",
+				RunnerEnv:      "github-hosted",
 			},
 			{
 				// Sigstore entry without SET/inclusion verification must fail.
 				Digest:         datadogDigest,
-				HasCert:        false,
+				FulcioVerified: false,
 				KeyFingerprint: "25bcab4ec8eede1e3091a14692126798c23986832ae6e5948d6f7eb0a928ab0b",
 			},
 		}
@@ -330,14 +330,14 @@ func TestSupplyChainComponentRecognitionFactors(t *testing.T) {
 	digest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
 	renamedRepo := "nearaidev/renamed-compose-manager"
 	rekor := []attestation.RekorProvenance{{
-		Digest:        digest,
-		HasCert:       true,
-		SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-		OIDCIssuer:    "https://token.actions.githubusercontent.com",
-		SourceRepo:    "nearai/compose-manager",
-		SourceRepoURL: "https://github.com/nearai/compose-manager",
-		SourceCommit:  "0123456789abcdef",
-		RunnerEnv:     "github-hosted",
+		Digest:         digest,
+		FulcioVerified: true,
+		SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+		OIDCIssuer:     "https://token.actions.githubusercontent.com",
+		SourceRepo:     "nearai/compose-manager",
+		SourceRepoURL:  "https://github.com/nearai/compose-manager",
+		SourceCommit:   "0123456789abcdef",
+		RunnerEnv:      "github-hosted",
 	}}
 	in := &attestation.ReportInput{
 		Provider:          "neardirect",
@@ -366,14 +366,14 @@ func TestSupplyChainSignatureRecognitionFailsWithoutComponentRepoMapping(t *test
 		ImageRepos:        []string{"nearaidev/renamed-compose-manager"},
 		DigestToRepo:      map[string]string{},
 		Rekor: []attestation.RekorProvenance{{
-			Digest:        digest,
-			HasCert:       true,
-			SubjectURI:    "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
-			OIDCIssuer:    "https://token.actions.githubusercontent.com",
-			SourceRepo:    "nearai/compose-manager",
-			SourceRepoURL: "https://github.com/nearai/compose-manager",
-			SourceCommit:  "0123456789abcdef",
-			RunnerEnv:     "github-hosted",
+			Digest:         digest,
+			FulcioVerified: true,
+			SubjectURI:     "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master",
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "nearai/compose-manager",
+			SourceRepoURL:  "https://github.com/nearai/compose-manager",
+			SourceCommit:   "0123456789abcdef",
+			RunnerEnv:      "github-hosted",
 		}},
 	}
 
@@ -402,7 +402,7 @@ func TestSupplyChainOpenTelemetrySignerRecognition(t *testing.T) {
 		DigestToRepo:      map[string]string{digest: "otel/opentelemetry-collector-contrib"},
 		Rekor: []attestation.RekorProvenance{{
 			Digest:            digest,
-			HasCert:           false,
+			FulcioVerified:    false,
 			KeyFingerprint:    otelKeyFingerprint,
 			SETVerified:       true,
 			InclusionVerified: true,
@@ -433,12 +433,11 @@ func TestSupplyChainNearcloudAlpineSignerRecognition(t *testing.T) {
 		GatewayImageRepos: []string{"alpine"},
 		DigestToRepo:      map[string]string{digest: "alpine"},
 		Rekor: []attestation.RekorProvenance{{
-			Digest:            digest,
-			HasCert:           true,
-			SignatureVerified: true,
-			OIDCIssuer:        neardirect.GithubOIDC,
-			SubjectURI:        "https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
-			SourceRepo:        "docker/github-builder-experimental",
+			Digest:         digest,
+			FulcioVerified: true,
+			OIDCIssuer:     neardirect.GithubOIDC,
+			SubjectURI:     "https://github.com/docker/github-builder-experimental/.github/workflows/bake.yml@refs/heads/build-distributed",
+			SourceRepo:     "docker/github-builder-experimental",
 		}},
 	}
 
@@ -747,8 +746,8 @@ func TestSupplyChainPolicy_NilPolicyWithDataFailsClosed(t *testing.T) {
 		ImageRepos:        []string{"myrepo/model"},
 		DigestToRepo:      map[string]string{digest: "myrepo/model"},
 		Rekor: []attestation.RekorProvenance{{
-			Digest:  digest,
-			HasCert: true,
+			Digest:         digest,
+			FulcioVerified: true,
 		}},
 	}
 
@@ -932,8 +931,8 @@ func TestBuildReport_MissingPolicyBlocksRequest(t *testing.T) {
 		ImageRepos:        []string{"myrepo/model"},
 		DigestToRepo:      map[string]string{digest: "myrepo/model"},
 		Rekor: []attestation.RekorProvenance{{
-			Digest:  digest,
-			HasCert: true,
+			Digest:         digest,
+			FulcioVerified: true,
 		}},
 	})
 

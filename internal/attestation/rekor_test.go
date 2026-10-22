@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/transparency-dev/merkle/rfc6962"
 )
@@ -111,9 +112,12 @@ func buildMockDSSEBody(verifierPEM string) string {
 }
 
 // buildMockEntryResponse builds the JSON response for POST
-// /api/v1/log/entries/retrieve. The SET and inclusion proof do not verify.
+// /api/v1/log/entries/retrieve. The entry is the only leaf of a one-entry
+// log, its integrated time is mockIntegratedTime, and its SET is signed with
+// the test Rekor key, so that newTestRekorClient verifies the SET and the
+// inclusion proof.
 func buildMockEntryResponse(uuid, dsseBodyB64 string) []byte {
-	return buildMockEntryResponseWithVerification(uuid, dsseBodyB64)
+	return testRekorEntryResponse(uuid, dsseBodyB64, mockIntegratedTime)
 }
 
 func TestFetchRekorProvenance_FulcioCert(t *testing.T) {
@@ -138,13 +142,13 @@ func TestFetchRekorProvenance_FulcioCert(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 
 	t.Logf("Provenance result:")
 	t.Logf("  Digest:         %s", prov.Digest)
-	t.Logf("  HasCert:        %v", prov.HasCert)
+	t.Logf("  FulcioVerified:        %v", prov.FulcioVerified)
 	t.Logf("  KeyFingerprint: %s", prov.KeyFingerprint)
 	t.Logf("  SubjectURI:     %s", prov.SubjectURI)
 	t.Logf("  OIDCIssuer:     %s", prov.OIDCIssuer)
@@ -160,8 +164,8 @@ func TestFetchRekorProvenance_FulcioCert(t *testing.T) {
 	if prov.Err != nil {
 		t.Fatalf("unexpected error: %v", prov.Err)
 	}
-	if !prov.HasCert {
-		t.Fatal("expected HasCert=true for Fulcio cert")
+	if !prov.FulcioVerified {
+		t.Fatal("expected FulcioVerified=true for Fulcio cert")
 	}
 	if prov.OIDCIssuer != "https://token.actions.githubusercontent.com" {
 		t.Errorf("OIDCIssuer: got %q, want %q", prov.OIDCIssuer, "https://token.actions.githubusercontent.com")
@@ -210,17 +214,17 @@ func TestFetchRekorProvenance_RawPublicKey(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 
-	t.Logf("Provenance result: HasCert=%v KeyFingerprint=%s Err=%v", prov.HasCert, prov.KeyFingerprint, prov.Err)
+	t.Logf("Provenance result: FulcioVerified=%v KeyFingerprint=%s Err=%v", prov.FulcioVerified, prov.KeyFingerprint, prov.Err)
 
 	if prov.Err != nil {
 		t.Fatalf("unexpected error: %v", prov.Err)
 	}
-	if prov.HasCert {
-		t.Error("expected HasCert=false for raw public key")
+	if prov.FulcioVerified {
+		t.Error("expected FulcioVerified=false for raw public key")
 	}
 	if prov.OIDCIssuer != "" {
 		t.Errorf("OIDCIssuer should be empty, got %q", prov.OIDCIssuer)
@@ -272,7 +276,7 @@ func TestFetchRekorProvenanceForImage_PrefersPolicyMatch(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	img := &ImageProvenance{
 		Repo:           "example/raw-key",
 		Provenance:     SigstorePresent,
@@ -283,7 +287,7 @@ func TestFetchRekorProvenanceForImage_PrefersPolicyMatch(t *testing.T) {
 	if prov.Err != nil {
 		t.Fatalf("unexpected error: %v", prov.Err)
 	}
-	if prov.HasCert {
+	if prov.FulcioVerified {
 		t.Fatal("expected matching raw-key entry, got Fulcio cert")
 	}
 	if prov.KeyFingerprint != keyFingerprint {
@@ -336,7 +340,7 @@ func TestFetchRekorProvenanceForPolicy_UnknownRepoPrefersPolicyMatch(t *testing.
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	policy := &SupplyChainPolicy{Images: []ImageProvenance{{
 		Repo:           "example/original-raw-key",
 		Provenance:     SigstorePresent,
@@ -356,7 +360,7 @@ func TestFetchRekorProvenanceForPolicy_UnknownRepoPrefersPolicyMatch(t *testing.
 	if prov.Err != nil {
 		t.Fatalf("unexpected error: %v", prov.Err)
 	}
-	if prov.HasCert {
+	if prov.FulcioVerified {
 		t.Fatal("expected matching raw-key entry, got Fulcio cert")
 	}
 	if prov.KeyFingerprint != keyFingerprint {
@@ -409,7 +413,7 @@ func TestFetchRekorProvenanceForPolicy_KnownRepoKeepsProviderSignerFallback(t *t
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	policy := &SupplyChainPolicy{Images: []ImageProvenance{
 		{
 			Repo:         "example/known-component",
@@ -434,7 +438,7 @@ func TestFetchRekorProvenanceForPolicy_KnownRepoKeepsProviderSignerFallback(t *t
 	if prov.Err != nil {
 		t.Fatalf("unexpected error: %v", prov.Err)
 	}
-	if prov.HasCert {
+	if prov.FulcioVerified {
 		t.Fatal("expected provider signer raw-key fallback, got Fulcio cert")
 	}
 	if prov.KeyFingerprint != keyFingerprint {
@@ -455,11 +459,11 @@ func TestFetchRekorProvenance_NoEntries(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 
-	t.Logf("Provenance result: HasCert=%v Err=%v", prov.HasCert, prov.Err)
+	t.Logf("Provenance result: FulcioVerified=%v Err=%v", prov.FulcioVerified, prov.Err)
 
 	if prov.Err == nil {
 		t.Fatal("expected error for no entries")
@@ -469,32 +473,31 @@ func TestFetchRekorProvenance_NoEntries(t *testing.T) {
 	}
 }
 
-func TestParseFulcioProvenance(t *testing.T) {
-	prov, err := parseFulcioProvenance([]byte(realFulcioCertPEM))
+// TestVerifyFulcioCertificateRealLeaf verifies a captured Fulcio leaf with
+// the checked-in trusted root at a time inside its ten-minute validity. The
+// leaf expired long before the test runs, so this also shows that the check
+// uses the integrated time, not the current time.
+func TestVerifyFulcioCertificateRealLeaf(t *testing.T) {
+	leaf := realFulcioLeaf(t)
+	if time.Now().Before(leaf.NotAfter) {
+		t.Fatal("test leaf has not expired; the test does not show the integrated-time check")
+	}
+	material, err := sigstoretest.TrustedRoot(NewStaticTrustedRootSource).TrustedRoot(t.Context())
 	if err != nil {
-		t.Fatalf("parseFulcioProvenance: %v", err)
+		t.Fatal(err)
 	}
-
-	t.Logf("Parsed provenance:")
-	t.Logf("  HasCert:       %v", prov.HasCert)
-	t.Logf("  OIDCIssuer:    %s", prov.OIDCIssuer)
-	t.Logf("  Trigger:       %s", prov.Trigger)
-	t.Logf("  SourceCommit:  %s", prov.SourceCommit)
-	t.Logf("  SourceRepo:    %s", prov.SourceRepo)
-	t.Logf("  SourceRef:     %s", prov.SourceRef)
-	t.Logf("  RunnerEnv:     %s", prov.RunnerEnv)
-	t.Logf("  SourceRepoURL: %s", prov.SourceRepoURL)
-	t.Logf("  RunURL:        %s", prov.RunURL)
-
-	if !prov.HasCert {
-		t.Fatal("expected HasCert=true")
+	summary, err := verifyFulcioCertificate(leaf, time.Unix(mockIntegratedTime, 0), material)
+	if err != nil {
+		t.Fatalf("verifyFulcioCertificate: %v", err)
 	}
-
+	var prov RekorProvenance
+	setFulcioIdentity(&prov, &summary)
 	tests := []struct {
 		name string
 		got  string
 		want string
 	}{
+		{"SubjectURI", prov.SubjectURI, "https://github.com/nearai/compose-manager/.github/workflows/build.yml@refs/heads/master"},
 		{"OIDCIssuer", prov.OIDCIssuer, "https://token.actions.githubusercontent.com"},
 		{"Trigger", prov.Trigger, "push"},
 		{"SourceCommit", prov.SourceCommit, "406bddd95a7fa73858377f078d88272d7e8878ab"},
@@ -509,6 +512,9 @@ func TestParseFulcioProvenance(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", tc.name, tc.got, tc.want)
 		}
 	}
+	if _, err := verifyFulcioCertificate(leaf, time.Now(), material); err == nil {
+		t.Fatal("expired leaf verified at the current time")
+	}
 }
 
 func TestFetchRekorProvenance_IndexHTTPError(t *testing.T) {
@@ -518,7 +524,7 @@ func TestFetchRekorProvenance_IndexHTTPError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err == nil {
@@ -799,7 +805,7 @@ func TestVerifyInclusionProof_TooManyHashes(t *testing.T) {
 }
 
 func TestParseRekorPublicKey(t *testing.T) {
-	rc := NewRekorClient(http.DefaultClient)
+	rc := NewRekorClient(http.DefaultClient, sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 	key, err := rc.parseRekorPublicKey()
 	if err != nil {
 		t.Fatalf("parseRekorPublicKey: %v", err)
@@ -836,7 +842,7 @@ func TestVerifyRekorEntry_InclusionIndependentOfSET(t *testing.T) {
 	}
 
 	// Use a client with an invalid key to force SET failure.
-	rc := NewRekorClientWithKey(defaultRekorBase, "not-a-pem-key", http.DefaultClient)
+	rc := NewRekorClientWithKey(defaultRekorBase, "not-a-pem-key", http.DefaultClient, sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 
 	prov := &RekorProvenance{}
 	rc.verifyRekorEntry(entry, prov)
@@ -905,15 +911,19 @@ func TestFetchRekorProvenance_SETAndInclusionErrors(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 
 	if prov.Err != nil {
 		t.Fatalf("unexpected fatal error: %v", prov.Err)
 	}
-	// Fulcio cert parsing should still work.
-	if !prov.HasCert {
-		t.Error("expected HasCert=true")
+	// Without a verified SET the integrated time is not authenticated, so
+	// teep does not check the certificate chain and sets no identity.
+	if prov.FulcioVerified || prov.FulcioErr == nil || !strings.Contains(prov.FulcioErr.Error(), "certificate chain not checked") {
+		t.Errorf("FulcioVerified=%v FulcioErr=%v, want an unchecked chain", prov.FulcioVerified, prov.FulcioErr)
+	}
+	if prov.OIDCIssuer != "" || prov.SubjectURI != "" || prov.SourceRepo != "" {
+		t.Errorf("unverified entry has identity issuer=%q san=%q repo=%q", prov.OIDCIssuer, prov.SubjectURI, prov.SourceRepo)
 	}
 	// SET should fail — the signature is fake.
 	if prov.SETVerified {
@@ -937,119 +947,6 @@ func TestFetchRekorProvenance_SETAndInclusionErrors(t *testing.T) {
 	if prov.IntegratedTime != 1700000000 {
 		t.Errorf("IntegratedTime: got %d, want 1700000000", prov.IntegratedTime)
 	}
-}
-
-// --------------------------------------------------------------------------
-// buildPAE
-// --------------------------------------------------------------------------
-
-func TestBuildPAE_Format(t *testing.T) {
-	payloadType := "application/vnd.in-toto+json"
-	payload := []byte("hello")
-	pae := buildPAE(payloadType, payload)
-	got := string(pae)
-	// DSSEv1 SP len(payloadType) SP payloadType SP len(payload) SP payload
-	want := "DSSEv1 28 application/vnd.in-toto+json 5 hello"
-	if got != want {
-		t.Errorf("buildPAE:\ngot  %q\nwant %q", got, want)
-	}
-}
-
-// --------------------------------------------------------------------------
-// verifyDSSESignature error paths
-// --------------------------------------------------------------------------
-
-func TestVerifyDSSESignature_InvalidJSON(t *testing.T) {
-	err := verifyDSSESignature([]byte("not json"), nil)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-	t.Logf("expected error: %v", err)
-}
-
-func TestVerifyDSSESignature_WrongKind(t *testing.T) {
-	body := `{"kind":"hashedrekord","spec":{"content":{"envelope":{"signatures":[]}}}}`
-	err := verifyDSSESignature([]byte(body), nil)
-	if err == nil {
-		t.Fatal("expected error for wrong kind")
-	}
-	if !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("error should mention 'not supported': %v", err)
-	}
-}
-
-func TestVerifyDSSESignature_NoSignatures(t *testing.T) {
-	body := `{"kind":"dsse","spec":{"content":{"envelope":{"signatures":[]}}}}`
-	err := verifyDSSESignature([]byte(body), nil)
-	if err == nil {
-		t.Fatal("expected error for no signatures")
-	}
-	if !strings.Contains(err.Error(), "no signatures") {
-		t.Errorf("error should mention 'no signatures': %v", err)
-	}
-}
-
-func TestVerifyDSSESignature_BadSigBase64(t *testing.T) {
-	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"not-base64!!!"}]}}}}`
-	err := verifyDSSESignature([]byte(body), nil)
-	if err == nil {
-		t.Fatal("expected error for invalid sig base64")
-	}
-	t.Logf("expected error: %v", err)
-}
-
-func TestVerifyDSSESignature_BadPayloadBase64(t *testing.T) {
-	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"not-base64!!!","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
-	err := verifyDSSESignature([]byte(body), nil)
-	if err == nil {
-		t.Fatal("expected error for invalid payload base64")
-	}
-	t.Logf("expected error: %v", err)
-}
-
-func TestVerifyDSSESignature_NoPEMBlock(t *testing.T) {
-	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
-	err := verifyDSSESignature([]byte(body), []byte("not a pem block"))
-	if err == nil {
-		t.Fatal("expected error for no PEM block")
-	}
-	if !strings.Contains(err.Error(), "no PEM block") {
-		t.Errorf("error should mention 'no PEM block': %v", err)
-	}
-}
-
-func TestVerifyDSSESignature_InvalidCertInPEM(t *testing.T) {
-	// PEM block present but contains garbage — x509 parse will fail.
-	certPEM := "-----BEGIN CERTIFICATE-----\naW52YWxpZA==\n-----END CERTIFICATE-----\n"
-	body := `{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":"aGVsbG8="}]}}}}`
-	err := verifyDSSESignature([]byte(body), []byte(certPEM))
-	if err == nil {
-		t.Fatal("expected error for invalid certificate")
-	}
-	t.Logf("expected error: %v", err)
-}
-
-func TestVerifyDSSESignature_WrongSignature(t *testing.T) {
-	// Generate a real self-signed ECDSA cert and provide a wrong signature.
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	certDER, err := selfSignedCert(key)
-	if err != nil {
-		t.Fatalf("selfSignedCert: %v", err)
-	}
-	certPEM := fmt.Sprintf("-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n",
-		base64.StdEncoding.EncodeToString(certDER))
-	// Use a valid base64 signature that is wrong (all zeros).
-	wrongSig := base64.StdEncoding.EncodeToString(make([]byte, 64))
-	body := fmt.Sprintf(`{"kind":"dsse","spec":{"content":{"envelope":{"payload":"aGVsbG8=","payloadType":"text/plain","signatures":[{"sig":%q}]}}}}`,
-		wrongSig)
-	err = verifyDSSESignature([]byte(body), []byte(certPEM))
-	if err == nil {
-		t.Fatal("expected ECDSA verification failure")
-	}
-	t.Logf("expected error: %v", err)
 }
 
 // selfSignedCert creates a minimal self-signed DER-encoded certificate for testing.
@@ -1085,7 +982,7 @@ func TestFetchRekorProvenance_EntryFetchError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err == nil {
 		t.Fatal("expected error when entry fetch fails")
@@ -1118,34 +1015,12 @@ MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	t.Logf("FetchRekorProvenance with unexpected PEM type: Err=%v", prov.Err)
 	// The function should return some error (no usable entry found).
 	if prov.Err == nil {
 		t.Error("expected non-nil error for unexpected PEM type")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// decodeExtensionValue
-// ---------------------------------------------------------------------------
-
-func TestDecodeExtensionValue_RawUTF8Fallback(t *testing.T) {
-	// Pass raw UTF-8 bytes (not ASN.1-encoded). The fallback branch is taken.
-	raw := []byte("hello world")
-	got := decodeExtensionValue(raw)
-	if got != "hello world" {
-		t.Errorf("decodeExtensionValue UTF-8 fallback = %q, want \"hello world\"", got)
-	}
-}
-
-func TestDecodeExtensionValue_InvalidUTF8(t *testing.T) {
-	// Invalid UTF-8 and not ASN.1 → returns empty string.
-	raw := []byte{0xff, 0xfe, 0x00}
-	got := decodeExtensionValue(raw)
-	if got != "" {
-		t.Errorf("decodeExtensionValue invalid UTF-8 = %q, want \"\"", got)
 	}
 }
 
@@ -1177,7 +1052,7 @@ func TestFetchRekorProvenance_BadBodyBase64(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	t.Logf("bad body base64: Err=%v", prov.Err)
 	if prov.Err == nil {
@@ -1209,7 +1084,7 @@ func TestFetchRekorProvenance_ExtractVerifierPEMError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	t.Logf("extract verifier error: Err=%v", prov.Err)
 	if prov.Err == nil {
@@ -1241,7 +1116,7 @@ func TestFetchRekorProvenance_NilPEMBlock(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	t.Logf("nil PEM block: Err=%v", prov.Err)
 	if prov.Err == nil {
@@ -1249,9 +1124,8 @@ func TestFetchRekorProvenance_NilPEMBlock(t *testing.T) {
 	}
 }
 
-// TestFetchRekorProvenance_ParseFulcioProvenanceError covers the
-// parseFulcioProvenance error path (lines 212-215). The verifierPEM is a
-// CERTIFICATE block but contains invalid DER bytes.
+// TestFetchRekorProvenance_ParseFulcioProvenanceError covers a verifier
+// that is a CERTIFICATE block with invalid DER bytes. The entry is rejected.
 func TestFetchRekorProvenance_ParseFulcioProvenanceError(t *testing.T) {
 	testUUID := "invalid-cert-uuid"
 	// Build a PEM block with type CERTIFICATE but invalid DER content.
@@ -1273,7 +1147,7 @@ func TestFetchRekorProvenance_ParseFulcioProvenanceError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 	t.Logf("invalid cert DER: Err=%v", prov.Err)
 	if prov.Err == nil {
@@ -1317,20 +1191,20 @@ func TestFetchRekorProvenance_NonFulcioCert(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	prov := rc.FetchRekorProvenance(context.Background(), testDigest)
-	t.Logf("non-Fulcio cert: HasCert=%v HasNonFulcioCert=%v OIDCIssuer=%q Err=%v",
-		prov.HasCert, prov.HasNonFulcioCert, prov.OIDCIssuer, prov.Err)
+	t.Logf("non-Fulcio cert: FulcioVerified=%v FulcioErr=%v OIDCIssuer=%q Err=%v",
+		prov.FulcioVerified, prov.FulcioErr, prov.OIDCIssuer, prov.Err)
 	// No error — the fallback is returned.
 	if prov.Err != nil {
 		t.Errorf("unexpected fatal error: %v", prov.Err)
 	}
-	// HasNonFulcioCert should be true since it's a cert but not Fulcio.
-	if !prov.HasNonFulcioCert {
-		t.Error("expected HasNonFulcioCert=true for self-signed cert without Fulcio extensions")
+	// The certificate does not chain to a Fulcio CA.
+	if prov.FulcioErr == nil || !strings.Contains(prov.FulcioErr.Error(), "does not chain") {
+		t.Errorf("FulcioErr = %v, want a chain failure for a self-signed cert", prov.FulcioErr)
 	}
-	if prov.HasCert {
-		t.Error("expected HasCert=false for non-Fulcio cert returned as fallback")
+	if prov.FulcioVerified {
+		t.Error("expected FulcioVerified=false for non-Fulcio cert returned as fallback")
 	}
 }
 
@@ -1389,7 +1263,7 @@ func TestFetchRekorProvenances_PreservesOrderAndErrors(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rc := NewRekorClientWithBase(ts.URL, ts.Client())
+	rc := newTestRekorClient(ts)
 	results := rc.FetchRekorProvenancesForPolicy(context.Background(), []string{digestSlow, digestError, digestRaw}, nil, nil)
 
 	if len(results) != 3 {
@@ -1408,8 +1282,8 @@ func TestFetchRekorProvenances_PreservesOrderAndErrors(t *testing.T) {
 	if results[0].Err != nil {
 		t.Fatalf("results[0].Err = %v, want nil", results[0].Err)
 	}
-	if !results[0].HasCert {
-		t.Fatal("results[0].HasCert = false, want true for Fulcio provenance")
+	if !results[0].FulcioVerified {
+		t.Fatal("results[0].FulcioVerified = false, want true for Fulcio provenance")
 	}
 	if results[1].Err == nil {
 		t.Fatal("results[1].Err = nil, want no-entries error")
@@ -1420,7 +1294,7 @@ func TestFetchRekorProvenances_PreservesOrderAndErrors(t *testing.T) {
 	if results[2].Err != nil {
 		t.Fatalf("results[2].Err = %v, want nil", results[2].Err)
 	}
-	if results[2].HasCert {
-		t.Fatal("results[2].HasCert = true, want false for raw public key provenance")
+	if results[2].FulcioVerified {
+		t.Fatal("results[2].FulcioVerified = true, want false for raw public key provenance")
 	}
 }

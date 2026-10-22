@@ -2152,7 +2152,7 @@ func classifyRekorEntry(r *RekorProvenance, img *ImageProvenance, imageRepo stri
 		return rekorComposeOnly, ""
 	}
 	if r.Err != nil {
-		return rekorFailed, fmt.Sprintf("component %q: Rekor provenance fetch failed: %v", imageRepo, r.Err)
+		return rekorFailed, fmt.Sprintf("component %q: Rekor provenance unavailable: %v", imageRepo, r.Err)
 	}
 
 	switch {
@@ -2174,7 +2174,7 @@ func classifyRekorEntry(r *RekorProvenance, img *ImageProvenance, imageRepo stri
 		return rekorSigstore, ""
 
 	case scPolicy == nil:
-		if !r.HasCert {
+		if !r.FulcioVerified {
 			return rekorSigstore, ""
 		}
 		if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
@@ -2183,7 +2183,7 @@ func classifyRekorEntry(r *RekorProvenance, img *ImageProvenance, imageRepo stri
 		return rekorFulcio, ""
 
 	default:
-		if !r.HasCert {
+		if !r.FulcioVerified {
 			return rekorSigstore, ""
 		}
 		if r.OIDCIssuer != "https://token.actions.githubusercontent.com" {
@@ -2267,16 +2267,17 @@ func rekorProvenanceResult(in *ReportInput, scPolicy *SupplyChainPolicy) FactorR
 }
 
 // verifyFulcioEntry checks a single Rekor entry against a FulcioSigned policy.
-// Returns (detail, true) on failure.
+// The entry certificate must be chain verified (FulcioVerified) before the
+// identity fields are compared. Returns (detail, true) on failure.
 func verifyFulcioEntry(r *RekorProvenance, img *ImageProvenance, imageRepo string) (string, bool) {
-	if r.SignatureErr != nil && !img.NoDSSE {
-		return fmt.Sprintf("component %q: DSSE envelope signature verification failed: %v", imageRepo, r.SignatureErr), true
+	if r.FulcioErr != nil {
+		return fmt.Sprintf("component %q: expected Fulcio certificate but the entry certificate does not chain to the Sigstore trusted root: %v", imageRepo, r.FulcioErr), true
 	}
-	if !r.HasCert && r.HasNonFulcioCert {
-		return fmt.Sprintf("component %q: expected Fulcio certificate but entry has non-Fulcio X.509 cert (no OIDC issuer OID)", imageRepo), true
-	}
-	if !r.HasCert {
+	if !r.FulcioVerified && r.KeyFingerprint != "" {
 		return fmt.Sprintf("component %q: expected Fulcio certificate but entry has raw key", imageRepo), true
+	}
+	if !r.FulcioVerified {
+		return fmt.Sprintf("component %q: Fulcio certificate chain not verified", imageRepo), true
 	}
 	if subtle.ConstantTimeCompare(
 		[]byte(strings.ToLower(strings.TrimSpace(r.OIDCIssuer))),
@@ -2325,11 +2326,11 @@ func formatBuildTransparencyResult(scPolicy *SupplyChainPolicy, fulcioVerified, 
 	switch {
 	case scPolicy != nil && fulcioVerified > 0 && sigstorePresent > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d component(s) verified by Fulcio provenance; %d present in Sigstore (%s%s)",
+		f.Detail = fmt.Sprintf("%d component(s) with Fulcio certificate chain and SCT verified at log time; %d present in Sigstore (%s%s)",
 			fulcioVerified, sigstorePresent, detail, logVerify)
 	case scPolicy != nil && fulcioVerified > 0:
 		f.Status = Pass
-		f.Detail = fmt.Sprintf("%d component(s) verified by Fulcio provenance (%s%s)", fulcioVerified, detail, logVerify)
+		f.Detail = fmt.Sprintf("%d component(s) with Fulcio certificate chain and SCT verified at log time (%s%s)", fulcioVerified, detail, logVerify)
 	case scPolicy != nil && sigstorePresent > 0:
 		f.Status = Pass
 		f.Detail = fmt.Sprintf("%d component(s) present in Sigstore (no Fulcio provenance%s)", sigstorePresent, logVerify)
@@ -2614,7 +2615,7 @@ func componentRepoForDigest(in *ReportInput, r *RekorProvenance, factorName stri
 
 func verifyComponentSignature(r *RekorProvenance, img *ImageProvenance, repo string, requireProviderSigner bool) (string, bool) {
 	if r.Err != nil {
-		return fmt.Sprintf("component %q: Rekor provenance fetch failed: %v", repo, r.Err), true
+		return fmt.Sprintf("component %q: Rekor provenance unavailable: %v", repo, r.Err), true
 	}
 	switch img.Provenance {
 	case FulcioSigned:
@@ -3155,8 +3156,13 @@ func evalGatewayEventLogIntegrity(in *ReportInput) []FactorResult {
 type ProvenanceType int
 
 const (
-	// FulcioSigned means the component must have a Fulcio-issued certificate in
-	// Rekor with a matching OIDC issuer and source repository.
+	// FulcioSigned means the component digest must have a Rekor dsse entry,
+	// found by digest search, whose SET verifies and whose certificate chains
+	// to a Fulcio CA in the Sigstore trusted root, with a valid SCT, at the
+	// SET-authenticated integrated time; and the certificate identity (OIDC
+	// issuer, SAN, source repository) must match the policy. Teep does not
+	// verify the DSSE signature or that the payload names the digest: Rekor
+	// does not store the payload, and its digest search index is not signed.
 	FulcioSigned ProvenanceType = iota
 	// SigstorePresent means the component has an entry in the Sigstore
 	// transparency log but specific signer identity is not checked (raw-key
@@ -3192,7 +3198,6 @@ type ImageProvenance struct {
 	OIDCIdentity   string         // SAN URI (workflow identity); checked for FulcioSigned
 	OIDCIdentities []string       // optional allowlist of SAN URIs; if set, any matching identity is accepted
 	SourceRepos    []string       // required when Provenance == FulcioSigned (repo ID and/or URL)
-	NoDSSE         bool           // true = DSSE envelope lacks signatures; skip DSSE check
 	// ProviderSignerTrusted marks this image's signer as trusted provider-wide.
 	// FulcioSigned entries with source repo policy and SigstorePresent entries
 	// with a key fingerprint are trusted provider-wide by default.

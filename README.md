@@ -191,20 +191,22 @@ Is the encryption bound to the hardware? These checks verify the encryption key 
 Is the software what it claims to be? These checks verify container provenance, deployment manifests, TLS binding, and runtime integrity.
 
 <details>
-<summary>10 factors</summary>
+<summary>12 factors</summary>
 
 | # | Factor | Description |
 |---|--------|-------------|
-| 25 | `tls_key_binding` | TLS certificate key matches attestation document |
-| 26 | `cpu_gpu_chain` | CPU attestation cryptographically binds GPU attestation |
-| 27 | `nvswitch_binding` | NVSwitch fabric evidence hash verified in REPORTDATA (multi-GPU NVLink nodes) |
-| 28 | `measured_model_weights` | Attestation proves specific model weights by hash |
-| 29 | `build_transparency_log` | Runtime measurements match an immutable transparency log |
-| 30 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
-| 31 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
-| 32 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
-| 33 | `sigstore_code_verified` | Sigstore DSSE bundle code measurements match live enclave (Tinfoil-specific) |
-| 34 | `event_log_integrity` | Event log replayed against TDX RTMRs — proves log is authentic and complete |
+| 24 | `tls_key_binding` | TLS certificate key matches attestation document |
+| 25 | `cpu_gpu_chain` | CPU attestation cryptographically binds GPU attestation |
+| 26 | `nvswitch_binding` | NVSwitch fabric evidence hash verified in REPORTDATA (multi-GPU NVLink nodes) |
+| 27 | `measured_model_weights` | Attestation proves specific model weights by hash |
+| 28 | `build_transparency_log` | Each signed component digest has a Rekor entry with a valid SET and inclusion proof; for Fulcio-signed components, the entry certificate chains to a Fulcio CA in the Sigstore trusted root, with an SCT, at the logged integrated time |
+| 29 | `provider_signer_recognition` | Each signed component's chain-verified Fulcio signer, or pinned key, is trusted provider-wide |
+| 30 | `component_signature_recognition` | Each signed component's chain-verified Fulcio identity (issuer, SAN, source repository), or pinned key, matches its component policy |
+| 31 | `cpu_id_registry` | CPU ID verified against a known-good hardware registry |
+| 32 | `compose_binding` | `sha256(app_compose)` matches TDX MRConfigID, binding docker-compose manifest to hardware attestation |
+| 33 | `sigstore_verification` | Container image digests found in Sigstore transparency log, proving verifiable CI/CD provenance |
+| 34 | `sigstore_code_verified` | Sigstore DSSE bundle code measurements match live enclave (Tinfoil-specific) |
+| 35 | `event_log_integrity` | Event log replayed against TDX RTMRs — proves log is authentic and complete |
 
 </details>
 
@@ -222,21 +224,21 @@ factors state that.
 
 | # | Factor | Description |
 |---|--------|-------------|
-| 35 | `gateway_nonce_match` | Gateway request nonce matches the client nonce; a gateway-variant ACI/1 response echoes no nonce, so it fails, and freshness rests on `gateway_tee_reportdata_binding` |
-| 36 | `gateway_tee_quote_present` | Gateway quote or report is present |
-| 37 | `gateway_tee_quote_structure` | Gateway quote parses as valid QuoteV4 or SEV-SNP report |
-| 38 | `gateway_tee_cert_chain` | Gateway cert chain verifies against Intel or AMD root CA |
-| 39 | `gateway_tee_quote_signature` | Gateway quote signature valid |
-| 40 | `gateway_tee_debug_disabled` | Gateway debug bit is 0 (production enclave) |
-| 41 | `gateway_tee_measurement` | Gateway measurements match the gateway policy allowlists |
-| 42 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
-| 43 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists |
-| 44 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binding verified |
-| 45 | `gateway_compose_binding` | Gateway sha256(app_compose) matches TDX MRConfigID |
-| 46 | `gateway_cpu_id_registry` | Gateway CPU PPID verified in Proof of Cloud registry |
-| 47 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match quote |
-| 48 | `gateway_tee_tcb_current` | Gateway TCB SVN meets minimum threshold (SEV-SNP) |
-| 49 | `gateway_tee_tcb_not_revoked` | Gateway TCB SVN is not revoked (SEV-SNP) |
+| 36 | `gateway_nonce_match` | Gateway request nonce matches the client nonce; a gateway-variant ACI/1 response echoes no nonce, so it fails, and freshness rests on `gateway_tee_reportdata_binding` |
+| 37 | `gateway_tee_quote_present` | Gateway quote or report is present |
+| 38 | `gateway_tee_quote_structure` | Gateway quote parses as valid QuoteV4 or SEV-SNP report |
+| 39 | `gateway_tee_cert_chain` | Gateway cert chain verifies against Intel or AMD root CA |
+| 40 | `gateway_tee_quote_signature` | Gateway quote signature valid |
+| 41 | `gateway_tee_debug_disabled` | Gateway debug bit is 0 (production enclave) |
+| 42 | `gateway_tee_measurement` | Gateway measurements match the gateway policy allowlists |
+| 43 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
+| 44 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists |
+| 45 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binding verified |
+| 46 | `gateway_compose_binding` | Gateway sha256(app_compose) matches TDX MRConfigID |
+| 47 | `gateway_cpu_id_registry` | Gateway CPU PPID verified in Proof of Cloud registry |
+| 48 | `gateway_event_log_integrity` | Gateway event log replayed; all 4 RTMRs match quote |
+| 49 | `gateway_tee_tcb_current` | Gateway TCB SVN meets minimum threshold (SEV-SNP) |
+| 50 | `gateway_tee_tcb_not_revoked` | Gateway TCB SVN is not revoked (SEV-SNP) |
 
 </details>
 

@@ -383,3 +383,40 @@ Coverage includes [routing header tests](../../../internal/provider/nearcloud/pr
 [stale-key tests](../../../internal/proxy/nearcloud_stale_key_test.go),
 [image error tests](../../../internal/proxy/nearcloud_image_policy_test.go), and
 signed capture replay in [verification tests](../../../internal/verify/near_capture_test.go).
+
+## Supply chain verification
+
+NearDirect, NearCloud and Venice use the same Rekor path; Venice uses the
+NearDirect supply chain policy. Teep extracts the image digests from the attested
+compose manifest, searches Rekor for each digest, and selects one `dsse` 0.0.1
+entry per digest. For each entry it verifies the SET with the pinned Rekor key and
+the inclusion proof. For a certificate verifier whose SET verifies, it then
+verifies that the certificate chains to a Fulcio CA in the Sigstore trusted root,
+with a valid SCT from a CT log in that root, at the integrated time that the SET
+authenticates. Only a certificate that passes these checks gives a signer
+identity (OIDC issuer, SAN, source repository). A raw key, or a certificate that
+does not verify, is kept only as a fallback, so an entry that another party logs
+for a public digest does not replace the build entry.
+
+For `FulcioSigned` components, `build_transparency_log`,
+`component_signature_recognition` and `provider_signer_recognition` require the
+chain-verified identity to match the policy. These three factors are enforced for
+NearDirect and NearCloud.
+
+The Sigstore trusted root comes from the TUF repository
+`tuf-repo-cdn.sigstore.dev`, once for each verification, through the same source
+as Tinfoil. `teep verify --replay` also uses TUF and never reads a root from the
+capture. If the root fetch fails, every digest fails with "get Sigstore trusted
+root" and the three factors fail and block. With `--offline`, teep sends no Rekor
+or TUF request; the three factors fail and are in `allow_fail`.
+
+Trust boundary: teep does not verify the DSSE signature, because Rekor stores only
+the envelope and payload hashes. Teep does not prove that the signed payload names
+the image digest; that link comes from the unsigned Rekor search index. See
+[attestation gaps](../../attestation_gaps/README.md) and the
+[Fulcio chain verification plan](../../plans/fulcio_chain_verification.md).
+
+Coverage includes [Fulcio chain tests](../../../internal/attestation/rekor_fulcio_test.go),
+[Rekor parser tests](../../../internal/attestation/rekor_parse_test.go), and the
+NEAR and Venice fixture tests in [integration](../../../internal/integration/),
+which require a chain-verified certificate for every `FulcioSigned` component.

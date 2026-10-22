@@ -37,7 +37,7 @@ func (in *ReportInput) VerificationErrors() error {
 	}
 	for i := range in.Rekor {
 		result := &in.Rekor[i]
-		errs = append(errs, result.Err, result.SignatureErr, result.SETErr, result.InclusionErr)
+		errs = append(errs, result.Err, result.FulcioErr, result.SETErr, result.InclusionErr)
 	}
 	if result := in.TinfoilSC; result != nil {
 		errs = append(errs, result.SigstoreErr, result.CodeMatchErr, result.HWMatchErr, result.TDXPolicyErr)

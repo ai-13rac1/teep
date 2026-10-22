@@ -1420,7 +1420,7 @@ func TestVerifySupplyChain_UsesPolicyAwareRekorSelection(t *testing.T) {
 	dockerCompose := fmt.Sprintf("services:\n  app:\n    image: %s@sha256:%s\n", repo, digest)
 	appCompose := mustAppComposeJSON(t, dockerCompose)
 	s := newMinimalServer()
-	s.rekorClient = attestation.NewRekorClientWithBase(ts.URL, ts.Client())
+	s.rekorClient = attestation.NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource))
 	policy := &attestation.SupplyChainPolicy{Images: []attestation.ImageProvenance{{
 		Repo:           repo,
 		ModelTier:      true,

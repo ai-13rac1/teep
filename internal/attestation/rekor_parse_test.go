@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -304,7 +305,6 @@ func rekorParseServer(t *testing.T, uuids []string, entries map[string][]byte, e
 // a well-formed one. The search rejects each malformed entry, continues, and
 // selects the well-formed entry.
 func TestFetchRekorProvenanceSkipsRejectedEntries(t *testing.T) {
-	good := mockEntryObject(buildMockDSSEBody(realFulcioCertPEM))
 	unknownField := mockEntryObject(buildMockDSSEBody(realFulcioCertPEM))
 	unknownField["extra"] = true
 	intoto := mockEntryObject(mockBodyB64(map[string]any{"apiVersion": "0.0.1", "kind": "intoto", "spec": map[string]any{}}))
@@ -315,16 +315,16 @@ func TestFetchRekorProvenanceSkipsRejectedEntries(t *testing.T) {
 		"u1": mustJSON(t, []map[string]any{{"u1": unknownField}}),
 		"u2": mustJSON(t, []map[string]any{{"u2": intoto}}),
 		"u3": mustJSON(t, []map[string]any{{"u3": twoSigs}}),
-		"u4": mustJSON(t, []map[string]any{{"u4": good}}),
+		"u4": buildMockEntryResponse("u4", buildMockDSSEBody(realFulcioCertPEM)),
 	}
 	var requests atomic.Int32
 	ts := rekorParseServer(t, []string{"u1", "u2", "u3", "u4"}, entries, &requests)
-	prov := NewRekorClientWithBase(ts.URL, ts.Client()).FetchRekorProvenance(context.Background(), testDigest)
+	prov := newTestRekorClient(ts).FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err != nil {
 		t.Fatalf("Err = %v", prov.Err)
 	}
-	if !prov.HasCert || prov.SourceRepo != "nearai/compose-manager" {
-		t.Fatalf("selected entry: HasCert=%v SourceRepo=%q", prov.HasCert, prov.SourceRepo)
+	if !prov.FulcioVerified || prov.SourceRepo != "nearai/compose-manager" {
+		t.Fatalf("selected entry: FulcioVerified=%v SourceRepo=%q", prov.FulcioVerified, prov.SourceRepo)
 	}
 	if got := requests.Load(); got != 4 {
 		t.Fatalf("entry requests = %d, want 4", got)
@@ -343,16 +343,16 @@ func TestFetchRekorProvenanceAllEntriesRejected(t *testing.T) {
 	}
 	var requests atomic.Int32
 	ts := rekorParseServer(t, []string{"u1", "u2"}, entries, &requests)
-	prov := NewRekorClientWithBase(ts.URL, ts.Client()).FetchRekorProvenance(context.Background(), testDigest)
+	prov := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource)).FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err == nil || !strings.Contains(prov.Err.Error(), `entry u2: entry kind "intoto" is not supported`) {
 		t.Fatalf("Err = %v, want the intoto rejection", prov.Err)
 	}
-	if prov.HasCert || prov.KeyFingerprint != "" {
+	if prov.FulcioVerified || prov.KeyFingerprint != "" {
 		t.Fatalf("rejected entries gave provenance %+v", prov)
 	}
 
 	ts = rekorParseServer(t, []string{"u1"}, entries, &requests)
-	prov = NewRekorClientWithBase(ts.URL, ts.Client()).FetchRekorProvenance(context.Background(), testDigest)
+	prov = NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource)).FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err == nil || !strings.Contains(prov.Err.Error(), `entry response has unknown fields: "entry.extra"`) {
 		t.Fatalf("Err = %v, want the unknown field rejection", prov.Err)
 	}
@@ -381,7 +381,7 @@ func TestRekorSearchRejectsOversizedAndMalformedResults(t *testing.T) {
 				_, _ = w.Write(body)
 			}))
 			defer ts.Close()
-			rc := NewRekorClientWithBase(ts.URL, ts.Client())
+			rc := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource))
 			prov := rc.FetchRekorProvenance(context.Background(), testDigest)
 			if prov.Err == nil || !strings.Contains(prov.Err.Error(), "search Rekor") {
 				t.Fatalf("Err = %v, want a search failure", prov.Err)
@@ -411,7 +411,7 @@ func TestFetchRekorProvenanceWarnsOnRejectedEntry(t *testing.T) {
 	entries := map[string][]byte{"rejected-uuid": mustJSON(t, []map[string]any{{"rejected-uuid": unknownField}})}
 	var requests atomic.Int32
 	ts := rekorParseServer(t, []string{"rejected-uuid", "missing-uuid"}, entries, &requests)
-	prov := NewRekorClientWithBase(ts.URL, ts.Client()).FetchRekorProvenance(context.Background(), testDigest)
+	prov := NewRekorClientWithBase(ts.URL, ts.Client(), sigstoretest.TrustedRoot(NewStaticTrustedRootSource)).FetchRekorProvenance(context.Background(), testDigest)
 	if prov.Err == nil || !strings.Contains(prov.Err.Error(), "entry missing-uuid") {
 		t.Fatalf("Err = %v, want the last fetch failure", prov.Err)
 	}

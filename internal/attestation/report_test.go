@@ -2361,55 +2361,6 @@ func TestMarkE2EEUsable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Feature D: DSSE signature verification
-// ---------------------------------------------------------------------------
-
-func TestVerifyFulcioEntry_DSSE(t *testing.T) {
-	img := &ImageProvenance{
-		Repo:        "example/app",
-		Provenance:  FulcioSigned,
-		OIDCIssuer:  "https://token.actions.githubusercontent.com",
-		SourceRepos: []string{"example/app"},
-	}
-	goodEntry := &RekorProvenance{
-		HasCert:       true,
-		OIDCIssuer:    "https://token.actions.githubusercontent.com",
-		SourceRepo:    "example/app",
-		SourceRepoURL: "https://github.com/example/app",
-	}
-
-	t.Run("sig_err_fails", func(t *testing.T) {
-		r := *goodEntry
-		r.SignatureErr = errors.New("DSSE verification failed")
-		detail, failed := verifyFulcioEntry(&r, img, "example/app")
-		if !failed {
-			t.Fatal("expected failure")
-		}
-		if !strings.Contains(detail, "DSSE") {
-			t.Errorf("detail should mention DSSE: %s", detail)
-		}
-	})
-
-	t.Run("sig_err_skipped_with_nodsse", func(t *testing.T) {
-		imgNoDSSE := *img
-		imgNoDSSE.NoDSSE = true
-		r := *goodEntry
-		r.SignatureErr = errors.New("DSSE verification failed")
-		_, failed := verifyFulcioEntry(&r, &imgNoDSSE, "example/app")
-		if failed {
-			t.Fatal("NoDSSE should skip DSSE check")
-		}
-	})
-
-	t.Run("no_sig_err_passes", func(t *testing.T) {
-		_, failed := verifyFulcioEntry(goodEntry, img, "example/app")
-		if failed {
-			t.Fatal("expected pass")
-		}
-	})
-}
-
-// ---------------------------------------------------------------------------
 // Feature E: Enforced event log → Fail
 // ---------------------------------------------------------------------------
 
@@ -3279,8 +3230,8 @@ func TestClassifyRekorEntry_ErrWithoutFulcio(t *testing.T) {
 }
 
 func TestClassifyRekorEntry_NoPolicyNoCert(t *testing.T) {
-	// scPolicy==nil && !r.HasCert → rekorSigstore
-	r := &RekorProvenance{HasCert: false}
+	// scPolicy==nil && !r.FulcioVerified → rekorSigstore
+	r := &RekorProvenance{FulcioVerified: false}
 	kind, _ := classifyRekorEntry(r, nil, "myrepo/img", nil)
 	if kind != rekorSigstore {
 		t.Errorf("kind = %v, want rekorSigstore", kind)
@@ -3288,8 +3239,8 @@ func TestClassifyRekorEntry_NoPolicyNoCert(t *testing.T) {
 }
 
 func TestClassifyRekorEntry_NoPolicyWithCertBadIssuer(t *testing.T) {
-	// scPolicy==nil && r.HasCert && bad OIDCIssuer → rekorFailed
-	r := &RekorProvenance{HasCert: true, OIDCIssuer: "https://evil.com"}
+	// scPolicy==nil && r.FulcioVerified && bad OIDCIssuer → rekorFailed
+	r := &RekorProvenance{FulcioVerified: true, OIDCIssuer: "https://evil.com"}
 	kind, detail := classifyRekorEntry(r, nil, "myrepo/img", nil)
 	if kind != rekorFailed {
 		t.Errorf("kind = %v, want rekorFailed", kind)
@@ -3300,10 +3251,10 @@ func TestClassifyRekorEntry_NoPolicyWithCertBadIssuer(t *testing.T) {
 }
 
 func TestClassifyRekorEntry_NoPolicyWithCertGoodIssuer(t *testing.T) {
-	// scPolicy==nil && r.HasCert && correct OIDCIssuer → rekorFulcio
+	// scPolicy==nil && r.FulcioVerified && correct OIDCIssuer → rekorFulcio
 	r := &RekorProvenance{
-		HasCert:    true,
-		OIDCIssuer: "https://token.actions.githubusercontent.com",
+		FulcioVerified: true,
+		OIDCIssuer:     "https://token.actions.githubusercontent.com",
 	}
 	kind, _ := classifyRekorEntry(r, nil, "myrepo/img", nil)
 	if kind != rekorFulcio {
@@ -4166,10 +4117,10 @@ func TestRekorProvenanceResult_FulcioSETErr(t *testing.T) {
 	in := &ReportInput{
 		Raw: raw,
 		Rekor: []RekorProvenance{{
-			HasCert:    true,
-			OIDCIssuer: "https://token.actions.githubusercontent.com",
-			SourceRepo: "example/app",
-			SETErr:     errors.New("SET parse failed"),
+			FulcioVerified: true,
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "example/app",
+			SETErr:         errors.New("SET parse failed"),
 		}},
 		DigestToRepo: map[string]string{"": "example/app"},
 	}
@@ -4190,11 +4141,11 @@ func TestRekorProvenanceResult_FulcioInclusionErr(t *testing.T) {
 	in := &ReportInput{
 		Raw: raw,
 		Rekor: []RekorProvenance{{
-			HasCert:      true,
-			OIDCIssuer:   "https://token.actions.githubusercontent.com",
-			SourceRepo:   "example/app",
-			SETVerified:  true,
-			InclusionErr: errors.New("inclusion proof failed"),
+			FulcioVerified: true,
+			OIDCIssuer:     "https://token.actions.githubusercontent.com",
+			SourceRepo:     "example/app",
+			SETVerified:    true,
+			InclusionErr:   errors.New("inclusion proof failed"),
 		}},
 		DigestToRepo: map[string]string{"": "example/app"},
 	}
@@ -4215,8 +4166,8 @@ func TestRekorProvenanceResult_SigstoreSETErr(t *testing.T) {
 	in := &ReportInput{
 		Raw: raw,
 		Rekor: []RekorProvenance{{
-			HasCert: false,
-			SETErr:  errors.New("sigstore SET failed"),
+			FulcioVerified: false,
+			SETErr:         errors.New("sigstore SET failed"),
 		}},
 		DigestToRepo: map[string]string{"": "example/app"},
 	}
@@ -4234,9 +4185,9 @@ func TestRekorProvenanceResult_SigstoreInclusionErr(t *testing.T) {
 	in := &ReportInput{
 		Raw: raw,
 		Rekor: []RekorProvenance{{
-			HasCert:      false,
-			SETVerified:  true,
-			InclusionErr: errors.New("merkle proof failed"),
+			FulcioVerified: false,
+			SETVerified:    true,
+			InclusionErr:   errors.New("merkle proof failed"),
 		}},
 		DigestToRepo: map[string]string{"": "example/app"},
 	}
@@ -4254,7 +4205,7 @@ func TestRekorProvenanceResult_SigstoreNotInclusionVerified(t *testing.T) {
 	in := &ReportInput{
 		Raw: raw,
 		Rekor: []RekorProvenance{{
-			HasCert:           false,
+			FulcioVerified:    false,
 			SETVerified:       true,
 			InclusionVerified: false,
 		}},
@@ -4271,32 +4222,32 @@ func TestRekorProvenanceResult_SigstoreNotInclusionVerified(t *testing.T) {
 // verifyFulcioEntry — missing branches
 // --------------------------------------------------------------------------
 
-// TestVerifyFulcioEntry_NonFulcioCert covers L1264-1266: entry has a
-// non-Fulcio X.509 certificate (HasNonFulcioCert=true, HasCert=false).
+// TestVerifyFulcioEntry_NonFulcioCert covers an entry whose X.509
+// certificate is not verified as a Fulcio certificate (FulcioErr set).
 func TestVerifyFulcioEntry_NonFulcioCert(t *testing.T) {
 	img := &ImageProvenance{
 		OIDCIssuer:  "https://token.actions.githubusercontent.com",
 		SourceRepos: []string{"example/app"},
 	}
-	r := &RekorProvenance{HasNonFulcioCert: true}
+	r := &RekorProvenance{FulcioErr: errors.New("certificate does not chain to a Fulcio CA")}
 	detail, failed := verifyFulcioEntry(r, img, "example/app")
 	t.Logf("detail: %s, failed: %v", detail, failed)
 	if !failed {
 		t.Error("expected failure for non-Fulcio cert")
 	}
-	if !strings.Contains(detail, "non-Fulcio") {
-		t.Errorf("detail should mention non-Fulcio: %s", detail)
+	if !strings.Contains(detail, "the entry certificate does not chain to the Sigstore trusted root") {
+		t.Errorf("detail should name the chain failure: %s", detail)
 	}
 }
 
-// TestVerifyFulcioEntry_NoCert covers L1267-1269: entry has no certificate
-// at all (HasCert=false, HasNonFulcioCert=false).
+// TestVerifyFulcioEntry_NoCert covers an entry with a raw public key: no
+// certificate, no FulcioErr and a key fingerprint.
 func TestVerifyFulcioEntry_NoCert(t *testing.T) {
 	img := &ImageProvenance{
 		OIDCIssuer:  "https://token.actions.githubusercontent.com",
 		SourceRepos: []string{"example/app"},
 	}
-	r := &RekorProvenance{}
+	r := &RekorProvenance{KeyFingerprint: "abcd"}
 	detail, failed := verifyFulcioEntry(r, img, "example/app")
 	t.Logf("detail: %s, failed: %v", detail, failed)
 	if !failed {
@@ -4315,9 +4266,9 @@ func TestVerifyFulcioEntry_OIDCIssuerMismatch(t *testing.T) {
 		SourceRepos: []string{"example/app"},
 	}
 	r := &RekorProvenance{
-		HasCert:    true,
-		OIDCIssuer: "https://unexpected.issuer.example.com",
-		SourceRepo: "example/app",
+		FulcioVerified: true,
+		OIDCIssuer:     "https://unexpected.issuer.example.com",
+		SourceRepo:     "example/app",
 	}
 	detail, failed := verifyFulcioEntry(r, img, "example/app")
 	t.Logf("detail: %s, failed: %v", detail, failed)
@@ -4336,11 +4287,11 @@ func TestVerifyFulcioEntry_OIDCIdentitiesAllowlistMatch(t *testing.T) {
 		SourceRepos:    []string{"example/app"},
 	}
 	r := &RekorProvenance{
-		HasCert:       true,
-		OIDCIssuer:    "https://token.actions.githubusercontent.com",
-		SubjectURI:    "https://github.com/example/app/.github/workflows/release.yml@refs/heads/main",
-		SourceRepo:    "example/app",
-		SourceRepoURL: "https://github.com/example/app",
+		FulcioVerified: true,
+		OIDCIssuer:     "https://token.actions.githubusercontent.com",
+		SubjectURI:     "https://github.com/example/app/.github/workflows/release.yml@refs/heads/main",
+		SourceRepo:     "example/app",
+		SourceRepoURL:  "https://github.com/example/app",
 	}
 	detail, failed := verifyFulcioEntry(r, img, "example/app")
 	if failed {
@@ -4355,11 +4306,11 @@ func TestVerifyFulcioEntry_OIDCIdentitiesAllowlistMismatch(t *testing.T) {
 		SourceRepos:    []string{"example/app"},
 	}
 	r := &RekorProvenance{
-		HasCert:       true,
-		OIDCIssuer:    "https://token.actions.githubusercontent.com",
-		SubjectURI:    "https://github.com/example/app/.github/workflows/other.yml@refs/heads/main",
-		SourceRepo:    "example/app",
-		SourceRepoURL: "https://github.com/example/app",
+		FulcioVerified: true,
+		OIDCIssuer:     "https://token.actions.githubusercontent.com",
+		SubjectURI:     "https://github.com/example/app/.github/workflows/other.yml@refs/heads/main",
+		SourceRepo:     "example/app",
+		SourceRepoURL:  "https://github.com/example/app",
 	}
 	detail, failed := verifyFulcioEntry(r, img, "example/app")
 	if !failed {

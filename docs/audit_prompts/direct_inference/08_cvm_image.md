@@ -74,12 +74,12 @@ Verify and report:
 Verify and report:
 - Rekor API interaction: UUID search via `POST /api/v1/index/retrieve`, then entry fetch via `POST /api/v1/log/entries/retrieve`,
 - response body size limits: both Rekor API calls use `io.LimitReader(resp.Body, 1<<20)` (1 MiB limit) — confirm this is sufficient but bounded,
-- DSSE envelope parsing: the code extracts `spec.signatures[0].verifier` (base64-encoded PEM) — verify only the first signature entry is used and whether ignoring additional signatures is a risk,
+- Rekor entry parsing: the code accepts only `dsse` 0.0.1 bodies with exactly one signature and a base64-encoded PEM verifier — verify that entries with other kinds, more signatures or unknown fields are rejected,
 - PEM block type classification: `CERTIFICATE` → Fulcio provenance, `PUBLIC KEY` → raw key (no provenance), other → error,
 - Fulcio certificate provenance extraction via X.509 extension OIDs (1.3.6.1.4.1.57264.1.*),
 - accepted signer identity model: which OIDC issuer values and identity patterns are accepted by the provider configuration, and whether the check is exact-match or prefix/glob,
-- behavior when digest appears in Sigstore but the Rekor entry has a raw public key (no Fulcio cert): `HasCert: false` — verify whether this is treated as passing provenance (risky) or only as presence confirmation,
-- handling of Rekor entries that lack DSSE (Dead Simple Signing Envelope) signatures — some images have Rekor transparency log entries but no DSSE envelope signatures; the `NoDSSE` field in `ImageProvenance` controls whether this is accepted,
+- behavior when digest appears in Sigstore but the Rekor entry has a raw public key (no Fulcio cert): `FulcioVerified: false` — verify whether this is treated as passing provenance (risky) or only as presence confirmation,
+- handling of the DSSE signature of Rekor `dsse` entries — Rekor stores only the envelope and payload hashes, so teep cannot verify the DSSE signature from Rekor data; verify that each `FulcioSigned` entry instead requires a verified SET and a certificate that chains to a Fulcio CA in the Sigstore trusted root, with an SCT, at the integrated time, and that the remaining gap (the digest-to-payload link comes from the unsigned Rekor search index) is documented,
 - when multiple Rekor UUIDs are returned for a digest, only the first is fetched — document whether this is a risk (attacker could front-run with a valid-looking entry).
 
 For the neardirect provider, the supply chain policy (`internal/provider/neardirect/policy.go`) defines allowed images and their expected provenance:
@@ -117,8 +117,8 @@ The compose binding (`MRConfigID`) provides application-layer assurance that the
 
 - **SHA-256 for compose binding**: confirm `crypto/sha256.Sum256` is used for the `MRConfigID` hash computation, matching the TDX specification.
 - **Constant-time comparison**: `VerifyComposeBinding` uses `subtle.ConstantTimeCompare` for the `MRConfigID` prefix comparison — verify the comparison covers exactly the expected prefix length (33 bytes: 1-byte tag + 32-byte SHA-256).
-- **X.509 certificate parsing**: Rekor's `parseFulcioProvenance` parses Fulcio certificates — verify `x509.ParseCertificate` is called on the DER block and that parse errors are treated as hard failures.
-- **ASN.1 extension value decoding**: the code decodes Fulcio extension OIDs as ASN.1 UTF8String with a fallback to raw bytes — verify the fallback does not mask encoding errors that could allow OID injection.
+- **X.509 certificate verification**: `verifyFulcioCertificate` verifies the chain, validity and SCT with sigstore-go at the SET-authenticated integrated time — verify that `x509.ParseCertificate` errors reject the entry and that no identity field is read before the chain verifies.
+- **Fulcio extension decoding**: `certificate.SummarizeCertificate` decodes the Fulcio extension OIDs of a chain-verified certificate — verify that the identity comes only from certificates that Fulcio issued.
 - **Base64 decoding**: the Rekor entry body and verifier PEM are base64-decoded — verify standard encoding is used (not URL-safe or raw variants) and that decode errors are handled, not panicked on.
 - **No cosign bundle verification**: if the code relies on Sigstore search HTTP status rather than performing full cosign bundle signature verification, document this as a gap — a compromised Sigstore search endpoint could return 200 for any digest.
 

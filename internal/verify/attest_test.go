@@ -2,7 +2,15 @@ package verify
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +18,7 @@ import (
 	"time"
 
 	"github.com/13rac1/teep/internal/attestation"
+	"github.com/13rac1/teep/internal/attestation/sigstoretest"
 	"github.com/13rac1/teep/internal/provider"
 	"github.com/13rac1/teep/internal/provider/nearcloud"
 )
@@ -148,7 +157,7 @@ func TestVerifyGatewayTDX_NoQuote(t *testing.T) {
 
 func TestCheckSigstore_Empty(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{}, nil, nil, nil, false)
+	sig, rekor := checkSigstore(ctx, []string{}, nil, nil, nil, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), false)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results for empty digests, got %v", sig)
 	}
@@ -163,7 +172,7 @@ func TestCheckSigstore_Empty(t *testing.T) {
 func TestCheckSigstore_Online_CanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, nil, nil, &http.Client{}, false)
+	sig, rekor := checkSigstore(ctx, []string{"deadbeefdeadbeefdeadbeef"}, nil, nil, &http.Client{}, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), false)
 	t.Logf("checkSigstore canceled ctx: sig=%v rekor=%v", sig, rekor)
 	// We don't assert specific values — just ensure no panic and code is exercised.
 }
@@ -209,7 +218,7 @@ func TestCheckSigstore_Found_EntryFetchError(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -220,6 +229,67 @@ func TestCheckSigstore_Found_EntryFetchError(t *testing.T) {
 	// prov.Err != nil branch → rekorResults still appended (line 161)
 	if len(rekor) != 1 {
 		t.Errorf("expected 1 rekor result (appended even on error), got %d", len(rekor))
+	}
+}
+
+// TestCheckSigstore_CertificateNotVerified returns an entry whose verifier is
+// a self-signed certificate and whose SET does not verify with the Rekor
+// key. The result records why the certificate is not a verified Fulcio
+// certificate and carries no identity.
+func TestCheckSigstore_CertificateNotVerified(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Unix(1700000000, 0), NotAfter: time.Unix(1700000600, 0)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	hash := map[string]string{"algorithm": "sha256", "value": strings.Repeat("a", 64)}
+	body, err := json.Marshal(map[string]any{"apiVersion": "0.0.1", "kind": "dsse", "spec": map[string]any{
+		"envelopeHash": hash, "payloadHash": hash,
+		"signatures": []map[string]string{{"signature": base64.StdEncoding.EncodeToString([]byte("sig")), "verifier": verifier}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := json.Marshal([]map[string]any{{"u1": map[string]any{
+		"body": base64.StdEncoding.EncodeToString(body), "integratedTime": 1700000100, "logID": strings.Repeat("c", 64), "logIndex": 0,
+		"verification": map[string]any{
+			"signedEntryTimestamp": base64.StdEncoding.EncodeToString([]byte("not a SET")),
+			"inclusionProof":       map[string]any{"checkpoint": "c", "hashes": []string{}, "logIndex": 0, "rootHash": "00", "treeSize": 1},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/index/retrieve") {
+			_, _ = w.Write([]byte(`["u1"]`))
+			return
+		}
+		_, _ = w.Write(entry)
+	}))
+	defer ts.Close()
+	client := &http.Client{Transport: &rekorProxyTransport{
+		targetScheme: "https",
+		targetHost:   strings.TrimPrefix(ts.URL, "https://"),
+		inner:        ts.Client().Transport,
+	}}
+
+	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	_, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), false)
+	if len(rekor) != 1 {
+		t.Fatalf("got %d Rekor results, want 1", len(rekor))
+	}
+	r := rekor[0]
+	if r.Err != nil || r.FulcioVerified || r.FulcioErr == nil || !strings.Contains(r.FulcioErr.Error(), "certificate chain not checked") {
+		t.Fatalf("Err=%v FulcioVerified=%v FulcioErr=%v", r.Err, r.FulcioVerified, r.FulcioErr)
+	}
+	if r.OIDCIssuer != "" || r.SubjectURI != "" {
+		t.Fatalf("unverified certificate gave identity %+v", r)
 	}
 }
 
@@ -241,7 +311,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 	}
 
 	const digest = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, false)
+	sig, rekor := checkSigstore(context.Background(), []string{digest}, nil, nil, client, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), false)
 	t.Logf("sig=%v rekor=%v", sig, rekor)
 	if len(sig) != 1 {
 		t.Fatalf("expected 1 sigstore result, got %d", len(sig))
@@ -259,7 +329,7 @@ func TestCheckSigstore_NotFound_StatusOnly(t *testing.T) {
 
 func TestCheckSigstore_Offline(t *testing.T) {
 	ctx := context.Background()
-	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, nil, nil, true)
+	sig, rekor := checkSigstore(ctx, []string{"sha256:abc123"}, nil, nil, nil, sigstoretest.TrustedRoot(attestation.NewStaticTrustedRootSource), true)
 	if sig != nil {
 		t.Errorf("expected nil sigstore results in offline mode, got %v", sig)
 	}

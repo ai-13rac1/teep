@@ -1,5 +1,11 @@
 # Teep Supply Chain & Compose Binding Attestation
 
+> **Historical.** This map records the supply chain design before Fulcio
+> certificate chain verification. Its description of Rekor entry checks is not
+> current. For the current checks see
+> [NEAR supply chain verification](../providers/near/near_attestation.md#supply-chain-verification)
+> and the [Fulcio chain verification plan](fulcio_chain_verification.md).
+
 ## Provider Supply Chain Policies
 
 ### Dstack-Based Providers (Venice, Neardirect, Nearcloud, NanoGPT)
@@ -16,7 +22,7 @@ Nearcloud also carries a separate gateway CVM measurement policy in [internal/pr
 - The policy contains 3 model-tier repositories:
   1. `datadog/agent` with `SigstorePresent` plus a pinned signing-key fingerprint
   2. `certbot/dns-cloudflare` with `ComposeBindingOnly`
-  3. `nearaidev/compose-manager` with `FulcioSigned`, GitHub Actions OIDC identity checks, expected source repositories, and `NoDSSE=true`
+  3. `nearaidev/compose-manager` with `FulcioSigned`, GitHub Actions OIDC identity checks, and expected source repositories
 
 ### Neardirect ([internal/provider/neardirect/policy.go](../../internal/provider/neardirect/policy.go))
 - `SupplyChainPolicy()` defines the shared Venice/neardirect model-tier policy.
@@ -28,11 +34,11 @@ Nearcloud also carries a separate gateway CVM measurement policy in [internal/pr
 - `SupplyChainPolicy()` starts from the neardirect model-tier policy and adds gateway-tier images.
 - `datadog/agent` is marked as both model-tier and gateway-tier.
 - Additional gateway-tier repositories are:
-  - `nearaidev/dstack-vpc-client` (`FulcioSigned`, `NoDSSE=true`)
-  - `nearaidev/dstack-vpc` (`FulcioSigned`, `NoDSSE=true`)
+  - `nearaidev/dstack-vpc-client` (`FulcioSigned`)
+  - `nearaidev/dstack-vpc` (`FulcioSigned`)
   - `alpine` (`SigstorePresent` only)
-  - `nearaidev/cloud-api` (`FulcioSigned`, `NoDSSE=true`)
-  - `nearaidev/cvm-ingress` (`FulcioSigned`, `NoDSSE=true`)
+  - `nearaidev/cloud-api` (`FulcioSigned`)
+  - `nearaidev/cvm-ingress` (`FulcioSigned`)
 - All Fulcio-enforced nearcloud gateway images require the GitHub Actions OIDC issuer and a workflow-specific subject URI plus matching source repository metadata.
 
 ### NanoGPT ([internal/provider/nanogpt/policy.go](../../internal/provider/nanogpt/policy.go))
@@ -128,7 +134,6 @@ type ImageProvenance struct {
 	OIDCIssuer     string
 	OIDCIdentity   string
 	SourceRepos    []string
-	NoDSSE         bool
 }
 
 type ProvenanceType int
@@ -158,7 +163,7 @@ The helper methods on `SupplyChainPolicy` (`Lookup`, `AllowedInModel`, `AllowedI
 3. **`rekorProvenanceResult`**
    - Maps each Rekor record back to an extracted repository using `DigestToRepo`.
    - Uses `classifyRekorEntry` to split entries into Fulcio-verified, Sigstore-present, or failed.
-   - For `FulcioSigned` policy entries, `verifyFulcioEntry` enforces DSSE-signature presence unless `NoDSSE=true`, requires a Fulcio certificate, matches OIDC issuer and subject URI in constant time, and checks the source repository against the allowlist.
+   - For `FulcioSigned` policy entries, `verifyFulcioEntry` requires a certificate that chains to a Fulcio CA in the Sigstore trusted root, with an SCT, at the integrated time (`FulcioVerified`), matches OIDC issuer and subject URI in constant time, and checks the source repository against the allowlist.
    - For `SigstorePresent` entries with a configured fingerprint, performs a constant-time fingerprint comparison.
    - Requires verified Rekor SET and inclusion proofs for both Fulcio and Sigstore-only paths.
    - Produces a pass summary with Fulcio count, Sigstore count, and log-integrity counters; otherwise fails on the first policy or verification violation.
