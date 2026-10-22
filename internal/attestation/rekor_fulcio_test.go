@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -595,6 +596,27 @@ func TestFulcioConcurrentFetches(t *testing.T) {
 				t.Fatalf("result %d = %+v", i, r)
 			}
 		}
+	}
+}
+
+// TestFulcioManySearchResults serves a search result with 2048 UUIDs, more
+// than other parties could easily add before, with the real entry among
+// them. The digest still verifies: the UUID count alone does not fail it.
+func TestFulcioManySearchResults(t *testing.T) {
+	uuids := make([]string, 2048)
+	for i := range uuids {
+		uuids[i] = fmt.Sprintf("%080x", i)
+	}
+	uuids[3] = "real"
+	entries := map[string][]byte{"real": buildMockEntryResponse("real", buildMockDSSEBody(realFulcioCertPEM))}
+	var requests atomic.Int32
+	ts := rekorParseServer(t, uuids, entries, &requests)
+	prov := newTestRekorClient(ts).FetchRekorProvenanceForPolicy(t.Context(), testDigest, composeManagerImg, composeManagerPolicy())
+	if prov.Err != nil || !prov.FulcioVerified {
+		t.Fatalf("Err=%v FulcioVerified=%v FulcioErr=%v", prov.Err, prov.FulcioVerified, prov.FulcioErr)
+	}
+	if got := requests.Load(); got != 4 {
+		t.Fatalf("entry requests = %d, want 4", got)
 	}
 }
 

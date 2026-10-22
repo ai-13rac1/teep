@@ -14,10 +14,17 @@ import (
 	"github.com/13rac1/teep/internal/jsonstrict"
 )
 
+// maxRekorResponseBytes bounds the read of one Rekor API response.
+const maxRekorResponseBytes = 1 << 20
+
 // maxRekorUUIDs bounds the entry UUIDs that teep accepts from one Rekor index
-// search. A search result with more UUIDs fails for that digest. The largest
-// search result in the test captures has 508 UUIDs.
-const maxRekorUUIDs = 1024
+// search. A search result with more UUIDs fails for that digest. Anyone can
+// log entries for a public digest, so a lower count would let one party
+// block a provider at less cost than the read bound: the limit is the
+// number of the shortest Rekor UUIDs (64 hex characters, 67 bytes with
+// quotes and comma) that fit in maxRekorResponseBytes. The largest search
+// result in the test captures has 508 UUIDs.
+const maxRekorUUIDs = maxRekorResponseBytes / 67
 
 // rekorDSSEKind and rekorDSSEAPIVersion name the only Rekor entry type that
 // teep accepts.

@@ -364,7 +364,7 @@ func TestFetchRekorProvenanceAllEntriesRejected(t *testing.T) {
 func TestRekorSearchRejectsOversizedAndMalformedResults(t *testing.T) {
 	over := make([]string, maxRekorUUIDs+1)
 	for i := range over {
-		over[i] = fmt.Sprintf("%080x", i)
+		over[i] = fmt.Sprintf("%x", i) // short UUIDs, so the count, not the read bound, applies
 	}
 	for name, body := range map[string][]byte{
 		"oversized":  mustJSON(t, over),
