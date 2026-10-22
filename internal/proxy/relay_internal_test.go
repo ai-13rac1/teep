@@ -1475,21 +1475,47 @@ func testPublicKeyMaterial(t *testing.T) testKeyMaterial {
 	}
 }
 
+// proxyDSSEBody builds a base64-encoded Rekor dsse 0.0.1 entry body with one
+// signature by the given verifier PEM.
 func proxyDSSEBody(verifierPEM string) string {
-	verifierB64 := base64.StdEncoding.EncodeToString([]byte(verifierPEM))
+	hash := func(v string) map[string]any {
+		return map[string]any{"algorithm": "sha256", "value": strings.Repeat(v, 64)}
+	}
 	dsse := map[string]any{
 		"apiVersion": "0.0.1",
 		"kind":       "dsse",
 		"spec": map[string]any{
-			"signatures": []map[string]any{{"verifier": verifierB64}},
+			"envelopeHash": hash("1"),
+			"payloadHash":  hash("2"),
+			"signatures": []map[string]any{{
+				"signature": base64.StdEncoding.EncodeToString([]byte("mock-signature")),
+				"verifier":  base64.StdEncoding.EncodeToString([]byte(verifierPEM)),
+			}},
 		},
 	}
 	raw, _ := json.Marshal(dsse)
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
+// proxyRekorEntryResponse builds a Rekor entry response for uuid. Its SET and
+// inclusion proof do not verify.
 func proxyRekorEntryResponse(uuid, dsseBodyB64 string) []byte {
-	raw, _ := json.Marshal([]map[string]any{{uuid: map[string]any{"body": dsseBodyB64}}})
+	raw, _ := json.Marshal([]map[string]any{{uuid: map[string]any{
+		"body":           dsseBodyB64,
+		"integratedTime": 1700000000,
+		"logID":          strings.Repeat("c", 64),
+		"logIndex":       42,
+		"verification": map[string]any{
+			"signedEntryTimestamp": base64.StdEncoding.EncodeToString([]byte("not-a-real-sig")),
+			"inclusionProof": map[string]any{
+				"checkpoint": "rekor.sigstore.dev - 1234\n42\nROOTHASH\n",
+				"hashes":     []string{"abcd1234"},
+				"logIndex":   42,
+				"rootHash":   "abcd1234",
+				"treeSize":   100,
+			},
+		},
+	}}})
 	return raw
 }
 

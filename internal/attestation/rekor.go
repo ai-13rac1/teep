@@ -228,29 +228,16 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 	var policyFallback *RekorProvenance
 	var lastErr error
 	for _, uuid := range uuids {
-		entry, err := rc.fetchRekorEntry(ctx, uuid)
+		entry, body, err := rc.fetchRekorEntryBody(ctx, uuid)
 		if err != nil {
-			lastErr = fmt.Errorf("fetch Rekor entry %s: %w", uuid, err)
+			if _, rejected := errors.AsType[rekorEntryRejectedError](err); rejected {
+				slog.WarnContext(ctx, "Rekor entry rejected",
+					"digest", digest, "uuid", truncate(uuid, 100), "reason", err.Error())
+			}
+			lastErr = fmt.Errorf("entry %s: %w", truncate(uuid, 100), err)
 			continue
 		}
-
-		body, err := base64.StdEncoding.DecodeString(entry.Body)
-		if err != nil {
-			lastErr = fmt.Errorf("base64 decode body for %s: %w", uuid, err)
-			continue
-		}
-
-		verifierPEM, err := extractVerifierPEM(body)
-		if err != nil {
-			lastErr = fmt.Errorf("extract verifier from %s: %w", uuid, err)
-			continue
-		}
-
-		block, _ := pem.Decode(verifierPEM)
-		if block == nil {
-			lastErr = fmt.Errorf("invalid PEM in verifier for %s", uuid)
-			continue
-		}
+		verifierPEM, block := body.VerifierPEM, body.Verifier
 
 		if block.Type == "PUBLIC KEY" {
 			// Raw public key — no Fulcio provenance. Keep as fallback and
@@ -268,11 +255,6 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 			if rawKeyFallback == nil {
 				rawKeyFallback = &p
 			}
-			continue
-		}
-
-		if block.Type != "CERTIFICATE" {
-			lastErr = fmt.Errorf("unexpected PEM type %q in entry %s", block.Type, uuid)
 			continue
 		}
 
@@ -305,7 +287,7 @@ func (rc *RekorClient) fetchRekorProvenance(ctx context.Context, digest string, 
 			continue
 		}
 		// Verify the DSSE envelope signature against the Fulcio cert.
-		if err := verifyDSSESignature(body, verifierPEM); err != nil {
+		if err := verifyDSSESignature(body.Raw, verifierPEM); err != nil {
 			prov.SignatureErr = fmt.Errorf("DSSE signature verification: %w", err)
 		} else {
 			prov.SignatureVerified = true
@@ -454,16 +436,12 @@ func (rc *RekorClient) fetchRekorUUIDs(ctx context.Context, digest string) ([]st
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 256))
 	}
 
-	var uuids []string
-	if err := json.Unmarshal(body, &uuids); err != nil {
-		return nil, fmt.Errorf("decode UUIDs: %w", err)
-	}
-	return uuids, nil
+	return parseRekorUUIDs(body)
 }
 
 // fetchRekorEntry calls POST /api/v1/log/entries/retrieve to fetch a log entry
-// by UUID and returns the full entry including verification data.
-func (rc *RekorClient) fetchRekorEntry(ctx context.Context, uuid string) (*rekorEntry, error) {
+// by UUID and returns the response body.
+func (rc *RekorClient) fetchRekorEntry(ctx context.Context, uuid string) ([]byte, error) {
 	payload, err := json.Marshal(map[string][]string{"entryUUIDs": {uuid}})
 	if err != nil {
 		return nil, err
@@ -490,106 +468,53 @@ func (rc *RekorClient) fetchRekorEntry(ctx context.Context, uuid string) (*rekor
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 256))
 	}
 
-	// Response is an array of maps: [{"<uuid>": {"body": "<base64>", ...}}]
-	var entries []map[string]json.RawMessage
-	if err := json.Unmarshal(respBody, &entries); err != nil {
-		return nil, fmt.Errorf("decode entries array: %w", err)
-	}
-	if len(entries) == 0 {
-		return nil, errors.New("empty entries response")
-	}
-
-	// Get the first entry's value (the map has one key: the UUID).
-	var entryValue json.RawMessage
-	for _, v := range entries[0] {
-		entryValue = v
-		break
-	}
-
-	var entryObj struct {
-		Body           string `json:"body"`
-		IntegratedTime *int64 `json:"integratedTime"`
-		LogID          string `json:"logID"`
-		LogIndex       *int64 `json:"logIndex"`
-		Verification   *struct {
-			SignedEntryTimestamp string `json:"signedEntryTimestamp"`
-			InclusionProof       *struct {
-				Checkpoint string   `json:"checkpoint"`
-				Hashes     []string `json:"hashes"`
-				LogIndex   *int64   `json:"logIndex"`
-				RootHash   string   `json:"rootHash"`
-				TreeSize   *int64   `json:"treeSize"`
-			} `json:"inclusionProof"`
-		} `json:"verification"`
-	}
-	if err := json.Unmarshal(entryValue, &entryObj); err != nil {
-		return nil, fmt.Errorf("decode entry object: %w", err)
-	}
-
-	re := &rekorEntry{
-		Body:  entryObj.Body,
-		LogID: entryObj.LogID,
-	}
-	if entryObj.IntegratedTime != nil {
-		re.IntegratedTime = *entryObj.IntegratedTime
-	}
-	if entryObj.LogIndex != nil {
-		re.LogIndex = *entryObj.LogIndex
-	}
-	if entryObj.Verification != nil {
-		re.Verification = &rekorVerification{
-			SignedEntryTimestamp: entryObj.Verification.SignedEntryTimestamp,
-		}
-		if ip := entryObj.Verification.InclusionProof; ip != nil {
-			rip := &rekorInclusionProof{
-				Checkpoint: ip.Checkpoint,
-				Hashes:     ip.Hashes,
-				RootHash:   ip.RootHash,
-			}
-			if ip.LogIndex != nil {
-				rip.LogIndex = *ip.LogIndex
-			}
-			if ip.TreeSize != nil {
-				rip.TreeSize = *ip.TreeSize
-			}
-			re.Verification.InclusionProof = rip
-		}
-	}
-	return re, nil
+	return respBody, nil
 }
 
-// extractVerifierPEM extracts the verifier PEM from a decoded Rekor entry body
-// (DSSE envelope). The verifier is at spec.signatures[0].verifier and is itself
-// base64-encoded.
-func extractVerifierPEM(entryBody []byte) ([]byte, error) {
-	var entry struct {
-		Spec struct {
-			Signatures []struct {
-				Verifier string `json:"verifier"`
-			} `json:"signatures"`
-		} `json:"spec"`
-	}
-	if err := json.Unmarshal(entryBody, &entry); err != nil {
-		return nil, fmt.Errorf("decode DSSE entry: %w", err)
-	}
-	if len(entry.Spec.Signatures) == 0 {
-		return nil, errors.New("no signatures in DSSE entry")
-	}
+// rekorEntryRejectedError marks an entry that teep fetched and then rejected
+// because it is malformed or is not a dsse 0.0.1 entry.
+type rekorEntryRejectedError struct{ err error }
 
-	verifierB64 := entry.Spec.Signatures[0].Verifier
-	if verifierB64 == "" {
-		return nil, errors.New("empty verifier in DSSE signature")
-	}
+func (r rekorEntryRejectedError) Error() string { return r.err.Error() }
+func (r rekorEntryRejectedError) Unwrap() error { return r.err }
 
-	verifierPEM, err := base64.StdEncoding.DecodeString(verifierB64)
+// fetchRekorEntryBody fetches the entry for uuid and parses the response and
+// the entry body. A fetch failure returns the transport or HTTP error. Any
+// response that is not a well-formed dsse 0.0.1 entry, including one with
+// unknown fields, returns a rekorEntryRejectedError.
+func (rc *RekorClient) fetchRekorEntryBody(ctx context.Context, uuid string) (*rekorEntry, *rekorDSSEBody, error) {
+	respBody, err := rc.fetchRekorEntry(ctx, uuid)
 	if err != nil {
-		// Some entries have the PEM directly (not base64-wrapped).
-		if _, rest := pem.Decode([]byte(verifierB64)); rest != nil {
-			return []byte(verifierB64), nil
-		}
-		return nil, fmt.Errorf("decode verifier base64: %w", err)
+		return nil, nil, err
 	}
-	return verifierPEM, nil
+	entry, body, err := parseRekorEntryAndBody(respBody, uuid)
+	if err != nil {
+		return nil, nil, rekorEntryRejectedError{err: err}
+	}
+	return entry, body, nil
+}
+
+func parseRekorEntryAndBody(respBody []byte, uuid string) (*rekorEntry, *rekorDSSEBody, error) {
+	entry, unknown, err := parseRekorEntryResponse(respBody, uuid)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(unknown) > 0 {
+		return nil, nil, fmt.Errorf("entry response has unknown fields: %s", formatUnknownFields(unknown))
+	}
+	raw, err := base64.StdEncoding.DecodeString(entry.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode body base64: %w", err)
+	}
+	body, unknown, err := parseRekorBody(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(unknown) > 0 {
+		return nil, nil, fmt.Errorf("body has unknown fields: %s", formatUnknownFields(unknown))
+	}
+	body.Raw = raw
+	return entry, body, nil
 }
 
 // parseFulcioProvenance parses a Fulcio certificate PEM and extracts the

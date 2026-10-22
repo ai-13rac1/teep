@@ -75,30 +75,45 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEgLMCN19xdaSnmBi/BYD26q6AoWjK
 Fdml3gKLajAqc2o72mewgyjHsYHsm3P7gP5jZMP33fzug1xX7obF21k/JQ==
 -----END PUBLIC KEY-----`
 
-// buildMockDSSEBody builds a base64-encoded Rekor entry body (DSSE) with the
-// given verifier PEM.
-func buildMockDSSEBody(verifierPEM string) string {
-	verifierB64 := base64.StdEncoding.EncodeToString([]byte(verifierPEM))
-	dsse := map[string]any{
-		"apiVersion": "0.0.1",
-		"kind":       "dsse",
-		"spec": map[string]any{
-			"signatures": []map[string]any{
-				{"verifier": verifierB64},
-			},
-		},
+// Fixed SHA-256 hex values for the hashes of mock dsse entry bodies.
+const (
+	mockEnvelopeHash = "1111111111111111111111111111111111111111111111111111111111111111"
+	mockPayloadHash  = "2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// mockDSSESpec returns the spec of a well-formed dsse 0.0.1 entry body with
+// one signature by the given verifier PEM.
+func mockDSSESpec(verifierPEM string) map[string]any {
+	return map[string]any{
+		"envelopeHash": map[string]any{"algorithm": "sha256", "value": mockEnvelopeHash},
+		"payloadHash":  map[string]any{"algorithm": "sha256", "value": mockPayloadHash},
+		"signatures": []map[string]any{{
+			"signature": base64.StdEncoding.EncodeToString([]byte("mock-signature")),
+			"verifier":  base64.StdEncoding.EncodeToString([]byte(verifierPEM)),
+		}},
 	}
-	raw, _ := json.Marshal(dsse)
+}
+
+// mockBodyB64 encodes a Rekor entry body as JSON and then base64.
+func mockBodyB64(body map[string]any) string {
+	raw, _ := json.Marshal(body)
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
-// buildMockEntryResponse builds the JSON response for POST /api/v1/log/entries/retrieve.
+// buildMockDSSEBody builds a base64-encoded Rekor dsse 0.0.1 entry body with
+// the given verifier PEM.
+func buildMockDSSEBody(verifierPEM string) string {
+	return mockBodyB64(map[string]any{
+		"apiVersion": "0.0.1",
+		"kind":       "dsse",
+		"spec":       mockDSSESpec(verifierPEM),
+	})
+}
+
+// buildMockEntryResponse builds the JSON response for POST
+// /api/v1/log/entries/retrieve. The SET and inclusion proof do not verify.
 func buildMockEntryResponse(uuid, dsseBodyB64 string) []byte {
-	entry := []map[string]any{
-		{uuid: map[string]any{"body": dsseBodyB64}},
-	}
-	raw, _ := json.Marshal(entry)
-	return raw
+	return buildMockEntryResponseWithVerification(uuid, dsseBodyB64)
 }
 
 func TestFetchRekorProvenance_FulcioCert(t *testing.T) {
@@ -1049,39 +1064,6 @@ func selfSignedCert(key *ecdsa.PrivateKey) ([]byte, error) {
 }
 
 // --------------------------------------------------------------------------
-// extractVerifierPEM error paths
-// --------------------------------------------------------------------------
-
-func TestExtractVerifierPEM_InvalidJSON(t *testing.T) {
-	_, err := extractVerifierPEM([]byte("not json"))
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-	t.Logf("expected error: %v", err)
-}
-
-func TestExtractVerifierPEM_NoSignatures(t *testing.T) {
-	_, err := extractVerifierPEM([]byte(`{"spec":{"signatures":[]}}`))
-	if err == nil {
-		t.Fatal("expected error for no signatures")
-	}
-	if !strings.Contains(err.Error(), "no signatures") {
-		t.Errorf("error should mention 'no signatures': %v", err)
-	}
-}
-
-func TestExtractVerifierPEM_EmptyVerifier(t *testing.T) {
-	body := `{"spec":{"signatures":[{"verifier":""}]}}`
-	_, err := extractVerifierPEM([]byte(body))
-	if err == nil {
-		t.Fatal("expected error for empty verifier")
-	}
-	if !strings.Contains(err.Error(), "empty verifier") {
-		t.Errorf("error should mention 'empty verifier': %v", err)
-	}
-}
-
-// --------------------------------------------------------------------------
 // FetchRekorProvenance: entry fetch error path
 // --------------------------------------------------------------------------
 
@@ -1177,10 +1159,7 @@ func TestDecodeExtensionValue_InvalidUTF8(t *testing.T) {
 func TestFetchRekorProvenance_BadBodyBase64(t *testing.T) {
 	testUUID := "bad-body-uuid"
 	// Build an entry response where the body is not valid base64.
-	entry := []map[string]any{
-		{testUUID: map[string]any{"body": "not!valid!base64!!!"}},
-	}
-	entryRaw, _ := json.Marshal(entry)
+	entryRaw := buildMockEntryResponse(testUUID, "not!valid!base64!!!")
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("mock: %s %s", r.Method, r.URL.Path)
@@ -1206,18 +1185,14 @@ func TestFetchRekorProvenance_BadBodyBase64(t *testing.T) {
 	}
 }
 
-// TestFetchRekorProvenance_ExtractVerifierPEMError covers the extractVerifierPEM
-// error path (lines 179-182). The body is valid base64, but its JSON has no
-// signatures, causing extractVerifierPEM to return an error.
+// TestFetchRekorProvenance_ExtractVerifierPEMError covers a dsse body with an
+// empty signatures list. The parser rejects the entry.
 func TestFetchRekorProvenance_ExtractVerifierPEMError(t *testing.T) {
 	testUUID := "no-sig-uuid"
 	// Body is valid base64 of JSON with no signatures field.
-	innerJSON := `{"spec":{"signatures":[]}}`
-	bodyB64 := base64.StdEncoding.EncodeToString([]byte(innerJSON))
-	entry := []map[string]any{
-		{testUUID: map[string]any{"body": bodyB64}},
-	}
-	entryRaw, _ := json.Marshal(entry)
+	spec := mockDSSESpec(realPublicKeyPEM)
+	spec["signatures"] = []map[string]any{}
+	entryRaw := buildMockEntryResponse(testUUID, mockBodyB64(map[string]any{"apiVersion": "0.0.1", "kind": "dsse", "spec": spec}))
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1249,20 +1224,7 @@ func TestFetchRekorProvenance_NilPEMBlock(t *testing.T) {
 	// Build a DSSE body where the verifier is valid base64 but decodes to
 	// bytes that are not a PEM block (plain text).
 	notAPEM := "this is not a PEM block"
-	verifierB64 := base64.StdEncoding.EncodeToString([]byte(notAPEM))
-	dsse := map[string]any{
-		"spec": map[string]any{
-			"signatures": []map[string]any{
-				{"verifier": verifierB64},
-			},
-		},
-	}
-	dsseJSON, _ := json.Marshal(dsse)
-	bodyB64 := base64.StdEncoding.EncodeToString(dsseJSON)
-	entry := []map[string]any{
-		{testUUID: map[string]any{"body": bodyB64}},
-	}
-	entryRaw, _ := json.Marshal(entry)
+	entryRaw := buildMockEntryResponse(testUUID, buildMockDSSEBody(notAPEM))
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1294,20 +1256,7 @@ func TestFetchRekorProvenance_ParseFulcioProvenanceError(t *testing.T) {
 	testUUID := "invalid-cert-uuid"
 	// Build a PEM block with type CERTIFICATE but invalid DER content.
 	invalidCertPEM := "-----BEGIN CERTIFICATE-----\naW52YWxpZA==\n-----END CERTIFICATE-----\n"
-	verifierB64 := base64.StdEncoding.EncodeToString([]byte(invalidCertPEM))
-	dsse := map[string]any{
-		"spec": map[string]any{
-			"signatures": []map[string]any{
-				{"verifier": verifierB64},
-			},
-		},
-	}
-	dsseJSON, _ := json.Marshal(dsse)
-	bodyB64 := base64.StdEncoding.EncodeToString(dsseJSON)
-	entry := []map[string]any{
-		{testUUID: map[string]any{"body": bodyB64}},
-	}
-	entryRaw, _ := json.Marshal(entry)
+	entryRaw := buildMockEntryResponse(testUUID, buildMockDSSEBody(invalidCertPEM))
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1351,20 +1300,7 @@ func TestFetchRekorProvenance_NonFulcioCert(t *testing.T) {
 	certPEM := fmt.Sprintf("-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n",
 		base64.StdEncoding.EncodeToString(certDER))
 
-	verifierB64 := base64.StdEncoding.EncodeToString([]byte(certPEM))
-	dsse := map[string]any{
-		"spec": map[string]any{
-			"signatures": []map[string]any{
-				{"verifier": verifierB64},
-			},
-		},
-	}
-	dsseJSON, _ := json.Marshal(dsse)
-	bodyB64 := base64.StdEncoding.EncodeToString(dsseJSON)
-	entry := []map[string]any{
-		{testUUID: map[string]any{"body": bodyB64}},
-	}
-	entryRaw, _ := json.Marshal(entry)
+	entryRaw := buildMockEntryResponse(testUUID, buildMockDSSEBody(certPEM))
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1395,27 +1331,6 @@ func TestFetchRekorProvenance_NonFulcioCert(t *testing.T) {
 	}
 	if prov.HasCert {
 		t.Error("expected HasCert=false for non-Fulcio cert returned as fallback")
-	}
-}
-
-// TestExtractVerifierPEM_DirectPEM covers the direct-PEM fallback path
-// (lines 418-420). When the verifier is a raw PEM string (not base64-encoded),
-// base64 decode fails but pem.Decode succeeds, so the PEM is returned as-is.
-func TestExtractVerifierPEM_DirectPEM(t *testing.T) {
-	// Pass a PEM directly as the verifier value (not base64-encoded).
-	// base64.StdEncoding.DecodeString("-----BEGIN PUBLIC KEY...") will fail
-	// because PEM has non-base64 chars like '-', so the fallback is taken.
-	dsse := fmt.Sprintf(`{"spec":{"signatures":[{"verifier":%q}]}}`, realPublicKeyPEM)
-	result, err := extractVerifierPEM([]byte(dsse))
-	t.Logf("extractVerifierPEM(direct PEM): len=%d err=%v", len(result), err)
-	if err != nil {
-		t.Fatalf("extractVerifierPEM: unexpected error: %v", err)
-	}
-	if len(result) == 0 {
-		t.Error("expected non-empty PEM result")
-	}
-	if !strings.Contains(string(result), "PUBLIC KEY") {
-		t.Errorf("result should contain PUBLIC KEY, got: %q", string(result))
 	}
 }
 
