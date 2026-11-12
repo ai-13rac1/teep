@@ -106,8 +106,8 @@ on `refs/heads/master` for `nearaidev/compose-manager-launcher`.
 `sigstore_verification` looks up each image digest of the measured compose
 in Rekor. Separate factors check the provenance records that were retrieved.
 The [NEAR image provenance gap report](../../attestation_gaps/near_image_provenance.md)
-describes the DeepSeek lookup failure. The separate teep publisher-verification
-defect is tracked in [issue #164](https://github.com/13rac1/teep/issues/164).
+describes the DeepSeek lookup failure. [Supply chain verification](#supply-chain-verification)
+describes how teep checks the signer of a retrieved record.
 
 A container image index lists platform manifests and can also contain build
 attestation manifests. Even a single-platform build can produce an index.
@@ -185,35 +185,24 @@ A verified cache can reduce repeated discovery, but cannot supply evidence
 that was never acquired. A stable parent-index hint can supply candidates
 without being trusted, provided the verifier checks the complete chain.
 
-### Teep publisher-verification defect
+### Publisher verification limits
 
-[Issue #164](https://github.com/13rac1/teep/issues/164) tracks a teep verification
-defect: the Rekor path reads the claimed publisher identity from a certificate
-without validating its chain to Fulcio, and does not independently verify the
-signed statement's subject against the image digest. It affects the older GLM
-captures too and is independent of the DeepSeek compose digest choice.
+For each retrieved record, teep verifies that the signing certificate chains
+to a Fulcio CA in the Sigstore trusted root, with an SCT, at the integrated
+time that the SET authenticates. Only then does it compare the certificate's
+issuer, SAN and source repository with the policy; see
+[Supply chain verification](#supply-chain-verification).
 
-The current NEAR policy sets `NoDSSE: true` for the launcher and
-compose-manager. The captured [Rekor DSSE records](https://github.com/sigstore/rekor/blob/2c0ee5be82d2b88ddf94d456a6d92f35d20fa45f/pkg/types/dsse/README.md)
-contain `spec.signatures`,
-`payloadHash` and `envelopeHash`; they omit the full signed payload.
-Teep's `verifyDSSESignature` expects a complete envelope at
-`spec.content.envelope`, so it cannot verify these signatures through that
-path. `NoDSSE` ignores signature errors generally, including errors caused
-by incomplete records and invalid signatures.
-
-For retrieved records, teep checks Rekor log evidence and expected identity
-metadata extracted from the certificate.
-[Rekor verifies envelope signatures on submission](https://github.com/sigstore/rekor/blob/2c0ee5be82d2b88ddf94d456a6d92f35d20fa45f/pkg/types/dsse/v0.0.1/entry.go#L282-L300),
-but its signed log record is not a substitute for the missing client checks.
-Parent-index discovery alone would retain this defect.
-This can be corrected in teep by retrieving complete signed evidence,
-validating certificate trust and signing-time eligibility, and verifying the
-signature and subject digest. Rekor's record alone omits the payload needed
-for that last step. Removing `NoDSSE` without implementing this pathway would
-block the currently supported records. The code fix belongs to issue #164;
-it is not a provider boot-measurement limitation or a consequence of the
-DeepSeek image-reference change.
+The captured [Rekor DSSE records](https://github.com/sigstore/rekor/blob/2c0ee5be82d2b88ddf94d456a6d92f35d20fa45f/pkg/types/dsse/README.md)
+contain `spec.signatures`, `payloadHash` and `envelopeHash`; they omit the
+signed payload. So teep does not verify the DSSE signature itself, and it does
+not prove that the signed statement names the image digest: that link comes
+from Rekor's search index, which is not signed.
+[Rekor verifies envelope signatures on submission](https://github.com/sigstore/rekor/blob/2c0ee5be82d2b88ddf94d456a6d92f35d20fa45f/pkg/types/dsse/v0.0.1/entry.go#L282-L300).
+Closing this limit needs the complete signed statement from another source,
+such as the GitHub attestations API. Parent-index discovery alone does not
+close it. It is not a provider boot-measurement limitation or a consequence
+of the DeepSeek image-reference change.
 
 ### Temporary default enforcement
 
