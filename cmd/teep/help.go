@@ -94,7 +94,9 @@ var factorRegistry = []factorInfo{
 			"measurement policy allowlists. For TDX: MRSEAM identifies the " +
 			"Intel TDX module version, MRTD is a SHA-384 hash of the initial " +
 			"TD image. For SEV-SNP: the launch measurement. Values are verifiable from " +
-			"releases and dstack build artifacts. Skipped when no " +
+			"releases and dstack build artifacts. Each of MRTD and MRSEAM " +
+			"that has a policy is compared, and the detail names which; a " +
+			"value without a policy is not checked. Skipped when no " +
 			"MRSEAM/MRTD policy is configured.",
 	},
 	{
@@ -510,7 +512,9 @@ var factorRegistry = []factorInfo{
 		Description: "Checks that the gateway TDX MRSEAM and MRTD values match " +
 			"the configured gateway measurement policy allowlists. Verifies " +
 			"the gateway is running the expected Intel TDX module and VM " +
-			"image. Skipped when no gateway MRSEAM/MRTD policy is configured.",
+			"image. Each value that has a gateway policy is compared, and the " +
+			"detail names which; a value without a policy is not checked. " +
+			"Skipped when no gateway MRSEAM/MRTD policy is configured.",
 	},
 	{
 		Name:    attestation.FactorGWHardwareConfig,

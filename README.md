@@ -153,7 +153,7 @@ Is the hardware genuine? These checks verify the TDX quote (or SEV-SNP report) i
 | 4 | `tee_cert_chain` | Certificate chain verifies against Intel or AMD root CA |
 | 5 | `tee_quote_signature` | Quote signature valid under attestation key |
 | 6 | `tee_debug_disabled` | TD_ATTRIBUTES debug bit is 0 (production enclave) |
-| 7 | `tee_measurement` | MRTD and MRSEAM match configured measurement policy allowlists |
+| 7 | `tee_measurement` | Each of MRTD and MRSEAM that has a policy matches its allowlist; the detail names which were compared |
 | 8 | `tee_hardware_config` | RTMR[0] matches hardware config allowlist |
 | 9 | `tee_boot_config` | RTMR[1] and RTMR[2] match boot config allowlists; not applicable to SEV-SNP, whose launch measurement (`tee_measurement`) covers the boot |
 | 10 | `signing_key_present` | Enclave ECDH public key present (API field: `signing_key`) |
@@ -228,7 +228,7 @@ factors state that.
 | 38 | `gateway_tee_cert_chain` | Gateway cert chain verifies against Intel or AMD root CA |
 | 39 | `gateway_tee_quote_signature` | Gateway quote signature valid |
 | 40 | `gateway_tee_debug_disabled` | Gateway debug bit is 0 (production enclave) |
-| 41 | `gateway_tee_measurement` | Gateway measurements match the gateway policy allowlists |
+| 41 | `gateway_tee_measurement` | Each gateway measurement that has a gateway policy matches its allowlist; the detail names which were compared |
 | 42 | `gateway_tee_hardware_config` | Gateway RTMR[0] matches hardware config allowlist |
 | 43 | `gateway_tee_boot_config` | Gateway RTMR[1] and RTMR[2] match boot config allowlists; not applicable to an SEV-SNP gateway, whose launch measurement (`gateway_tee_measurement`) covers the boot |
 | 44 | `gateway_tee_reportdata_binding` | Gateway REPORTDATA binding verified |
